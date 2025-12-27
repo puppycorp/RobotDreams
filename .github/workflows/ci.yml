@@ -12,4 +12,20 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: Cargo test
-        run: cargo test
+        run: |
+          set -o pipefail
+          cargo test | tee cargo-test.log
+      - name: Test summary
+        if: always()
+        run: |
+          if [[ -f cargo-test.log ]]; then
+            {
+              echo "## Cargo test summary"
+              echo ""
+              grep -E "^test result:" cargo-test.log | tail -n 5 | sed 's/^/ - /'
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "## Cargo test summary" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo " - No test output found." >> "$GITHUB_STEP_SUMMARY"
+          fi
