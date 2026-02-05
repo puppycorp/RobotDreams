@@ -5,3 +5,5 @@ edition = "2024"
 
 [dependencies]
 libc = "0.2"
+rapier3d = { version = "0.23", default-features = false, features = ["dim3"] }
+urdf-rs = "0.7"
