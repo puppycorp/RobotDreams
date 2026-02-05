@@ -6,6 +6,28 @@ use crate::servo::protocol::serial_bus::{BusServoProtocol, ProtocolError};
 const REGISTER_COUNT: usize = 256;
 const ERROR_RANGE: u8 = 0x10;
 
+// ST3215 register addresses (little-endian for multi-byte values).
+const REG_ID: usize = 0x05;
+const REG_BAUD: usize = 0x06;
+const REG_MIN_ANGLE: usize = 0x09;
+const REG_MAX_ANGLE: usize = 0x0B;
+const REG_MAX_TORQUE: usize = 0x10;
+const REG_MODE: usize = 0x21;
+const REG_TORQUE_SWITCH: usize = 0x28;
+const REG_ACCEL: usize = 0x29;
+const REG_TARGET_POS: usize = 0x2A;
+const REG_TARGET_SPEED: usize = 0x2E;
+const REG_TORQUE_LIMIT: usize = 0x30;
+const REG_PRESENT_POS: usize = 0x38;
+const REG_PRESENT_SPEED: usize = 0x3A;
+const REG_PRESENT_LOAD: usize = 0x3C;
+const REG_PRESENT_VOLT: usize = 0x3E;
+const REG_PRESENT_TEMP: usize = 0x3F;
+const REG_ASYNC_FLAG: usize = 0x40;
+const REG_SERVO_STATUS: usize = 0x41;
+const REG_MOVING: usize = 0x42;
+const REG_PRESENT_CURRENT: usize = 0x45;
+
 #[derive(Debug, Clone, Copy)]
 pub struct VirtualServo {
     angle_rad: f32,
@@ -67,6 +89,10 @@ impl VirtualServo {
 pub struct FeetechServo {
     registers: [u8; REGISTER_COUNT],
     pending_writes: Vec<(u8, Vec<u8>)>,
+    position_steps: f32,
+    velocity_steps_s: f32,
+    last_velocity_steps_s: f32,
+    temperature_c: f32,
 }
 
 impl FeetechServo {
@@ -74,7 +100,34 @@ impl FeetechServo {
         Self {
             registers: [0u8; REGISTER_COUNT],
             pending_writes: Vec::new(),
+            position_steps: 0.0,
+            velocity_steps_s: 0.0,
+            last_velocity_steps_s: 0.0,
+            temperature_c: 30.0,
         }
+    }
+
+    fn init_defaults(&mut self, id: u8) {
+        self.registers[REG_ID] = id;
+        self.registers[REG_BAUD] = 0; // 1,000,000 by default
+        write_u16_le(&mut self.registers, REG_MIN_ANGLE, 0);
+        write_u16_le(&mut self.registers, REG_MAX_ANGLE, 4095);
+        write_u16_le(&mut self.registers, REG_MAX_TORQUE, 1000);
+        self.registers[REG_MODE] = 0; // position mode
+        self.registers[REG_TORQUE_SWITCH] = 1; // enabled by default for simulation
+        self.registers[REG_ACCEL] = 0;
+        write_u16_le(&mut self.registers, REG_TARGET_POS, 0);
+        write_u16_le(&mut self.registers, REG_TARGET_SPEED, 0);
+        write_u16_le(&mut self.registers, REG_TORQUE_LIMIT, 1000);
+        write_u16_le(&mut self.registers, REG_PRESENT_POS, 0);
+        write_u16_le(&mut self.registers, REG_PRESENT_SPEED, 0);
+        write_u16_le(&mut self.registers, REG_PRESENT_LOAD, 0);
+        self.registers[REG_PRESENT_VOLT] = 74; // 7.4V -> 0.1V units
+        self.registers[REG_PRESENT_TEMP] = 30;
+        self.registers[REG_ASYNC_FLAG] = 0;
+        self.registers[REG_SERVO_STATUS] = 0;
+        self.registers[REG_MOVING] = 0;
+        write_u16_le(&mut self.registers, REG_PRESENT_CURRENT, 0);
     }
 
     fn read(&self, address: u8, length: u8) -> Result<Vec<u8>, ()> {
@@ -106,6 +159,94 @@ impl FeetechServo {
             let _ = self.write(address, &data);
         }
     }
+
+    fn update_sim(&mut self, dt: f32) {
+        if dt <= 0.0 {
+            return;
+        }
+
+        let torque_enabled = self.registers[REG_TORQUE_SWITCH] != 0;
+        if !torque_enabled {
+            self.velocity_steps_s = 0.0;
+            self.registers[REG_MOVING] = 0;
+            write_u16_le(&mut self.registers, REG_PRESENT_SPEED, 0);
+            write_u16_le(&mut self.registers, REG_PRESENT_LOAD, 0);
+            write_u16_le(&mut self.registers, REG_PRESENT_CURRENT, 0);
+            self.temperature_c = cool_temperature(self.temperature_c, dt);
+            self.registers[REG_PRESENT_TEMP] = self.temperature_c.round().clamp(0.0, 255.0) as u8;
+            return;
+        }
+
+        let mode = self.registers[REG_MODE];
+        if mode != 0 {
+            // Only position mode is simulated for now.
+            return;
+        }
+
+        let target = read_i16_le(&self.registers, REG_TARGET_POS) as f32;
+        let mut min_angle = read_i16_le(&self.registers, REG_MIN_ANGLE) as f32;
+        let mut max_angle = read_i16_le(&self.registers, REG_MAX_ANGLE) as f32;
+        if min_angle == 0.0 && max_angle == 0.0 {
+            min_angle = 0.0;
+            max_angle = 4095.0;
+        }
+        let target = target.clamp(min_angle, max_angle);
+
+        let max_speed = read_u16_le(&self.registers, REG_TARGET_SPEED) as f32;
+        let max_speed = if max_speed <= 0.0 { 1000.0 } else { max_speed };
+        let accel = self.registers[REG_ACCEL] as f32 * 100.0;
+        let accel = if accel <= 0.0 { 1000.0 } else { accel };
+
+        let delta = target - self.position_steps;
+        if delta.abs() < 0.5 && self.velocity_steps_s.abs() < 0.5 {
+            self.position_steps = target;
+            self.velocity_steps_s = 0.0;
+        } else {
+            let desired_vel = delta.signum() * max_speed;
+            let dv = (desired_vel - self.velocity_steps_s).clamp(-accel * dt, accel * dt);
+            self.velocity_steps_s += dv;
+            let prev_pos = self.position_steps;
+            self.position_steps += self.velocity_steps_s * dt;
+            if (target - prev_pos).signum() != (target - self.position_steps).signum() {
+                self.position_steps = target;
+                self.velocity_steps_s = 0.0;
+            }
+        }
+
+        let accel_steps_s2 = (self.velocity_steps_s - self.last_velocity_steps_s) / dt;
+        self.last_velocity_steps_s = self.velocity_steps_s;
+        let position_error = (target - self.position_steps).abs();
+
+        let torque_demand = (position_error * 0.05) + accel_steps_s2.abs() * 0.002;
+        let current_raw = (torque_demand * 300.0).clamp(0.0, 1000.0);
+        let load_raw = (torque_demand * 400.0).clamp(0.0, 1000.0);
+
+        write_u16_le(
+            &mut self.registers,
+            REG_PRESENT_CURRENT,
+            current_raw.round() as u16,
+        );
+        write_u16_le(
+            &mut self.registers,
+            REG_PRESENT_LOAD,
+            encode_signed_speed(if self.velocity_steps_s < 0.0 { -load_raw } else { load_raw }),
+        );
+
+        self.temperature_c = heat_temperature(self.temperature_c, current_raw, dt);
+        self.registers[REG_PRESENT_TEMP] = self.temperature_c.round().clamp(0.0, 255.0) as u8;
+
+        write_u16_le(
+            &mut self.registers,
+            REG_PRESENT_POS,
+            self.position_steps.round().clamp(-32767.0, 32767.0) as i16 as u16,
+        );
+        write_u16_le(
+            &mut self.registers,
+            REG_PRESENT_SPEED,
+            encode_signed_speed(self.velocity_steps_s),
+        );
+        self.registers[REG_MOVING] = if self.velocity_steps_s.abs() > 0.5 { 1 } else { 0 };
+    }
 }
 
 #[derive(Debug, Default)]
@@ -123,7 +264,17 @@ impl FeetechBusSim {
     }
 
     pub fn add_servo(&mut self, id: u8) {
-        self.servos.entry(id).or_insert_with(FeetechServo::new);
+        self.servos.entry(id).or_insert_with(|| {
+            let mut servo = FeetechServo::new();
+            servo.init_defaults(id);
+            servo
+        });
+    }
+
+    pub fn step(&mut self, dt: f32) {
+        for servo in self.servos.values_mut() {
+            servo.update_sim(dt);
+        }
     }
 
     pub fn handle_frame(&mut self, frame: &[u8]) -> Result<Option<Vec<u8>>, ProtocolError> {
@@ -240,6 +391,51 @@ impl FeetechBusSim {
             },
         }
     }
+}
+
+fn read_u16_le(registers: &[u8; REGISTER_COUNT], address: usize) -> u16 {
+    let lo = registers[address] as u16;
+    let hi = registers[address + 1] as u16;
+    lo | (hi << 8)
+}
+
+fn read_i16_le(registers: &[u8; REGISTER_COUNT], address: usize) -> i16 {
+    let raw = read_u16_le(registers, address);
+    if (raw & 0x8000) != 0 {
+        -((raw & 0x7FFF) as i16)
+    } else {
+        raw as i16
+    }
+}
+
+fn write_u16_le(registers: &mut [u8; REGISTER_COUNT], address: usize, value: u16) {
+    registers[address] = (value & 0xFF) as u8;
+    registers[address + 1] = (value >> 8) as u8;
+}
+
+fn encode_signed_speed(speed: f32) -> u16 {
+    if speed < 0.0 {
+        let mag = (-speed).round().clamp(0.0, 32767.0) as u16;
+        mag | 0x8000
+    } else {
+        speed.round().clamp(0.0, 32767.0) as u16
+    }
+}
+
+fn heat_temperature(temp_c: f32, current_raw: f32, dt: f32) -> f32 {
+    let ambient = 30.0;
+    let heat_rate = 0.08;
+    let cool_rate = 0.04;
+    let current_norm = (current_raw / 1000.0).clamp(0.0, 1.0);
+    let dtemp = (heat_rate * current_norm - cool_rate * (temp_c - ambient)) * dt * 60.0;
+    (temp_c + dtemp).clamp(ambient, 100.0)
+}
+
+fn cool_temperature(temp_c: f32, dt: f32) -> f32 {
+    let ambient = 30.0;
+    let cool_rate = 0.06;
+    let dtemp = -cool_rate * (temp_c - ambient) * dt * 60.0;
+    (temp_c + dtemp).clamp(ambient, 100.0)
 }
 
 #[cfg(test)]
