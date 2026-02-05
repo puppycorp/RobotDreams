@@ -6,6 +6,63 @@ use crate::servo::protocol::serial_bus::{BusServoProtocol, ProtocolError};
 const REGISTER_COUNT: usize = 256;
 const ERROR_RANGE: u8 = 0x10;
 
+#[derive(Debug, Clone, Copy)]
+pub struct VirtualServo {
+    angle_rad: f32,
+    angular_velocity: f32,
+    inertia: f32,
+    damping: f32,
+    pending_torque: f32,
+}
+
+impl VirtualServo {
+    pub fn new(inertia: f32) -> Self {
+        let inertia = if inertia > 0.0 { inertia } else { 1.0 };
+        Self {
+            angle_rad: 0.0,
+            angular_velocity: 0.0,
+            inertia,
+            damping: 0.0,
+            pending_torque: 0.0,
+        }
+    }
+
+    pub fn set_damping(&mut self, damping: f32) {
+        self.damping = if damping < 0.0 { 0.0 } else { damping };
+    }
+
+    pub fn angle_rad(&self) -> f32 {
+        self.angle_rad
+    }
+
+    pub fn angular_velocity(&self) -> f32 {
+        self.angular_velocity
+    }
+
+    pub fn apply_rotational_force(&mut self, torque: f32) {
+        self.pending_torque += torque;
+    }
+
+    pub fn counteract_physics_force(&mut self, physics_torque: f32) {
+        self.pending_torque -= physics_torque;
+    }
+
+    pub fn step(&mut self, dt: f32) {
+        if dt <= 0.0 {
+            self.pending_torque = 0.0;
+            return;
+        }
+        let accel = self.pending_torque / self.inertia;
+        self.angular_velocity += accel * dt;
+        if self.damping > 0.0 {
+            let decay = (1.0 - self.damping * dt).clamp(0.0, 1.0);
+            self.angular_velocity *= decay;
+        }
+        self.angle_rad += self.angular_velocity * dt;
+        self.pending_torque = 0.0;
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct FeetechServo {
     registers: [u8; REGISTER_COUNT],
@@ -227,5 +284,15 @@ mod tests {
                 assert_eq!(params, vec![0x12, 0x34]);
             }
         }
+    }
+
+    #[test]
+    fn virtual_servo_counteracts_torque() {
+        let mut servo = VirtualServo::new(1.0);
+        servo.apply_rotational_force(2.0);
+        servo.counteract_physics_force(2.0);
+        servo.step(0.1);
+        assert!(servo.angular_velocity().abs() < 1e-6);
+        assert!(servo.angle_rad().abs() < 1e-6);
     }
 }
