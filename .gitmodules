@@ -1,0 +1,3 @@
+[submodule "wgui"]
+	path = wgui
+	url = https://github.com/J45k4/wgui.git

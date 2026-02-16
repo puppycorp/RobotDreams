@@ -4,7 +4,6 @@ use std::path::Path;
 use crate::physics::PhysicsWorld;
 use crate::urdf::{load_urdf, UrdfModel};
 
-#[derive(Debug)]
 pub struct RobotDreams {
     physics: PhysicsWorld,
     models: Vec<UrdfModel>,

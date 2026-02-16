@@ -95,6 +95,20 @@ pub struct FeetechServo {
     temperature_c: f32,
 }
 
+#[derive(Debug, Clone)]
+pub struct FeetechServoSnapshot {
+    pub id: u8,
+    pub mode: u8,
+    pub torque_enabled: bool,
+    pub target_position: i16,
+    pub present_position: i16,
+    pub present_speed: i16,
+    pub present_load: i16,
+    pub moving: bool,
+    pub temperature_c: u8,
+    pub current_raw: u16,
+}
+
 impl FeetechServo {
     pub fn new() -> Self {
         Self {
@@ -271,6 +285,47 @@ impl FeetechBusSim {
         });
     }
 
+    pub fn remove_servo(&mut self, id: u8) -> bool {
+        self.servos.remove(&id).is_some()
+    }
+
+    pub fn set_servo_count(&mut self, count: u8) {
+        let count = count.clamp(1, 32);
+        self.servos.retain(|id, _| *id <= count);
+        for id in 1..=count {
+            self.add_servo(id);
+        }
+    }
+
+    pub fn set_target_position(&mut self, id: u8, target: i16) -> bool {
+        let Some(servo) = self.servos.get_mut(&id) else {
+            return false;
+        };
+        write_u16_le(&mut servo.registers, REG_TARGET_POS, target as u16);
+        true
+    }
+
+    pub fn servo_snapshots(&self) -> Vec<FeetechServoSnapshot> {
+        let mut ids: Vec<u8> = self.servos.keys().copied().collect();
+        ids.sort_unstable();
+        ids.into_iter()
+            .filter_map(|id| {
+                self.servos.get(&id).map(|servo| FeetechServoSnapshot {
+                    id,
+                    mode: servo.registers[REG_MODE],
+                    torque_enabled: servo.registers[REG_TORQUE_SWITCH] != 0,
+                    target_position: read_i16_le(&servo.registers, REG_TARGET_POS),
+                    present_position: read_i16_le(&servo.registers, REG_PRESENT_POS),
+                    present_speed: decode_signed_speed(read_u16_le(&servo.registers, REG_PRESENT_SPEED)),
+                    present_load: decode_signed_speed(read_u16_le(&servo.registers, REG_PRESENT_LOAD)),
+                    moving: servo.registers[REG_MOVING] != 0,
+                    temperature_c: servo.registers[REG_PRESENT_TEMP],
+                    current_raw: read_u16_le(&servo.registers, REG_PRESENT_CURRENT),
+                })
+            })
+            .collect()
+    }
+
     pub fn step(&mut self, dt: f32) {
         for servo in self.servos.values_mut() {
             servo.update_sim(dt);
@@ -419,6 +474,15 @@ fn encode_signed_speed(speed: f32) -> u16 {
         mag | 0x8000
     } else {
         speed.round().clamp(0.0, 32767.0) as u16
+    }
+}
+
+fn decode_signed_speed(raw: u16) -> i16 {
+    let mag = (raw & 0x7FFF) as i16;
+    if (raw & 0x8000) != 0 {
+        -mag
+    } else {
+        mag
     }
 }
 

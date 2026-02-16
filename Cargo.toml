@@ -5,5 +5,9 @@ edition = "2024"
 
 [dependencies]
 libc = "0.2"
-rapier3d = { version = "0.23", default-features = false, features = ["dim3"] }
+rapier3d = { version = "0.23", default-features = false, features = ["dim3", "f32"] }
 urdf-rs = "0.7"
+log = "0.4"
+simple_logger = "5"
+tokio = { version = "1", features = ["full"] }
+wgui = { path = "wgui/wgui" }

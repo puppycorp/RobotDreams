@@ -1,12 +1,11 @@
 use rapier3d::prelude::*;
 
-#[derive(Debug)]
 pub struct PhysicsWorld {
     gravity: Vector<Real>,
     integration_parameters: IntegrationParameters,
     pipeline: PhysicsPipeline,
     island_manager: IslandManager,
-    broad_phase: BroadPhase,
+    broad_phase: DefaultBroadPhase,
     narrow_phase: NarrowPhase,
     bodies: RigidBodySet,
     colliders: ColliderSet,
@@ -23,7 +22,7 @@ impl PhysicsWorld {
             integration_parameters: IntegrationParameters::default(),
             pipeline: PhysicsPipeline::new(),
             island_manager: IslandManager::new(),
-            broad_phase: BroadPhase::new(),
+            broad_phase: DefaultBroadPhase::new(),
             narrow_phase: NarrowPhase::new(),
             bodies: RigidBodySet::new(),
             colliders: ColliderSet::new(),

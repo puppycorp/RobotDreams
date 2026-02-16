@@ -19,6 +19,6 @@ impl UrdfModel {
 }
 
 pub fn load_urdf(path: impl AsRef<Path>) -> Result<UrdfModel, Box<dyn Error>> {
-    let robot = urdf_rs::read_from_file(path)?;
+    let robot = urdf_rs::read_file(path)?;
     Ok(UrdfModel { robot })
 }
