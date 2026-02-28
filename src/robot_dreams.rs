@@ -77,9 +77,9 @@ pub fn run_virtual_servo_sim(config: VirtualServoSimConfig) -> std::io::Result<(
     use std::thread;
     use std::time::Duration;
 
-    use crate::servo::protocol::port_handler::PortHandler;
-    use crate::servo::protocol::virtual_uart::VirtualUartPort;
-    use crate::servo::sim::FeetechBusSim;
+    use robot_utils::servo::protocol::port_handler::PortHandler;
+    use robot_utils::servo::protocol::virtual_uart::VirtualUartPort;
+    use robot_utils::servo::sim::FeetechBusSim;
 
     if config.first_servo_id > config.last_servo_id {
         return Err(std::io::Error::new(
@@ -116,9 +116,9 @@ pub fn run_virtual_servo_sim(config: VirtualServoSimConfig) -> std::io::Result<(
     let mut last_step = std::time::Instant::now();
 
     loop {
-        let available = port.get_bytes_available();
-        if available > 0 {
-            let mut data = port.read_port(available);
+        let mut data = port.read_port(512);
+        let has_io = !data.is_empty();
+        if has_io {
             buffer.append(&mut data);
         }
 
@@ -140,7 +140,7 @@ pub fn run_virtual_servo_sim(config: VirtualServoSimConfig) -> std::io::Result<(
             last_step = now;
         }
 
-        if available == 0 {
+        if !has_io {
             thread::sleep(Duration::from_millis(config.idle_sleep_ms));
         }
     }

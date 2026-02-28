@@ -6,9 +6,11 @@ version = 4
 name = "RobotDreams"
 version = "0.1.0"
 dependencies = [
+ "clap",
  "libc",
  "log",
  "rapier3d",
+ "robot_utils",
  "serialport",
  "simple_logger",
  "tokio",
@@ -1180,6 +1182,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "puppyarm"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "libc",
+ "log",
+ "robot_utils",
+ "serialport",
+ "simple_logger",
+ "tokio",
+ "wgui",
+]
+
+[[package]]
 name = "quote"
 version = "1.0.44"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1285,6 +1301,14 @@ name = "regex-syntax"
 version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a96887878f22d7bad8a3b6dc5b7440e0ada9a245242924394987b21cf2210a4c"
+
+[[package]]
+name = "robot_utils"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "serialport",
+]
 
 [[package]]
 name = "robust"
