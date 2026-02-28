@@ -3,9 +3,9 @@ use crate::servo::protocol::group_sync_write::GroupSyncWrite;
 use crate::servo::protocol::port_handler::SimPort;
 use crate::servo::protocol::protocol_packet_handler::ProtocolPacketHandler;
 use crate::servo::protocol::stservo_def::COMM_SUCCESS;
-use crate::servo::scscl::{Scscl, SCSCL_GOAL_POSITION_L};
+use crate::servo::scscl::{SCSCL_GOAL_POSITION_L, Scscl};
 use crate::servo::sim::FeetechBusSim;
-use crate::servo::sts::{Sts, STS_ACC, STS_PRESENT_POSITION_L};
+use crate::servo::sts::{STS_ACC, STS_PRESENT_POSITION_L, Sts};
 
 #[test]
 fn write_read_roundtrip() {
@@ -69,12 +69,18 @@ fn sync_read_group_parses_frames() {
     let (available, error) = group.is_available(1, 0x30, 2);
     assert!(available);
     assert_eq!(error, 0);
-    assert_eq!(group.get_data(1, 0x30, 2, handler.scs_getend()) as u16, 0x2010);
+    assert_eq!(
+        group.get_data(1, 0x30, 2, handler.scs_getend()) as u16,
+        0x2010
+    );
 
     let (available, error) = group.is_available(2, 0x30, 2);
     assert!(available);
     assert_eq!(error, 0);
-    assert_eq!(group.get_data(2, 0x30, 2, handler.scs_getend()) as u16, 0x4030);
+    assert_eq!(
+        group.get_data(2, 0x30, 2, handler.scs_getend()) as u16,
+        0x4030
+    );
 }
 
 #[test]
@@ -115,7 +121,9 @@ fn sts_helper_writes_expected_registers() {
     let (data, _, _) = sts.handler.read_tx_rx(1, STS_ACC, 7);
     assert_eq!(data, vec![0x01, 0x34, 0x12, 0x00, 0x00, 0x78, 0x56]);
 
-    let _ = sts.handler.write_tx_rx(1, STS_PRESENT_POSITION_L, 2, &[0x78, 0x56]);
+    let _ = sts
+        .handler
+        .write_tx_rx(1, STS_PRESENT_POSITION_L, 2, &[0x78, 0x56]);
     let (pos, _, _) = sts.read_pos(1);
     assert_eq!(pos, 0x5678);
 }

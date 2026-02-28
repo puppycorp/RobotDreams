@@ -130,18 +130,15 @@ impl PortHandler for VirtualUartPort {
                 packet.as_ptr() as *const libc::c_void,
                 packet.len(),
             );
-            if written < 0 {
-                0
-            } else {
-                written as usize
-            }
+            if written < 0 { 0 } else { written as usize }
         }
     }
 
     fn set_packet_timeout(&mut self, packet_length: usize) {
         self.packet_start_time = Instant::now();
-        self.packet_timeout_ms =
-            (self.tx_time_per_byte_ms * packet_length as f64) + (self.tx_time_per_byte_ms * 3.0) + 50.0;
+        self.packet_timeout_ms = (self.tx_time_per_byte_ms * packet_length as f64)
+            + (self.tx_time_per_byte_ms * 3.0)
+            + 50.0;
     }
 
     fn set_packet_timeout_millis(&mut self, msec: u64) {

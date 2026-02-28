@@ -3,7 +3,16 @@ name = "RobotDreams"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "robot_dreams"
+path = "src/main.rs"
+
 [dependencies]
 libc = "0.2"
-rapier3d = { version = "0.23", default-features = false, features = ["dim3"] }
+log = "0.4"
+rapier3d = { version = "0.23", default-features = false, features = ["dim3", "f32"] }
+serialport = "4"
+simple_logger = "5"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 urdf-rs = "0.7"
+wgui = { git = "https://github.com/J45k4/wgui.git", rev = "ff79ee750803f78efe9b1922482563b76103a0a5" }

@@ -28,6 +28,27 @@ const REG_SERVO_STATUS: usize = 0x41;
 const REG_MOVING: usize = 0x42;
 const REG_PRESENT_CURRENT: usize = 0x45;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FeetechServoSnapshot {
+    pub id: u8,
+    pub mode: u8,
+    pub torque_enabled: bool,
+    pub moving: bool,
+    pub target_position: i16,
+    pub present_position: i16,
+    pub present_speed: i16,
+    pub present_load: i16,
+    pub current_raw: u16,
+    pub temperature_c: u8,
+    pub voltage_tenths: u8,
+    // Backward-compatible aliases for older call sites.
+    pub present_current: u16,
+    pub present_temperature_c: u8,
+    pub present_voltage_tenths: u8,
+}
+
+pub type FeetechServoState = FeetechServoSnapshot;
+
 #[derive(Debug, Clone, Copy)]
 pub struct VirtualServo {
     angle_rad: f32,
@@ -229,7 +250,11 @@ impl FeetechServo {
         write_u16_le(
             &mut self.registers,
             REG_PRESENT_LOAD,
-            encode_signed_speed(if self.velocity_steps_s < 0.0 { -load_raw } else { load_raw }),
+            encode_signed_speed(if self.velocity_steps_s < 0.0 {
+                -load_raw
+            } else {
+                load_raw
+            }),
         );
 
         self.temperature_c = heat_temperature(self.temperature_c, current_raw, dt);
@@ -245,7 +270,34 @@ impl FeetechServo {
             REG_PRESENT_SPEED,
             encode_signed_speed(self.velocity_steps_s),
         );
-        self.registers[REG_MOVING] = if self.velocity_steps_s.abs() > 0.5 { 1 } else { 0 };
+        self.registers[REG_MOVING] = if self.velocity_steps_s.abs() > 0.5 {
+            1
+        } else {
+            0
+        };
+    }
+
+    fn snapshot(&self, id: u8) -> FeetechServoSnapshot {
+        let current_raw = read_u16_le(&self.registers, REG_PRESENT_CURRENT);
+        let temperature_c = self.registers[REG_PRESENT_TEMP];
+        let voltage_tenths = self.registers[REG_PRESENT_VOLT];
+
+        FeetechServoSnapshot {
+            id,
+            mode: self.registers[REG_MODE],
+            torque_enabled: self.registers[REG_TORQUE_SWITCH] != 0,
+            moving: self.registers[REG_MOVING] != 0,
+            target_position: read_i16_le(&self.registers, REG_TARGET_POS),
+            present_position: read_i16_le(&self.registers, REG_PRESENT_POS),
+            present_speed: decode_signed_15bit(read_u16_le(&self.registers, REG_PRESENT_SPEED)),
+            present_load: decode_signed_15bit(read_u16_le(&self.registers, REG_PRESENT_LOAD)),
+            current_raw,
+            temperature_c,
+            voltage_tenths,
+            present_current: current_raw,
+            present_temperature_c: temperature_c,
+            present_voltage_tenths: voltage_tenths,
+        }
     }
 }
 
@@ -271,17 +323,56 @@ impl FeetechBusSim {
         });
     }
 
+    pub fn set_servo_count(&mut self, count: u8) {
+        if count == 0 {
+            self.servos.clear();
+            return;
+        }
+
+        self.servos.retain(|id, _| *id >= 1 && *id <= count);
+        for id in 1..=count {
+            self.add_servo(id);
+        }
+    }
+
+    pub fn set_target_position(&mut self, id: u8, target: i16) -> bool {
+        let Some(servo) = self.servos.get_mut(&id) else {
+            return false;
+        };
+        let target = target.clamp(0, 4095) as u16;
+        write_u16_le(&mut servo.registers, REG_TARGET_POS, target);
+        true
+    }
+
     pub fn step(&mut self, dt: f32) {
         for servo in self.servos.values_mut() {
             servo.update_sim(dt);
         }
     }
 
+    pub fn servo_snapshots(&self) -> Vec<FeetechServoSnapshot> {
+        let mut states = self
+            .servos
+            .iter()
+            .map(|(&id, servo)| servo.snapshot(id))
+            .collect::<Vec<_>>();
+        states.sort_by_key(|state| state.id);
+        states
+    }
+
+    pub fn servo_states(&self) -> Vec<FeetechServoState> {
+        self.servo_snapshots()
+    }
+
     pub fn handle_frame(&mut self, frame: &[u8]) -> Result<Option<Vec<u8>>, ProtocolError> {
         let decoded = self.protocol.decode(frame)?;
 
         match &decoded.instruction {
-            Instruction::SyncRead { address, length, ids } => {
+            Instruction::SyncRead {
+                address,
+                length,
+                ids,
+            } => {
                 if !self.protocol.is_broadcast(decoded.id) {
                     return Ok(None);
                 }
@@ -339,7 +430,11 @@ impl FeetechBusSim {
         Ok(response.map(|resp| self.protocol.encode_response(resp)))
     }
 
-    fn apply_instruction(id: u8, servo: &mut FeetechServo, instruction: &Instruction) -> Option<Response> {
+    fn apply_instruction(
+        id: u8,
+        servo: &mut FeetechServo,
+        instruction: &Instruction,
+    ) -> Option<Response> {
         match instruction {
             Instruction::Ping => Some(Response::Status {
                 id,
@@ -422,6 +517,14 @@ fn encode_signed_speed(speed: f32) -> u16 {
     }
 }
 
+fn decode_signed_15bit(value: u16) -> i16 {
+    if (value & 0x8000) != 0 {
+        -((value & 0x7FFF) as i16)
+    } else {
+        (value & 0x7FFF) as i16
+    }
+}
+
 fn heat_temperature(temp_c: f32, current_raw: f32, dt: f32) -> f32 {
     let ambient = 30.0;
     let heat_rate = 0.08;
@@ -448,22 +551,24 @@ mod tests {
         let mut sim = FeetechBusSim::new();
         sim.add_servo(1);
 
-        let write_frame = sim
-            .protocol
-            .encode_instruction(1, Instruction::Write {
+        let write_frame = sim.protocol.encode_instruction(
+            1,
+            Instruction::Write {
                 address: 0x10,
                 data: vec![0x12, 0x34],
-            });
+            },
+        );
 
         let response = sim.handle_frame(&write_frame).expect("write");
         assert!(response.is_some());
 
-        let read_frame = sim
-            .protocol
-            .encode_instruction(1, Instruction::Read {
+        let read_frame = sim.protocol.encode_instruction(
+            1,
+            Instruction::Read {
                 address: 0x10,
                 length: 2,
-            });
+            },
+        );
 
         let response = sim.handle_frame(&read_frame).expect("read");
         let response = response.expect("read response");
@@ -490,5 +595,29 @@ mod tests {
         servo.step(0.1);
         assert!(servo.angular_velocity().abs() < 1e-6);
         assert!(servo.angle_rad().abs() < 1e-6);
+    }
+
+    #[test]
+    fn servo_states_are_sorted_and_initialized() {
+        let mut sim = FeetechBusSim::new();
+        sim.add_servo(3);
+        sim.add_servo(1);
+
+        let states = sim.servo_states();
+        assert_eq!(states.len(), 2);
+        assert_eq!(states[0].id, 1);
+        assert_eq!(states[1].id, 3);
+
+        for state in states {
+            assert!(state.torque_enabled);
+            assert!(!state.moving);
+            assert_eq!(state.target_position, 0);
+            assert_eq!(state.present_position, 0);
+            assert_eq!(state.present_speed, 0);
+            assert_eq!(state.present_load, 0);
+            assert_eq!(state.present_current, 0);
+            assert_eq!(state.present_voltage_tenths, 74);
+            assert_eq!(state.present_temperature_c, 30);
+        }
     }
 }

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
-use crate::servo::protocol::protocol_packet_handler::ProtocolPacketHandler;
 use crate::servo::protocol::port_handler::PortHandler;
+use crate::servo::protocol::protocol_packet_handler::ProtocolPacketHandler;
 use crate::servo::protocol::stservo_def::{COMM_NOT_AVAILABLE, COMM_RX_CORRUPT, COMM_SUCCESS};
 
 #[derive(Debug)]
@@ -61,10 +61,7 @@ impl GroupSyncRead {
         self.param.clear();
     }
 
-    pub fn tx_packet<P: PortHandler>(
-        &mut self,
-        handler: &mut ProtocolPacketHandler<P>,
-    ) -> i32 {
+    pub fn tx_packet<P: PortHandler>(&mut self, handler: &mut ProtocolPacketHandler<P>) -> i32 {
         if self.data_dict.is_empty() {
             return COMM_NOT_AVAILABLE;
         }
@@ -73,13 +70,15 @@ impl GroupSyncRead {
             self.make_param();
         }
 
-        handler.sync_read_tx(self.start_address, self.data_length, &self.param, self.order.len())
+        handler.sync_read_tx(
+            self.start_address,
+            self.data_length,
+            &self.param,
+            self.order.len(),
+        )
     }
 
-    pub fn rx_packet<P: PortHandler>(
-        &mut self,
-        handler: &mut ProtocolPacketHandler<P>,
-    ) -> i32 {
+    pub fn rx_packet<P: PortHandler>(&mut self, handler: &mut ProtocolPacketHandler<P>) -> i32 {
         self.last_result = true;
         if self.data_dict.is_empty() {
             return COMM_NOT_AVAILABLE;
@@ -88,7 +87,8 @@ impl GroupSyncRead {
         let (result, rxpacket) = handler.sync_read_rx(self.data_length, self.order.len());
         if rxpacket.len() >= (self.data_length as usize + 6) {
             for sts_id in self.order.iter().copied() {
-                let (data, read_result) = self.read_rx(&rxpacket, sts_id, self.data_length as usize);
+                let (data, read_result) =
+                    self.read_rx(&rxpacket, sts_id, self.data_length as usize);
                 if read_result != COMM_SUCCESS {
                     self.last_result = false;
                 }
@@ -101,10 +101,7 @@ impl GroupSyncRead {
         result
     }
 
-    pub fn tx_rx_packet<P: PortHandler>(
-        &mut self,
-        handler: &mut ProtocolPacketHandler<P>,
-    ) -> i32 {
+    pub fn tx_rx_packet<P: PortHandler>(&mut self, handler: &mut ProtocolPacketHandler<P>) -> i32 {
         let result = self.tx_packet(handler);
         if result != COMM_SUCCESS {
             return result;
@@ -138,7 +135,9 @@ impl GroupSyncRead {
             rx_index += 1;
             let error = rxpacket[rx_index];
             rx_index += 1;
-            let mut checksum: u8 = sts_id.wrapping_add(data_length as u8 + 2).wrapping_add(error);
+            let mut checksum: u8 = sts_id
+                .wrapping_add(data_length as u8 + 2)
+                .wrapping_add(error);
             let mut data = vec![error];
             data.extend_from_slice(&rxpacket[rx_index..rx_index + data_length]);
             for _ in 0..data_length {
@@ -190,9 +189,19 @@ impl GroupSyncRead {
             }
             4 => {
                 let (l0, l1, h0, h1) = if scs_end == 0 {
-                    (data[offset], data[offset + 1], data[offset + 2], data[offset + 3])
+                    (
+                        data[offset],
+                        data[offset + 1],
+                        data[offset + 2],
+                        data[offset + 3],
+                    )
                 } else {
-                    (data[offset + 1], data[offset], data[offset + 3], data[offset + 2])
+                    (
+                        data[offset + 1],
+                        data[offset],
+                        data[offset + 3],
+                        data[offset + 2],
+                    )
                 };
                 let low = (l0 as u32) | ((l1 as u32) << 8);
                 let high = (h0 as u32) | ((h1 as u32) << 8);

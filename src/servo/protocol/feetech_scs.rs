@@ -12,12 +12,29 @@ const INSTRUCTION_SYNC_WRITE: u8 = 0x83;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Instruction {
     Ping,
-    Read { address: u8, length: u8 },
-    Write { address: u8, data: Vec<u8> },
-    RegWrite { address: u8, data: Vec<u8> },
+    Read {
+        address: u8,
+        length: u8,
+    },
+    Write {
+        address: u8,
+        data: Vec<u8>,
+    },
+    RegWrite {
+        address: u8,
+        data: Vec<u8>,
+    },
     Action,
-    SyncRead { address: u8, length: u8, ids: Vec<u8> },
-    SyncWrite { address: u8, length: u8, writes: Vec<(u8, Vec<u8>)> },
+    SyncRead {
+        address: u8,
+        length: u8,
+        ids: Vec<u8>,
+    },
+    SyncWrite {
+        address: u8,
+        length: u8,
+        writes: Vec<(u8, Vec<u8>)>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,9 +49,7 @@ impl FeetechScs {
     pub fn encode_instruction(&self, id: u8, instruction: Instruction) -> Vec<u8> {
         let (instruction_byte, params) = match instruction {
             Instruction::Ping => (INSTRUCTION_PING, Vec::new()),
-            Instruction::Read { address, length } => {
-                (INSTRUCTION_READ, vec![address, length])
-            }
+            Instruction::Read { address, length } => (INSTRUCTION_READ, vec![address, length]),
             Instruction::Write { address, data } => {
                 let mut params = Vec::with_capacity(1 + data.len());
                 params.push(address);
@@ -48,14 +63,22 @@ impl FeetechScs {
                 (INSTRUCTION_REG_WRITE, params)
             }
             Instruction::Action => (INSTRUCTION_ACTION, Vec::new()),
-            Instruction::SyncRead { address, length, ids } => {
+            Instruction::SyncRead {
+                address,
+                length,
+                ids,
+            } => {
                 let mut params = Vec::with_capacity(2 + ids.len());
                 params.push(address);
                 params.push(length);
                 params.extend_from_slice(&ids);
                 (INSTRUCTION_SYNC_READ, params)
             }
-            Instruction::SyncWrite { address, length, writes } => {
+            Instruction::SyncWrite {
+                address,
+                length,
+                writes,
+            } => {
                 let mut params = Vec::new();
                 params.push(address);
                 params.push(length);

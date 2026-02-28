@@ -1,5 +1,5 @@
-use crate::servo::protocol::stservo_def::*;
 use crate::servo::protocol::port_handler::PortHandler;
+use crate::servo::protocol::stservo_def::*;
 
 #[derive(Debug)]
 pub struct ProtocolPacketHandler<P: PortHandler> {
@@ -184,7 +184,11 @@ impl<P: PortHandler> ProtocolPacketHandler<P> {
 
                 let Some(idx) = header_index else {
                     if self.port.is_packet_timeout() {
-                        result = if rx_length == 0 { COMM_RX_TIMEOUT } else { COMM_RX_CORRUPT };
+                        result = if rx_length == 0 {
+                            COMM_RX_TIMEOUT
+                        } else {
+                            COMM_RX_CORRUPT
+                        };
                         break;
                     }
                     continue;
@@ -208,7 +212,11 @@ impl<P: PortHandler> ProtocolPacketHandler<P> {
 
                     if rx_length < wait_length {
                         if self.port.is_packet_timeout() {
-                            result = if rx_length == 0 { COMM_RX_TIMEOUT } else { COMM_RX_CORRUPT };
+                            result = if rx_length == 0 {
+                                COMM_RX_TIMEOUT
+                            } else {
+                                COMM_RX_CORRUPT
+                            };
                             break;
                         }
                         continue;
@@ -231,7 +239,11 @@ impl<P: PortHandler> ProtocolPacketHandler<P> {
                     rx_length = rxpacket.len();
                 }
             } else if self.port.is_packet_timeout() {
-                result = if rx_length == 0 { COMM_RX_TIMEOUT } else { COMM_RX_CORRUPT };
+                result = if rx_length == 0 {
+                    COMM_RX_TIMEOUT
+                } else {
+                    COMM_RX_CORRUPT
+                };
                 break;
             }
         }
@@ -528,7 +540,13 @@ impl<P: PortHandler> ProtocolPacketHandler<P> {
         result
     }
 
-    pub fn reg_write_tx_rx(&mut self, sts_id: u8, address: u8, length: u8, data: &[u8]) -> (i32, u8) {
+    pub fn reg_write_tx_rx(
+        &mut self,
+        sts_id: u8,
+        address: u8,
+        length: u8,
+        data: &[u8],
+    ) -> (i32, u8) {
         let mut txpacket = vec![0u8; length as usize + 7];
         txpacket[PKT_ID] = sts_id;
         txpacket[PKT_LENGTH] = length + 3;
@@ -579,7 +597,11 @@ impl<P: PortHandler> ProtocolPacketHandler<P> {
             }
 
             if self.port.is_packet_timeout() {
-                result = if rx_length == 0 { COMM_RX_TIMEOUT } else { COMM_RX_CORRUPT };
+                result = if rx_length == 0 {
+                    COMM_RX_TIMEOUT
+                } else {
+                    COMM_RX_CORRUPT
+                };
                 break;
             }
         }

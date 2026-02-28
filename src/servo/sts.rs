@@ -78,7 +78,9 @@ impl<P: PortHandler> Sts<P> {
     }
 
     pub fn read_pos(&mut self, sts_id: u8) -> (i32, i32, u8) {
-        let (pos, result, error) = self.handler.read_2byte_tx_rx(sts_id, STS_PRESENT_POSITION_L);
+        let (pos, result, error) = self
+            .handler
+            .read_2byte_tx_rx(sts_id, STS_PRESENT_POSITION_L);
         (self.handler.scs_tohost(pos, 15), result, error)
     }
 
@@ -88,7 +90,9 @@ impl<P: PortHandler> Sts<P> {
     }
 
     pub fn read_pos_speed(&mut self, sts_id: u8) -> (i32, i32, i32, u8) {
-        let (value, result, error) = self.handler.read_4byte_tx_rx(sts_id, STS_PRESENT_POSITION_L);
+        let (value, result, error) = self
+            .handler
+            .read_4byte_tx_rx(sts_id, STS_PRESENT_POSITION_L);
         let pos = self.handler.scs_loword(value);
         let speed = self.handler.scs_hiword(value);
         (
@@ -146,7 +150,15 @@ impl<P: PortHandler> Sts<P> {
 
     pub fn write_spec(&mut self, sts_id: u8, speed: i32, acc: u8) -> (i32, u8) {
         let speed = self.handler.scs_toscs(speed, 15);
-        let txpacket = [acc, 0, 0, 0, 0, self.handler.scs_lobyte(speed), self.handler.scs_hibyte(speed)];
+        let txpacket = [
+            acc,
+            0,
+            0,
+            0,
+            0,
+            self.handler.scs_lobyte(speed),
+            self.handler.scs_hibyte(speed),
+        ];
         self.handler
             .write_tx_rx(sts_id, STS_ACC, txpacket.len() as u8, &txpacket)
     }

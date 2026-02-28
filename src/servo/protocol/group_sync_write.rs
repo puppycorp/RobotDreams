@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
-use crate::servo::protocol::protocol_packet_handler::ProtocolPacketHandler;
 use crate::servo::protocol::port_handler::PortHandler;
+use crate::servo::protocol::protocol_packet_handler::ProtocolPacketHandler;
 use crate::servo::protocol::stservo_def::COMM_NOT_AVAILABLE;
 
 #[derive(Debug)]
@@ -91,7 +91,12 @@ impl GroupSyncWrite {
             self.make_param();
         }
         let param_length = self.order.len() * (1 + self.data_length as usize);
-        handler.sync_write_tx_only(self.start_address, self.data_length, &self.param, param_length)
+        handler.sync_write_tx_only(
+            self.start_address,
+            self.data_length,
+            &self.param,
+            param_length,
+        )
     }
 
     pub fn is_available(&self) -> bool {

@@ -68,12 +68,17 @@ impl<P: PortHandler> Scscl<P> {
             self.handler.scs_lobyte(speed),
             self.handler.scs_hibyte(speed),
         ];
-        self.handler
-            .write_tx_rx(scs_id, SCSCL_GOAL_POSITION_L, txpacket.len() as u8, &txpacket)
+        self.handler.write_tx_rx(
+            scs_id,
+            SCSCL_GOAL_POSITION_L,
+            txpacket.len() as u8,
+            &txpacket,
+        )
     }
 
     pub fn read_pos(&mut self, scs_id: u8) -> (u16, i32, u8) {
-        self.handler.read_2byte_tx_rx(scs_id, SCSCL_PRESENT_POSITION_L)
+        self.handler
+            .read_2byte_tx_rx(scs_id, SCSCL_PRESENT_POSITION_L)
     }
 
     pub fn read_speed(&mut self, scs_id: u8) -> (i32, i32, u8) {
@@ -82,7 +87,9 @@ impl<P: PortHandler> Scscl<P> {
     }
 
     pub fn read_pos_speed(&mut self, scs_id: u8) -> (u16, i32, i32, u8) {
-        let (value, result, error) = self.handler.read_4byte_tx_rx(scs_id, SCSCL_PRESENT_POSITION_L);
+        let (value, result, error) = self
+            .handler
+            .read_4byte_tx_rx(scs_id, SCSCL_PRESENT_POSITION_L);
         let pos = self.handler.scs_loword(value);
         let speed = self.handler.scs_hiword(value);
         (pos, self.handler.scs_tohost(speed, 15), result, error)
@@ -113,8 +120,12 @@ impl<P: PortHandler> Scscl<P> {
             self.handler.scs_lobyte(speed),
             self.handler.scs_hibyte(speed),
         ];
-        self.handler
-            .reg_write_tx_rx(scs_id, SCSCL_GOAL_POSITION_L, txpacket.len() as u8, &txpacket)
+        self.handler.reg_write_tx_rx(
+            scs_id,
+            SCSCL_GOAL_POSITION_L,
+            txpacket.len() as u8,
+            &txpacket,
+        )
     }
 
     pub fn reg_action(&mut self) -> i32 {
@@ -123,13 +134,18 @@ impl<P: PortHandler> Scscl<P> {
 
     pub fn pwm_mode(&mut self, scs_id: u8) -> (i32, u8) {
         let txpacket = [0, 0, 0, 0];
-        self.handler
-            .write_tx_rx(scs_id, SCSCL_MIN_ANGLE_LIMIT_L, txpacket.len() as u8, &txpacket)
+        self.handler.write_tx_rx(
+            scs_id,
+            SCSCL_MIN_ANGLE_LIMIT_L,
+            txpacket.len() as u8,
+            &txpacket,
+        )
     }
 
     pub fn write_pwm(&mut self, scs_id: u8, time: i32) -> (i32, u8) {
         let value = self.handler.scs_toscs(time, 10);
-        self.handler.write_2byte_tx_rx(scs_id, SCSCL_GOAL_TIME_L, value)
+        self.handler
+            .write_2byte_tx_rx(scs_id, SCSCL_GOAL_TIME_L, value)
     }
 
     pub fn lock_eprom(&mut self, scs_id: u8) -> (i32, u8) {
