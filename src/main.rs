@@ -22,7 +22,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::robot_dreams::{VirtualServoSimConfig, run_virtual_servo_sim};
-use log::Level;
+use log::LevelFilter;
 #[cfg(unix)]
 use robot_utils::servo::protocol::port_handler::PortHandler;
 #[cfg(unix)]
@@ -406,7 +406,7 @@ fn log_bus_packet(direction: &str, frame: &[u8]) {
     }
     let id = frame.get(2).copied().unwrap_or(0);
     let code = frame.get(4).copied().unwrap_or(0);
-    eprintln!(
+    log::info!(
         "[{}] id={} code=0x{:02X} len={} bytes={}",
         direction,
         id,
@@ -745,7 +745,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
     })?;
 
-    simple_logger::init_with_level(Level::Info).unwrap();
+    simple_logger::SimpleLogger::new()
+        .with_level(LevelFilter::Info)
+        .without_timestamps()
+        .init()
+        .unwrap();
 
     let mut sim = FeetechBusSim::new();
     sim.set_servo_count(DEFAULT_SERVO_COUNT as u8);

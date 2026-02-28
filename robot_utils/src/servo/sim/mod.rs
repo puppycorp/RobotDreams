@@ -6,7 +6,7 @@ use crate::servo::protocol::serial_bus::{BusServoProtocol, ProtocolError};
 const REGISTER_COUNT: usize = 256;
 const ERROR_RANGE: u8 = 0x10;
 
-// ST3215 register addresses (little-endian for multi-byte values).
+// ST3215 register addresses.
 const REG_ID: usize = 0x05;
 const REG_BAUD: usize = 0x06;
 const REG_MIN_ANGLE: usize = 0x09;
@@ -131,24 +131,24 @@ impl FeetechServo {
     fn init_defaults(&mut self, id: u8) {
         self.registers[REG_ID] = id;
         self.registers[REG_BAUD] = 0; // 1,000,000 by default
-        write_u16_le(&mut self.registers, REG_MIN_ANGLE, 0);
-        write_u16_le(&mut self.registers, REG_MAX_ANGLE, 4095);
-        write_u16_le(&mut self.registers, REG_MAX_TORQUE, 1000);
+        write_u16_word(&mut self.registers, REG_MIN_ANGLE, 0);
+        write_u16_word(&mut self.registers, REG_MAX_ANGLE, 4095);
+        write_u16_word(&mut self.registers, REG_MAX_TORQUE, 1000);
         self.registers[REG_MODE] = 0; // position mode
         self.registers[REG_TORQUE_SWITCH] = 1; // enabled by default for simulation
         self.registers[REG_ACCEL] = 0;
-        write_u16_le(&mut self.registers, REG_TARGET_POS, 0);
-        write_u16_le(&mut self.registers, REG_TARGET_SPEED, 0);
-        write_u16_le(&mut self.registers, REG_TORQUE_LIMIT, 1000);
-        write_u16_le(&mut self.registers, REG_PRESENT_POS, 0);
-        write_u16_le(&mut self.registers, REG_PRESENT_SPEED, 0);
-        write_u16_le(&mut self.registers, REG_PRESENT_LOAD, 0);
+        write_u16_word(&mut self.registers, REG_TARGET_POS, 0);
+        write_u16_word(&mut self.registers, REG_TARGET_SPEED, 0);
+        write_u16_word(&mut self.registers, REG_TORQUE_LIMIT, 1000);
+        write_u16_word(&mut self.registers, REG_PRESENT_POS, 0);
+        write_u16_word(&mut self.registers, REG_PRESENT_SPEED, 0);
+        write_u16_word(&mut self.registers, REG_PRESENT_LOAD, 0);
         self.registers[REG_PRESENT_VOLT] = 74; // 7.4V -> 0.1V units
         self.registers[REG_PRESENT_TEMP] = 30;
         self.registers[REG_ASYNC_FLAG] = 0;
         self.registers[REG_SERVO_STATUS] = 0;
         self.registers[REG_MOVING] = 0;
-        write_u16_le(&mut self.registers, REG_PRESENT_CURRENT, 0);
+        write_u16_word(&mut self.registers, REG_PRESENT_CURRENT, 0);
     }
 
     fn read(&self, address: u8, length: u8) -> Result<Vec<u8>, ()> {
@@ -190,9 +190,9 @@ impl FeetechServo {
         if !torque_enabled {
             self.velocity_steps_s = 0.0;
             self.registers[REG_MOVING] = 0;
-            write_u16_le(&mut self.registers, REG_PRESENT_SPEED, 0);
-            write_u16_le(&mut self.registers, REG_PRESENT_LOAD, 0);
-            write_u16_le(&mut self.registers, REG_PRESENT_CURRENT, 0);
+            write_u16_word(&mut self.registers, REG_PRESENT_SPEED, 0);
+            write_u16_word(&mut self.registers, REG_PRESENT_LOAD, 0);
+            write_u16_word(&mut self.registers, REG_PRESENT_CURRENT, 0);
             self.temperature_c = cool_temperature(self.temperature_c, dt);
             self.registers[REG_PRESENT_TEMP] = self.temperature_c.round().clamp(0.0, 255.0) as u8;
             return;
@@ -204,16 +204,16 @@ impl FeetechServo {
             return;
         }
 
-        let target = read_i16_le(&self.registers, REG_TARGET_POS) as f32;
-        let mut min_angle = read_i16_le(&self.registers, REG_MIN_ANGLE) as f32;
-        let mut max_angle = read_i16_le(&self.registers, REG_MAX_ANGLE) as f32;
+        let target = read_i16_word(&self.registers, REG_TARGET_POS) as f32;
+        let mut min_angle = read_i16_word(&self.registers, REG_MIN_ANGLE) as f32;
+        let mut max_angle = read_i16_word(&self.registers, REG_MAX_ANGLE) as f32;
         if min_angle == 0.0 && max_angle == 0.0 {
             min_angle = 0.0;
             max_angle = 4095.0;
         }
         let target = target.clamp(min_angle, max_angle);
 
-        let max_speed = read_u16_le(&self.registers, REG_TARGET_SPEED) as f32;
+        let max_speed = read_u16_word(&self.registers, REG_TARGET_SPEED) as f32;
         let max_speed = if max_speed <= 0.0 { 1000.0 } else { max_speed };
         let accel = self.registers[REG_ACCEL] as f32 * 100.0;
         let accel = if accel <= 0.0 { 1000.0 } else { accel };
@@ -242,12 +242,12 @@ impl FeetechServo {
         let current_raw = (torque_demand * 300.0).clamp(0.0, 1000.0);
         let load_raw = (torque_demand * 400.0).clamp(0.0, 1000.0);
 
-        write_u16_le(
+        write_u16_word(
             &mut self.registers,
             REG_PRESENT_CURRENT,
             current_raw.round() as u16,
         );
-        write_u16_le(
+        write_u16_word(
             &mut self.registers,
             REG_PRESENT_LOAD,
             encode_signed_speed(if self.velocity_steps_s < 0.0 {
@@ -260,12 +260,12 @@ impl FeetechServo {
         self.temperature_c = heat_temperature(self.temperature_c, current_raw, dt);
         self.registers[REG_PRESENT_TEMP] = self.temperature_c.round().clamp(0.0, 255.0) as u8;
 
-        write_u16_le(
+        write_u16_word(
             &mut self.registers,
             REG_PRESENT_POS,
             self.position_steps.round().clamp(-32767.0, 32767.0) as i16 as u16,
         );
-        write_u16_le(
+        write_u16_word(
             &mut self.registers,
             REG_PRESENT_SPEED,
             encode_signed_speed(self.velocity_steps_s),
@@ -278,7 +278,7 @@ impl FeetechServo {
     }
 
     fn snapshot(&self, id: u8) -> FeetechServoSnapshot {
-        let current_raw = read_u16_le(&self.registers, REG_PRESENT_CURRENT);
+        let current_raw = read_u16_word(&self.registers, REG_PRESENT_CURRENT);
         let temperature_c = self.registers[REG_PRESENT_TEMP];
         let voltage_tenths = self.registers[REG_PRESENT_VOLT];
 
@@ -287,10 +287,10 @@ impl FeetechServo {
             mode: self.registers[REG_MODE],
             torque_enabled: self.registers[REG_TORQUE_SWITCH] != 0,
             moving: self.registers[REG_MOVING] != 0,
-            target_position: read_i16_le(&self.registers, REG_TARGET_POS),
-            present_position: read_i16_le(&self.registers, REG_PRESENT_POS),
-            present_speed: decode_signed_15bit(read_u16_le(&self.registers, REG_PRESENT_SPEED)),
-            present_load: decode_signed_15bit(read_u16_le(&self.registers, REG_PRESENT_LOAD)),
+            target_position: read_i16_word(&self.registers, REG_TARGET_POS),
+            present_position: read_i16_word(&self.registers, REG_PRESENT_POS),
+            present_speed: decode_signed_15bit(read_u16_word(&self.registers, REG_PRESENT_SPEED)),
+            present_load: decode_signed_15bit(read_u16_word(&self.registers, REG_PRESENT_LOAD)),
             current_raw,
             temperature_c,
             voltage_tenths,
@@ -340,7 +340,7 @@ impl FeetechBusSim {
             return false;
         };
         let target = target.clamp(0, 4095) as u16;
-        write_u16_le(&mut servo.registers, REG_TARGET_POS, target);
+        write_u16_word(&mut servo.registers, REG_TARGET_POS, target);
         true
     }
 
@@ -488,14 +488,14 @@ impl FeetechBusSim {
     }
 }
 
-fn read_u16_le(registers: &[u8; REGISTER_COUNT], address: usize) -> u16 {
-    let lo = registers[address] as u16;
-    let hi = registers[address + 1] as u16;
-    lo | (hi << 8)
+fn read_u16_word(registers: &[u8; REGISTER_COUNT], address: usize) -> u16 {
+    let hi = registers[address] as u16;
+    let lo = registers[address + 1] as u16;
+    (hi << 8) | lo
 }
 
-fn read_i16_le(registers: &[u8; REGISTER_COUNT], address: usize) -> i16 {
-    let raw = read_u16_le(registers, address);
+fn read_i16_word(registers: &[u8; REGISTER_COUNT], address: usize) -> i16 {
+    let raw = read_u16_word(registers, address);
     if (raw & 0x8000) != 0 {
         -((raw & 0x7FFF) as i16)
     } else {
@@ -503,9 +503,9 @@ fn read_i16_le(registers: &[u8; REGISTER_COUNT], address: usize) -> i16 {
     }
 }
 
-fn write_u16_le(registers: &mut [u8; REGISTER_COUNT], address: usize, value: u16) {
-    registers[address] = (value & 0xFF) as u8;
-    registers[address + 1] = (value >> 8) as u8;
+fn write_u16_word(registers: &mut [u8; REGISTER_COUNT], address: usize, value: u16) {
+    registers[address] = (value >> 8) as u8;
+    registers[address + 1] = (value & 0xFF) as u8;
 }
 
 fn encode_signed_speed(speed: f32) -> u16 {

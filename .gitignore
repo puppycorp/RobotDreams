@@ -1,2 +1,4 @@
 /target
 workdir
+__pycache__/
+**/__pycache__/

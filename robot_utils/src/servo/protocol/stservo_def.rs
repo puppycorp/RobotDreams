@@ -1,4 +1,6 @@
 pub const BROADCAST_ID: u8 = 0xFE;
+pub const MAX_ID: u8 = 0xFC;
+pub const STS_END: u8 = 0;
 
 pub const INST_PING: u8 = 0x01;
 pub const INST_READ: u8 = 0x02;

@@ -233,6 +233,11 @@ impl BusServoProtocol for FeetechScs {
             }
         }
     }
+
+    fn is_broadcast(&self, id: u8) -> bool {
+        // Python STServo SDK uses 0xFF as broadcast. Keep 0xFE compatibility too.
+        id == 0xFE || id == 0xFF
+    }
 }
 
 fn parse_packet(bytes: &[u8]) -> Result<(u8, usize, u8, &[u8]), ProtocolError> {

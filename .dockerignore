@@ -1,0 +1,6 @@
+.git
+.github
+target
+.venv-stservo-test
+**/__pycache__
+**/*.pyc

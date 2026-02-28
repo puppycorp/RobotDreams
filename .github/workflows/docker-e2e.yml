@@ -1,0 +1,22 @@
+name: Docker SDK E2E
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  docker-sdk-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      E2E_IMAGE: robotdreams-sdk-e2e:${{ github.sha }}
+      E2E_DOCKERFILE: docker/python_sdk_test.Dockerfile
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build --pull -f "$E2E_DOCKERFILE" --tag "$E2E_IMAGE" .
+
+      - name: Run Docker E2E test
+        run: docker run --rm "$E2E_IMAGE"

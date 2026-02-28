@@ -12,13 +12,13 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use clap::{Args as ClapArgs, Parser, Subcommand};
-use log::Level;
+use log::LevelFilter;
 use robot_utils::ik::{ArmGeom, JointCalib, Vec3, angle_to_ticks, ik_elbow_up};
 use robot_utils::servo::protocol::port_handler::PortHandler;
 use robot_utils::servo::protocol::serial_port::SerialPortHandler;
 use robot_utils::servo::protocol::stservo_def::COMM_SUCCESS;
 use robot_utils::servo::protocol::virtual_uart::VirtualUartPort;
-use robot_utils::servo::scscl::Scscl;
+use robot_utils::servo::scscl::{SCSCL_GOAL_POSITION_L, Scscl};
 use robot_utils::servo::sim::FeetechBusSim;
 use serialport::{SerialPortInfo, SerialPortType};
 use wgui::*;
@@ -44,6 +44,7 @@ const TOGGLE_CONNECTION_BUTTON_ID: u32 = 20;
 const TOGGLE_VBUS_BUTTON_ID: u32 = 23;
 const SERVO_ANGLE_INPUT_ID: u32 = 24;
 const APPLY_SERVO_ANGLE_BUTTON_ID: u32 = 25;
+const TOGGLE_STATUS_POLLING_BUTTON_ID: u32 = 26;
 
 const PUPPYARM_FIRST_SERVO_ID: u8 = 1;
 const PUPPYARM_SERVO_COUNT: u8 = 4;
@@ -231,7 +232,7 @@ fn log_serial_tx(packet: &[u8], written: usize) {
     } else {
         "partial"
     };
-    eprintln!(
+    log::info!(
         "[serial tx] status={} id={} instr=0x{:02X} written={}/{} bytes={}",
         status,
         servo_id,
@@ -610,6 +611,7 @@ struct AppState {
     port_input: String,
     baud: u32,
     connected: bool,
+    status_polling_enabled: bool,
     virtual_bus_running: bool,
     virtual_bus_status: String,
     move_time: String,
@@ -639,13 +641,14 @@ impl AppState {
         };
         let mut servos = BTreeMap::new();
         for id in PUPPYARM_FIRST_SERVO_ID..=PUPPYARM_LAST_SERVO_ID {
-            servos.insert(id, ServoUiState::new(id, 2048));
+            servos.insert(id, ServoUiState::new(id, 0));
         }
 
         Self {
             port_input,
             baud,
             connected: false,
+            status_polling_enabled: true,
             virtual_bus_running: false,
             virtual_bus_status: "stopped".to_string(),
             move_time: "0".to_string(),
@@ -828,8 +831,18 @@ fn refresh_servos(
         if result == COMM_SUCCESS {
             servo.present_position = Some(position);
             servo.present_speed = Some(speed);
+            let (goal, goal_result, _goal_error) = client
+                .handler
+                .read_2byte_tx_rx(servo.id, SCSCL_GOAL_POSITION_L);
+            if goal_result == COMM_SUCCESS {
+                servo.target_position = goal;
+                servo.target_angle_degrees = format_target_angle_degrees(servo.id, goal);
+            }
+            servo.last_status = "ok".to_string();
             ok += 1;
         } else {
+            servo.present_position = None;
+            servo.present_speed = None;
             let message = client.handler.get_tx_rx_result(result);
             servo.last_status = format!("read failed: {message} (error byte {error})");
             fail += 1;
@@ -1113,8 +1126,19 @@ fn render(state: &AppState) -> Item {
             )),
             button("Scan").id(SCAN_BUTTON_ID),
             button("Refresh").id(REFRESH_BUTTON_ID),
+            button(if state.status_polling_enabled {
+                "Pause Polling"
+            } else {
+                "Resume Polling"
+            })
+            .id(TOGGLE_STATUS_POLLING_BUTTON_ID),
         ])
         .spacing(8),
+        text(if state.status_polling_enabled {
+            "Status polling: enabled"
+        } else {
+            "Status polling: paused"
+        }),
         hstack([
             text("Move time"),
             text_input()
@@ -1388,8 +1412,10 @@ async fn run_ui(
                     state.virtual_bus_status = "stopped".to_string();
                 }
 
-                if let Some(client_ref) = client.as_mut() {
-                    let _ = refresh_servos(client_ref, &mut state.servos);
+                if state.status_polling_enabled {
+                    if let Some(client_ref) = client.as_mut() {
+                        let _ = refresh_servos(client_ref, &mut state.servos);
+                    }
                 }
 
                 for id in &connected_clients {
@@ -1476,6 +1502,18 @@ async fn run_ui(
                                             state.status = format!("Failed to start virtual bus: {err}");
                                         }
                                     }
+                                }
+                            }
+                            TOGGLE_STATUS_POLLING_BUTTON_ID => {
+                                state.status_polling_enabled = !state.status_polling_enabled;
+                                if state.status_polling_enabled {
+                                    state.status = "Status polling resumed".to_string();
+                                    if let Some(client_ref) = client.as_mut() {
+                                        let (ok, fail) = refresh_servos(client_ref, &mut state.servos);
+                                        state.status = format!("Status polling resumed ({ok} ok, {fail} failed)");
+                                    }
+                                } else {
+                                    state.status = "Status polling paused".to_string();
                                 }
                             }
                             SCAN_BUTTON_ID => {
@@ -1611,7 +1649,11 @@ async fn run_ui(
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    simple_logger::init_with_level(Level::Info).unwrap();
+    simple_logger::SimpleLogger::new()
+        .with_level(LevelFilter::Info)
+        .without_timestamps()
+        .init()
+        .unwrap();
 
     let Args {
         port,
