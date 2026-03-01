@@ -54,6 +54,7 @@ const URDF_BASE_POSITION_RANGE: i32 = 2000;
 const URDF_BASE_ROTATION_MIN: i32 = (-std::f32::consts::PI * URDF_VALUE_SCALE) as i32;
 const URDF_BASE_ROTATION_MAX: i32 = (std::f32::consts::PI * URDF_VALUE_SCALE) as i32;
 const URDF_ROTATION_ORDER: &str = "ZYX";
+const URDF_JOINT_ROTATION_ORDER: &str = "XYZ";
 const URDF_TO_VIEW_ROT_X: f32 = -std::f32::consts::FRAC_PI_2;
 
 #[derive(Debug, Parser)]
@@ -773,18 +774,40 @@ fn parse_robot(urdf_path: &Path, workspace_root: &Path) -> Result<RobotModel, St
     parse_robot_from_xml(&xml, urdf_dir, workspace_root)
 }
 
-fn axis_to_euler(axis: [f32; 3], value: f32) -> [f32; 3] {
-    let eps = 0.2;
-    if axis[0].abs() > 1.0 - eps && axis[1].abs() < eps && axis[2].abs() < eps {
-        return [value * axis[0].signum(), 0.0, 0.0];
+fn normalize_axis(axis: [f32; 3]) -> [f32; 3] {
+    let len_sq = axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2];
+    if len_sq <= f32::EPSILON {
+        return [0.0, 0.0, 1.0];
     }
-    if axis[1].abs() > 1.0 - eps && axis[0].abs() < eps && axis[2].abs() < eps {
-        return [0.0, value * axis[1].signum(), 0.0];
-    }
-    if axis[2].abs() > 1.0 - eps && axis[0].abs() < eps && axis[1].abs() < eps {
-        return [0.0, 0.0, value * axis[2].signum()];
-    }
-    [0.0, 0.0, value]
+    let inv_len = len_sq.sqrt().recip();
+    [axis[0] * inv_len, axis[1] * inv_len, axis[2] * inv_len]
+}
+
+fn axis_angle_to_euler_xyz(axis: [f32; 3], angle: f32) -> [f32; 3] {
+    let axis = normalize_axis(axis);
+    let half = angle * 0.5;
+    let sin_half = half.sin();
+    let qx = axis[0] * sin_half;
+    let qy = axis[1] * sin_half;
+    let qz = axis[2] * sin_half;
+    let qw = half.cos();
+
+    let sinr_cosp = 2.0 * (qw * qx + qy * qz);
+    let cosr_cosp = 1.0 - 2.0 * (qx * qx + qy * qy);
+    let roll = sinr_cosp.atan2(cosr_cosp);
+
+    let sinp = 2.0 * (qw * qy - qz * qx);
+    let pitch = if sinp.abs() >= 1.0 {
+        sinp.signum() * std::f32::consts::FRAC_PI_2
+    } else {
+        sinp.asin()
+    };
+
+    let siny_cosp = 2.0 * (qw * qz + qx * qy);
+    let cosy_cosp = 1.0 - 2.0 * (qy * qy + qz * qz);
+    let yaw = siny_cosp.atan2(cosy_cosp);
+
+    [roll, pitch, yaw]
 }
 
 fn urdf_slider_value_to_units(slider_value: i32) -> f32 {
@@ -1007,9 +1030,10 @@ fn build_link_subtree(
             let mut motion_group = group(motion_group_id, []);
             let joint_value = joint_values.get(*joint_index).copied().unwrap_or(0);
             let unit_value = urdf_value_to_joint_units(joint, joint_value);
+            let axis = normalize_axis(joint.axis);
             match joint.joint_type {
                 UrdfJointType::Revolute | UrdfJointType::Continuous => {
-                    let delta = axis_to_euler(joint.axis, unit_value);
+                    let delta = axis_angle_to_euler_xyz(axis, unit_value);
                     motion_group = motion_group.prop(
                         "rotation",
                         ThreePropValue::Vec3 {
@@ -1018,14 +1042,20 @@ fn build_link_subtree(
                             z: delta[2],
                         },
                     );
+                    motion_group = motion_group.prop(
+                        "rotationOrder",
+                        ThreePropValue::String {
+                            value: URDF_JOINT_ROTATION_ORDER.to_string(),
+                        },
+                    );
                 }
                 UrdfJointType::Prismatic => {
                     motion_group = motion_group.prop(
                         "position",
                         ThreePropValue::Vec3 {
-                            x: joint.axis[0] * unit_value,
-                            y: joint.axis[1] * unit_value,
-                            z: joint.axis[2] * unit_value,
+                            x: axis[0] * unit_value,
+                            y: axis[1] * unit_value,
+                            z: axis[2] * unit_value,
                         },
                     );
                 }
