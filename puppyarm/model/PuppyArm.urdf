@@ -1,5 +1,5 @@
 <?xml version="1.0"?>
-<robot name="onshape_robot">
+<robot name="PuppyArm">
   <link name="base_link"/>
   <link name="Part_1_3">
     <visual>
@@ -15,11 +15,6 @@
       </geometry>
     </collision>
   </link>
-  <joint name="Part_1_3_joint" type="fixed">
-    <parent link="base_link"/>
-    <child link="Part_1_3"/>
-    <origin xyz="-0.050504 -0.01132 -0.124523" rpy="0 0 0.007469"/>
-  </joint>
   <link name="Part_1_8">
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
@@ -34,11 +29,6 @@
       </geometry>
     </collision>
   </link>
-  <joint name="Part_1_8_joint" type="fixed">
-    <parent link="base_link"/>
-    <child link="Part_1_8"/>
-    <origin xyz="-0.050498 -0.01207 -0.154023" rpy="0 0 0.007469"/>
-  </joint>
   <link name="Part_1_1">
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
@@ -53,11 +43,6 @@
       </geometry>
     </collision>
   </link>
-  <joint name="Part_1_1_joint" type="fixed">
-    <parent link="base_link"/>
-    <child link="Part_1_1"/>
-    <origin xyz="0.079209 0.061992 -0.0227" rpy="3.121406 0 -1.233812"/>
-  </joint>
   <link name="PCB_CHAZUO_92_1">
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
@@ -72,11 +57,6 @@
       </geometry>
     </collision>
   </link>
-  <joint name="PCB_CHAZUO_92_1_joint" type="fixed">
-    <parent link="base_link"/>
-    <child link="PCB_CHAZUO_92_1"/>
-    <origin xyz="-0.050308 -0.03757 -0.122423" rpy="1.570796 0 -1.563327"/>
-  </joint>
   <link name="v2_1">
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
@@ -91,11 +71,6 @@
       </geometry>
     </collision>
   </link>
-  <joint name="v2_1_joint" type="fixed">
-    <parent link="base_link"/>
-    <child link="v2_1"/>
-    <origin xyz="-0.047639 -0.002488 -0.140123" rpy="1.570796 0 -1.860757"/>
-  </joint>
   <link name="v2_1_2">
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
@@ -110,11 +85,6 @@
       </geometry>
     </collision>
   </link>
-  <joint name="v2_1_2_joint" type="fixed">
-    <parent link="base_link"/>
-    <child link="v2_1_2"/>
-    <origin xyz="-0.059879 -0.008606 -0.171873" rpy="-1.570796 0 -0.353725"/>
-  </joint>
   <link name="GE_27_1">
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
@@ -129,11 +99,6 @@
       </geometry>
     </collision>
   </link>
-  <joint name="GE_27_1_joint" type="fixed">
-    <parent link="base_link"/>
-    <child link="GE_27_1"/>
-    <origin xyz="-0.050498 -0.01207 -0.128423" rpy="3.141593 0 -1.563327"/>
-  </joint>
   <link name="ZK_122_1">
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
@@ -148,11 +113,6 @@
       </geometry>
     </collision>
   </link>
-  <joint name="ZK_122_1_joint" type="fixed">
-    <parent link="base_link"/>
-    <child link="ZK_122_1"/>
-    <origin xyz="-0.050308 -0.03757 -0.122423" rpy="1.570796 0 -1.563327"/>
-  </joint>
   <link name="MOTOR_1723_3_1">
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
@@ -167,11 +127,6 @@
       </geometry>
     </collision>
   </link>
-  <joint name="MOTOR_1723_3_1_joint" type="fixed">
-    <parent link="base_link"/>
-    <child link="MOTOR_1723_3_1"/>
-    <origin xyz="-0.049058 -0.03756 -0.145273" rpy="1.570796 0 0.007469"/>
-  </joint>
   <link name="SG_ZIJI_15_1">
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
@@ -186,11 +141,6 @@
       </geometry>
     </collision>
   </link>
-  <joint name="SG_ZIJI_15_1_joint" type="fixed">
-    <parent link="base_link"/>
-    <child link="SG_ZIJI_15_1"/>
-    <origin xyz="-0.050308 -0.03757 -0.122423" rpy="1.570796 0 -1.563327"/>
-  </joint>
   <link name="XG_ZIJI_16_1">
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
@@ -205,11 +155,6 @@
       </geometry>
     </collision>
   </link>
-  <joint name="XG_ZIJI_16_1_joint" type="fixed">
-    <parent link="base_link"/>
-    <child link="XG_ZIJI_16_1"/>
-    <origin xyz="-0.050308 -0.03757 -0.122423" rpy="1.570796 0 -1.563327"/>
-  </joint>
   <link name="Part_2_2">
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
@@ -224,11 +169,6 @@
       </geometry>
     </collision>
   </link>
-  <joint name="Part_2_2_joint" type="fixed">
-    <parent link="base_link"/>
-    <child link="Part_2_2"/>
-    <origin xyz="-0.050504 -0.01132 -0.121523" rpy="0 0 0.336985"/>
-  </joint>
   <link name="Part_1_2">
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
@@ -243,11 +183,6 @@
       </geometry>
     </collision>
   </link>
-  <joint name="Part_1_2_joint" type="fixed">
-    <parent link="base_link"/>
-    <child link="Part_1_2"/>
-    <origin xyz="-0.050504 -0.01132 -0.121523" rpy="0 0 0.007469"/>
-  </joint>
   <link name="Part_1_2_2">
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
@@ -262,11 +197,6 @@
       </geometry>
     </collision>
   </link>
-  <joint name="Part_1_2_2_joint" type="fixed">
-    <parent link="base_link"/>
-    <child link="Part_1_2_2"/>
-    <origin xyz="0.08769 0.037784 -0.0227" rpy="-0.020186 0 -1.233812"/>
-  </joint>
   <link name="Part_1_1_2">
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
@@ -281,11 +211,6 @@
       </geometry>
     </collision>
   </link>
-  <joint name="Part_1_1_2_joint" type="fixed">
-    <parent link="base_link"/>
-    <child link="Part_1_1_2"/>
-    <origin xyz="-0.050504 -0.01132 -0.113023" rpy="0 0 1.907781"/>
-  </joint>
   <link name="Part_1_3_2">
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
@@ -300,11 +225,6 @@
       </geometry>
     </collision>
   </link>
-  <joint name="Part_1_3_2_joint" type="fixed">
-    <parent link="base_link"/>
-    <child link="Part_1_3_2"/>
-    <origin xyz="-0.050955 -0.010789 -0.056023" rpy="3.141593 0 -1.233812"/>
-  </joint>
   <link name="Part_1_1_3">
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
@@ -319,11 +239,6 @@
       </geometry>
     </collision>
   </link>
-  <joint name="Part_1_1_3_joint" type="fixed">
-    <parent link="base_link"/>
-    <child link="Part_1_1_3"/>
-    <origin xyz="-0.03727 -0.005995 -0.018523" rpy="0 0 -1.233812"/>
-  </joint>
   <link name="Part_1_2_3">
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
@@ -338,11 +253,6 @@
       </geometry>
     </collision>
   </link>
-  <joint name="Part_1_2_3_joint" type="fixed">
-    <parent link="base_link"/>
-    <child link="Part_1_2_3"/>
-    <origin xyz="-0.050955 -0.010789 0.018977" rpy="0 0 -1.233812"/>
-  </joint>
   <link name="PCB_CHAZUO_92_1_2">
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
@@ -357,11 +267,6 @@
       </geometry>
     </collision>
   </link>
-  <joint name="PCB_CHAZUO_92_1_2_joint" type="fixed">
-    <parent link="base_link"/>
-    <child link="PCB_CHAZUO_92_1_2"/>
-    <origin xyz="0.062297 0.038636 0.016935" rpy="3.141593 -0.304321 -2.804608"/>
-  </joint>
   <link name="v2_1_3">
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
@@ -376,11 +281,6 @@
       </geometry>
     </collision>
   </link>
-  <joint name="v2_1_3_joint" type="fixed">
-    <parent link="base_link"/>
-    <child link="v2_1_3"/>
-    <origin xyz="0.100545 0.033282 0.009092" rpy="3.141593 -0.020186 -2.804608"/>
-  </joint>
   <link name="v2_1_4">
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
@@ -395,11 +295,6 @@
       </geometry>
     </collision>
   </link>
-  <joint name="v2_1_4_joint" type="fixed">
-    <parent link="base_link"/>
-    <child link="v2_1_4"/>
-    <origin xyz="0.092467 -0.003191 0.011784" rpy="-3.141593 0.251669 0.336985"/>
-  </joint>
   <link name="GE_27_1_2">
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
@@ -414,11 +309,6 @@
       </geometry>
     </collision>
   </link>
-  <joint name="GE_27_1_2_joint" type="fixed">
-    <parent link="base_link"/>
-    <child link="GE_27_1_2"/>
-    <origin xyz="0.087241 0.041018 0.009294" rpy="-1.570796 -0.304321 -2.804608"/>
-  </joint>
   <link name="ZK_122_1_2">
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
@@ -433,11 +323,6 @@
       </geometry>
     </collision>
   </link>
-  <joint name="ZK_122_1_2_joint" type="fixed">
-    <parent link="base_link"/>
-    <child link="ZK_122_1_2"/>
-    <origin xyz="0.062297 0.038636 0.016935" rpy="3.141593 -0.304321 -2.804608"/>
-  </joint>
   <link name="MOTOR_1723_3_1_2">
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
@@ -452,11 +337,6 @@
       </geometry>
     </collision>
   </link>
-  <joint name="MOTOR_1723_3_1_2_joint" type="fixed">
-    <parent link="base_link"/>
-    <child link="MOTOR_1723_3_1_2"/>
-    <origin xyz="0.070206 0.017195 0.018127" rpy="0 -1.266475 0.336985"/>
-  </joint>
   <link name="SG_ZIJI_15_1_2">
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
@@ -471,11 +351,6 @@
       </geometry>
     </collision>
   </link>
-  <joint name="SG_ZIJI_15_1_2_joint" type="fixed">
-    <parent link="base_link"/>
-    <child link="SG_ZIJI_15_1_2"/>
-    <origin xyz="0.062297 0.038636 0.016935" rpy="3.141593 -0.304321 -2.804608"/>
-  </joint>
   <link name="XG_ZIJI_16_1_2">
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
@@ -490,11 +365,6 @@
       </geometry>
     </collision>
   </link>
-  <joint name="XG_ZIJI_16_1_2_joint" type="fixed">
-    <parent link="base_link"/>
-    <child link="XG_ZIJI_16_1_2"/>
-    <origin xyz="0.062297 0.038636 0.016935" rpy="3.141593 -0.304321 -2.804608"/>
-  </joint>
   <link name="PCB_CHAZUO_92_1_3">
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
@@ -509,11 +379,6 @@
       </geometry>
     </collision>
   </link>
-  <joint name="PCB_CHAZUO_92_1_3_joint" type="fixed">
-    <parent link="base_link"/>
-    <child link="PCB_CHAZUO_92_1_3"/>
-    <origin xyz="-0.047544 -0.019767 -0.067523" rpy="-2.804608 -1.570796 0"/>
-  </joint>
   <link name="v2_1_5">
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
@@ -528,11 +393,6 @@
       </geometry>
     </collision>
   </link>
-  <joint name="v2_1_5_joint" type="fixed">
-    <parent link="base_link"/>
-    <child link="v2_1_5"/>
-    <origin xyz="-0.043959 0.000244 -0.093023" rpy="0 0 -2.804608"/>
-  </joint>
   <link name="v2_1_6">
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
@@ -547,11 +407,6 @@
       </geometry>
     </collision>
   </link>
-  <joint name="v2_1_6_joint" type="fixed">
-    <parent link="base_link"/>
-    <child link="v2_1_6"/>
-    <origin xyz="-0.073286 0.023612 -0.092034" rpy="0 0.098974 0.336985"/>
-  </joint>
   <link name="GE_27_1_3">
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
@@ -566,11 +421,6 @@
       </geometry>
     </collision>
   </link>
-  <joint name="GE_27_1_3_joint" type="fixed">
-    <parent link="base_link"/>
-    <child link="GE_27_1_3"/>
-    <origin xyz="-0.049528 -0.014104 -0.093023" rpy="-1.233812 -1.570796 0"/>
-  </joint>
   <link name="ZK_122_1_3">
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
@@ -585,11 +435,6 @@
       </geometry>
     </collision>
   </link>
-  <joint name="ZK_122_1_3_joint" type="fixed">
-    <parent link="base_link"/>
-    <child link="ZK_122_1_3"/>
-    <origin xyz="-0.047544 -0.019767 -0.067523" rpy="-2.804608 -1.570796 0"/>
-  </joint>
   <link name="MOTOR_1723_3_1_3">
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
@@ -604,11 +449,6 @@
       </geometry>
     </collision>
   </link>
-  <joint name="MOTOR_1723_3_1_3_joint" type="fixed">
-    <parent link="base_link"/>
-    <child link="MOTOR_1723_3_1_3"/>
-    <origin xyz="-0.056279 0.001385 -0.067523" rpy="0 0 -2.804608"/>
-  </joint>
   <link name="SG_ZIJI_15_1_3">
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
@@ -623,11 +463,6 @@
       </geometry>
     </collision>
   </link>
-  <joint name="SG_ZIJI_15_1_3_joint" type="fixed">
-    <parent link="base_link"/>
-    <child link="SG_ZIJI_15_1_3"/>
-    <origin xyz="-0.047544 -0.019767 -0.067523" rpy="-2.804608 -1.570796 0"/>
-  </joint>
   <link name="XG_ZIJI_16_1_3">
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
@@ -642,11 +477,6 @@
       </geometry>
     </collision>
   </link>
-  <joint name="XG_ZIJI_16_1_3_joint" type="fixed">
-    <parent link="base_link"/>
-    <child link="XG_ZIJI_16_1_3"/>
-    <origin xyz="-0.047544 -0.019767 -0.067523" rpy="-2.804608 -1.570796 0"/>
-  </joint>
   <link name="Part_1_1_4">
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
@@ -661,11 +491,6 @@
       </geometry>
     </collision>
   </link>
-  <joint name="Part_1_1_4_joint" type="fixed">
-    <parent link="base_link"/>
-    <child link="Part_1_1_4"/>
-    <origin xyz="0.019574 0.013496 0.017273" rpy="0.304321 0 1.907781"/>
-  </joint>
   <link name="Part_1_2_4">
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
@@ -680,11 +505,6 @@
       </geometry>
     </collision>
   </link>
-  <joint name="Part_1_2_4_joint" type="fixed">
-    <parent link="base_link"/>
-    <child link="Part_1_2_4"/>
-    <origin xyz="0.055188 0.025973 0.020619" rpy="1.875118 0 1.907781"/>
-  </joint>
   <link name="PCB_CHAZUO_92_1_4">
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
@@ -699,11 +519,6 @@
       </geometry>
     </collision>
   </link>
-  <joint name="PCB_CHAZUO_92_1_4_joint" type="fixed">
-    <parent link="base_link"/>
-    <child link="PCB_CHAZUO_92_1_4"/>
-    <origin xyz="-0.048016 -0.019932 0.030477" rpy="2.804608 1.570796 0"/>
-  </joint>
   <link name="v2_1_7">
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
@@ -718,11 +533,6 @@
       </geometry>
     </collision>
   </link>
-  <joint name="v2_1_7_joint" type="fixed">
-    <parent link="base_link"/>
-    <child link="v2_1_7"/>
-    <origin xyz="-0.044865 -0.000073 0.052981" rpy="0 -0.304321 -2.804608"/>
-  </joint>
   <link name="v2_1_8">
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
@@ -737,11 +547,6 @@
       </geometry>
     </collision>
   </link>
-  <joint name="v2_1_8_joint" type="fixed">
-    <parent link="base_link"/>
-    <child link="v2_1_8"/>
-    <origin xyz="-0.073762 0.023445 0.056925" rpy="0 0.09487 0.336985"/>
-  </joint>
   <link name="GE_27_1_4">
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
@@ -756,11 +561,6 @@
       </geometry>
     </collision>
   </link>
-  <joint name="GE_27_1_4_joint" type="fixed">
-    <parent link="base_link"/>
-    <child link="GE_27_1_4"/>
-    <origin xyz="-0.05 -0.01427 0.055977" rpy="-1.907781 1.570796 0"/>
-  </joint>
   <link name="ZK_122_1_4">
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
@@ -775,11 +575,6 @@
       </geometry>
     </collision>
   </link>
-  <joint name="ZK_122_1_4_joint" type="fixed">
-    <parent link="base_link"/>
-    <child link="ZK_122_1_4"/>
-    <origin xyz="-0.048016 -0.019932 0.030477" rpy="2.804608 1.570796 0"/>
-  </joint>
   <link name="MOTOR_1723_3_1_4">
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
@@ -794,11 +589,6 @@
       </geometry>
     </collision>
   </link>
-  <joint name="MOTOR_1723_3_1_4_joint" type="fixed">
-    <parent link="base_link"/>
-    <child link="MOTOR_1723_3_1_4"/>
-    <origin xyz="-0.054392 0.002046 0.030477" rpy="-3.141593 0 0.336985"/>
-  </joint>
   <link name="SG_ZIJI_15_1_4">
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
@@ -813,11 +603,6 @@
       </geometry>
     </collision>
   </link>
-  <joint name="SG_ZIJI_15_1_4_joint" type="fixed">
-    <parent link="base_link"/>
-    <child link="SG_ZIJI_15_1_4"/>
-    <origin xyz="-0.048016 -0.019932 0.030477" rpy="2.804608 1.570796 0"/>
-  </joint>
   <link name="XG_ZIJI_16_1_4">
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
@@ -832,9 +617,232 @@
       </geometry>
     </collision>
   </link>
-  <joint name="XG_ZIJI_16_1_4_joint" type="fixed">
-    <parent link="base_link"/>
+  <joint name="Fastened_8" type="fixed">
+    <parent link="XG_ZIJI_16_1"/>
+    <child link="Part_1_8"/>
+    <origin xyz="-0.0255 -0.0316 0" rpy="-1.570796 1.570796 0"/>
+  </joint>
+  <joint name="Fastened_7" type="fixed">
+    <parent link="Part_1_8"/>
+    <child link="Part_1_3"/>
+    <origin xyz="0 0.00075 0.0295" rpy="0 0 0"/>
+  </joint>
+  <joint name="Fastened_16" type="fixed">
+    <parent link="Part_1_3"/>
+    <child link="Part_1_2"/>
+    <origin xyz="0 0 0.003" rpy="0 0 0"/>
+  </joint>
+  <joint name="Fastened_1" type="fixed">
+    <parent link="Part_1_1_2"/>
+    <child link="Part_2_2"/>
+    <origin xyz="0 0 -0.0085" rpy="0 0 -1.570796"/>
+  </joint>
+  <joint name="Fastened_2" type="fixed">
+    <parent link="Part_1_1"/>
+    <child link="Part_1_2_2"/>
+    <origin xyz="0.02565 0 0" rpy="-3.141593 0 0"/>
+  </joint>
+  <joint name="Revolute_1" type="revolute">
+    <parent link="v2_1"/>
+    <child link="SG_ZIJI_15_1"/>
+    <origin xyz="0.03438 0.0177 -0.007473" rpy="0 0.29743 0"/>
+    <axis xyz="0 -1 0"/>
+  </joint>
+  <joint name="Revolute_2" type="revolute">
+    <parent link="v2_1_2"/>
+    <child link="XG_ZIJI_16_1"/>
+    <origin xyz="0.019011 -0.04945 -0.023855" rpy="-3.141593 1.209602 0"/>
+    <axis xyz="0 1 0"/>
+  </joint>
+  <joint name="Fastened_1_2" type="fixed">
+    <parent link="SG_ZIJI_15_1_3"/>
+    <child link="Part_1_3_2"/>
+    <origin xyz="0.0115 -0.0096 -0.00025" rpy="-1.570796 0 1.570796"/>
+  </joint>
+  <joint name="Fastened_2_2" type="fixed">
+    <parent link="SG_ZIJI_15_1_4"/>
+    <child link="Part_1_2_3"/>
+    <origin xyz="0.0115 -0.0096 -0.00025" rpy="-1.570796 0 1.570796"/>
+  </joint>
+  <joint name="Fastened_3" type="fixed">
+    <parent link="v2_1_5"/>
+    <child link="Part_1_1_2"/>
+    <origin xyz="0.01 0.00875 -0.02" rpy="0 0 -1.570796"/>
+  </joint>
+  <joint name="Fastened_4" type="fixed">
+    <parent link="Part_1_1_4"/>
+    <child link="v2_1_7"/>
+    <origin xyz="0.0085 0.073 0.0145" rpy="0 0 1.570796"/>
+  </joint>
+  <joint name="Fastened_5" type="fixed">
+    <parent link="SG_ZIJI_15_1_2"/>
+    <child link="Part_1_2_4"/>
+    <origin xyz="0.0115 -0.0096 -0.00025" rpy="-1.570796 0 1.570796"/>
+  </joint>
+  <joint name="Fastened_6" type="fixed">
+    <parent link="Part_1_2_2"/>
+    <child link="v2_1_3"/>
+    <origin xyz="0.0085 0.01 0.032" rpy="-3.141593 0 -1.570796"/>
+  </joint>
+  <joint name="Fastened_1_3" type="fixed">
+    <parent link="Part_1_2_3"/>
+    <child link="Part_1_1_3"/>
+    <origin xyz="0 0.0145 -0.0375" rpy="0 0 0"/>
+  </joint>
+  <joint name="Revolute_1_2" type="revolute">
+    <parent link="v2_1_5"/>
+    <child link="SG_ZIJI_15_1_3"/>
+    <origin xyz="0.009948 0.0177 0.0255" rpy="-3.141593 -1.568773 -3.141593"/>
+    <axis xyz="0 -1 0"/>
+  </joint>
+  <joint name="Revolute_2_2" type="revolute">
+    <parent link="v2_1_6"/>
+    <child link="XG_ZIJI_16_1_3"/>
+    <origin xyz="0.007532 -0.04945 0.02538" rpy="0 -1.473845 3.141593"/>
+    <axis xyz="0 1 0"/>
+  </joint>
+  <joint name="Revolute_1_3" type="revolute">
+    <parent link="v2_1_7"/>
+    <child link="SG_ZIJI_15_1_4"/>
+    <origin xyz="0.008285 0.0177 -0.025442" rpy="-3.141593 1.5035 3.141593"/>
+    <axis xyz="0 -1 0"/>
+  </joint>
+  <joint name="Revolute_2_3" type="revolute">
+    <parent link="v2_1_8"/>
     <child link="XG_ZIJI_16_1_4"/>
-    <origin xyz="-0.048016 -0.019932 0.030477" rpy="2.804608 1.570796 0"/>
+    <origin xyz="0.012364 -0.04945 -0.02539" rpy="3.141593 1.47795 0"/>
+    <axis xyz="0 1 0"/>
+  </joint>
+  <joint name="Fastened_1_4" type="fixed">
+    <parent link="Part_1_2_4"/>
+    <child link="Part_1_1_4"/>
+    <origin xyz="0 -0.0145 -0.035" rpy="-1.570796 0 0"/>
+  </joint>
+  <joint name="Revolute_1_4" type="revolute">
+    <parent link="v2_1_3"/>
+    <child link="SG_ZIJI_15_1_2"/>
+    <origin xyz="0.03536 0.0177 0.002667" rpy="0 -0.104793 0"/>
+    <axis xyz="0 -1 0"/>
+  </joint>
+  <joint name="Revolute_2_4" type="revolute">
+    <parent link="v2_1_4"/>
+    <child link="XG_ZIJI_16_1_2"/>
+    <origin xyz="-0.015077 -0.04945 0.004624" rpy="0 -0.18235 -3.141593"/>
+    <axis xyz="0 1 0"/>
+  </joint>
+  <joint name="Part_1_1_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="Part_1_1"/>
+    <origin xyz="0.071188 0.078371 0.013477" rpy="2.96748 0 -1.110507"/>
+  </joint>
+  <joint name="PCB_CHAZUO_92_1_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="PCB_CHAZUO_92_1"/>
+    <origin xyz="-0.050308 -0.03757 -0.122423" rpy="1.570796 0 -1.563327"/>
+  </joint>
+  <joint name="v2_1_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="v2_1"/>
+    <origin xyz="-0.047639 -0.002488 -0.140123" rpy="1.570796 0 -1.860757"/>
+  </joint>
+  <joint name="v2_1_2_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="v2_1_2"/>
+    <origin xyz="-0.059879 -0.008606 -0.171873" rpy="-1.570796 0 -0.353725"/>
+  </joint>
+  <joint name="GE_27_1_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="GE_27_1"/>
+    <origin xyz="-0.050498 -0.01207 -0.128423" rpy="3.141593 0 -1.563327"/>
+  </joint>
+  <joint name="ZK_122_1_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="ZK_122_1"/>
+    <origin xyz="-0.050308 -0.03757 -0.122423" rpy="1.570796 0 -1.563327"/>
+  </joint>
+  <joint name="MOTOR_1723_3_1_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="MOTOR_1723_3_1"/>
+    <origin xyz="-0.049058 -0.03756 -0.145273" rpy="1.570796 0 0.007469"/>
+  </joint>
+  <joint name="PCB_CHAZUO_92_1_2_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="PCB_CHAZUO_92_1_2"/>
+    <origin xyz="0.060671 0.054795 0.046759" rpy="3.141593 -0.069319 -2.681304"/>
+  </joint>
+  <joint name="v2_1_4_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="v2_1_4"/>
+    <origin xyz="0.096751 0.01749 0.047483" rpy="-3.141593 0.251669 0.460289"/>
+  </joint>
+  <joint name="GE_27_1_2_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="GE_27_1_2"/>
+    <origin xyz="0.086127 0.06072 0.044993" rpy="-1.570796 -0.069319 -2.681304"/>
+  </joint>
+  <joint name="ZK_122_1_2_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="ZK_122_1_2"/>
+    <origin xyz="0.060671 0.054795 0.046759" rpy="3.141593 -0.069319 -2.681304"/>
+  </joint>
+  <joint name="MOTOR_1723_3_1_2_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="MOTOR_1723_3_1_2"/>
+    <origin xyz="0.070899 0.034362 0.048006" rpy="0 -1.501477 0.460289"/>
+  </joint>
+  <joint name="PCB_CHAZUO_92_1_3_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="PCB_CHAZUO_92_1_3"/>
+    <origin xyz="-0.046482 -0.019316 -0.067523" rpy="-3.141593 -1.568773 0.460289"/>
+  </joint>
+  <joint name="v2_1_5_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="v2_1_5"/>
+    <origin xyz="-0.045431 0.000961 -0.093023" rpy="0 0 -2.681304"/>
+  </joint>
+  <joint name="v2_1_6_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="v2_1_6"/>
+    <origin xyz="-0.07741 0.020544 -0.092034" rpy="0 0.098974 0.460289"/>
+  </joint>
+  <joint name="GE_27_1_3_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="GE_27_1_3"/>
+    <origin xyz="-0.049193 -0.013963 -0.093023" rpy="-1.570796 -1.568773 0.460289"/>
+  </joint>
+  <joint name="ZK_122_1_3_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="ZK_122_1_3"/>
+    <origin xyz="-0.046482 -0.019316 -0.067523" rpy="-3.141593 -1.568773 0.460289"/>
+  </joint>
+  <joint name="MOTOR_1723_3_1_3_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="MOTOR_1723_3_1_3"/>
+    <origin xyz="-0.057752 0.000601 -0.06752" rpy="0 -0.002023 -2.681304"/>
+  </joint>
+  <joint name="PCB_CHAZUO_92_1_4_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="PCB_CHAZUO_92_1_4"/>
+    <origin xyz="-0.046752 -0.01945 0.030478" rpy="0 1.568773 -2.681304"/>
+  </joint>
+  <joint name="v2_1_8_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="v2_1_8"/>
+    <origin xyz="-0.077591 0.020454 0.056925" rpy="0 0.09487 0.460289"/>
+  </joint>
+  <joint name="GE_27_1_4_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="GE_27_1_4"/>
+    <origin xyz="-0.049371 -0.014051 0.055978" rpy="1.570796 1.568773 -2.681304"/>
+  </joint>
+  <joint name="ZK_122_1_4_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="ZK_122_1_4"/>
+    <origin xyz="-0.046752 -0.01945 0.030478" rpy="0 1.568773 -2.681304"/>
+  </joint>
+  <joint name="MOTOR_1723_3_1_4_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="MOTOR_1723_3_1_4"/>
+    <origin xyz="-0.055782 0.001577 0.030476" rpy="-3.141593 0.002023 0.460289"/>
   </joint>
 </robot>

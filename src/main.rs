@@ -353,9 +353,9 @@ fn resolve_urdf_path(path: Option<PathBuf>) -> Result<PathBuf, Box<dyn std::erro
     }
 
     for dir in [Path::new("model"), Path::new("puppyarm/model")] {
-        let robot = dir.join("robot.urdf");
-        if robot.is_file() {
-            return Ok(robot);
+        let preferred = dir.join("PuppyArm.urdf");
+        if preferred.is_file() {
+            return Ok(preferred);
         }
         if let Some(first) = first_urdf_in_dir(dir) {
             return Ok(first);
@@ -1321,7 +1321,12 @@ fn render_urdf_view(state: &UrdfViewerState) -> Item {
         );
 
         if robot.movable_joint_indices.is_empty() {
-            controls.push(text("No movable URDF joints detected.").margin_bottom(8));
+            controls
+                .push(text("No movable URDF joints detected (all joints are fixed).").margin_bottom(4));
+            controls.push(
+                text("Using servo-driven base transform fallback for visualization.")
+                    .margin_bottom(8),
+            );
         }
 
         for (slider_slot, joint_index) in robot.movable_joint_indices.iter().enumerate() {
@@ -2033,6 +2038,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 sim.step(dt.max(0.001));
                 state.snapshots = sim.servo_snapshots();
+                sync_urdf_with_servo_snapshots(&mut state.urdf_view, &state.snapshots);
 
                 if last_render.elapsed() >= Duration::from_millis(UI_RENDER_INTERVAL_MS) {
                     for id in &client_ids {
