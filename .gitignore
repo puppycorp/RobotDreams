@@ -2,3 +2,10 @@
 workdir
 __pycache__/
 **/__pycache__/
+.DS_Store
+puppyarm/model/assemblies/
+puppyarm/model/assembly_root.json
+puppyarm/model/manifest.json
+puppyarm/model/mesh_index.json
+puppyarm/model/errors.jsonl
+.DS_Store

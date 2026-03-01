@@ -1,0 +1,840 @@
+<?xml version="1.0"?>
+<robot name="onshape_robot">
+  <link name="base_link"/>
+  <link name="Part_1_3">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/Part_1_3.stl"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/Part_1_3.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="Part_1_3_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="Part_1_3"/>
+    <origin xyz="-0.050504 -0.01132 -0.124523" rpy="0 0 0.007469"/>
+  </joint>
+  <link name="Part_1_8">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/Part_1_8.stl"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/Part_1_8.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="Part_1_8_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="Part_1_8"/>
+    <origin xyz="-0.050498 -0.01207 -0.154023" rpy="0 0 0.007469"/>
+  </joint>
+  <link name="Part_1_1">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/Part_1_1.stl"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/Part_1_1.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="Part_1_1_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="Part_1_1"/>
+    <origin xyz="0.079209 0.061992 -0.0227" rpy="3.121406 0 -1.233812"/>
+  </joint>
+  <link name="PCB_CHAZUO_92_1">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/PCB_CHAZUO_92_1.stl"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/PCB_CHAZUO_92_1.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="PCB_CHAZUO_92_1_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="PCB_CHAZUO_92_1"/>
+    <origin xyz="-0.050308 -0.03757 -0.122423" rpy="1.570796 0 -1.563327"/>
+  </joint>
+  <link name="v2_1">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/v2_1_2.stl"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/v2_1_2.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="v2_1_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="v2_1"/>
+    <origin xyz="-0.047639 -0.002488 -0.140123" rpy="1.570796 0 -1.860757"/>
+  </joint>
+  <link name="v2_1_2">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/v2_1.stl"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/v2_1.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="v2_1_2_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="v2_1_2"/>
+    <origin xyz="-0.059879 -0.008606 -0.171873" rpy="-1.570796 0 -0.353725"/>
+  </joint>
+  <link name="GE_27_1">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/GE_27_1.stl"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/GE_27_1.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="GE_27_1_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="GE_27_1"/>
+    <origin xyz="-0.050498 -0.01207 -0.128423" rpy="3.141593 0 -1.563327"/>
+  </joint>
+  <link name="ZK_122_1">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/ZK_122_1.stl"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/ZK_122_1.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="ZK_122_1_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="ZK_122_1"/>
+    <origin xyz="-0.050308 -0.03757 -0.122423" rpy="1.570796 0 -1.563327"/>
+  </joint>
+  <link name="MOTOR_1723_3_1">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/MOTOR_1723_3_1.stl"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/MOTOR_1723_3_1.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="MOTOR_1723_3_1_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="MOTOR_1723_3_1"/>
+    <origin xyz="-0.049058 -0.03756 -0.145273" rpy="1.570796 0 0.007469"/>
+  </joint>
+  <link name="SG_ZIJI_15_1">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/SG_ZIJI_15_1.stl"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/SG_ZIJI_15_1.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="SG_ZIJI_15_1_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="SG_ZIJI_15_1"/>
+    <origin xyz="-0.050308 -0.03757 -0.122423" rpy="1.570796 0 -1.563327"/>
+  </joint>
+  <link name="XG_ZIJI_16_1">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/XG_ZIJI_16_1.stl"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/XG_ZIJI_16_1.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="XG_ZIJI_16_1_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="XG_ZIJI_16_1"/>
+    <origin xyz="-0.050308 -0.03757 -0.122423" rpy="1.570796 0 -1.563327"/>
+  </joint>
+  <link name="Part_2_2">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/Part_2_2.stl"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/Part_2_2.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="Part_2_2_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="Part_2_2"/>
+    <origin xyz="-0.050504 -0.01132 -0.121523" rpy="0 0 0.336985"/>
+  </joint>
+  <link name="Part_1_2">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/Part_1_2_3.stl"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/Part_1_2_3.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="Part_1_2_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="Part_1_2"/>
+    <origin xyz="-0.050504 -0.01132 -0.121523" rpy="0 0 0.007469"/>
+  </joint>
+  <link name="Part_1_2_2">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/Part_1_2_2.stl"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/Part_1_2_2.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="Part_1_2_2_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="Part_1_2_2"/>
+    <origin xyz="0.08769 0.037784 -0.0227" rpy="-0.020186 0 -1.233812"/>
+  </joint>
+  <link name="Part_1_1_2">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/Part_1_1_3.stl"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/Part_1_1_3.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="Part_1_1_2_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="Part_1_1_2"/>
+    <origin xyz="-0.050504 -0.01132 -0.113023" rpy="0 0 1.907781"/>
+  </joint>
+  <link name="Part_1_3_2">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/Part_1_2.stl"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/Part_1_2.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="Part_1_3_2_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="Part_1_3_2"/>
+    <origin xyz="-0.050955 -0.010789 -0.056023" rpy="3.141593 0 -1.233812"/>
+  </joint>
+  <link name="Part_1_1_3">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/Part_1_1_2.stl"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/Part_1_1_2.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="Part_1_1_3_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="Part_1_1_3"/>
+    <origin xyz="-0.03727 -0.005995 -0.018523" rpy="0 0 -1.233812"/>
+  </joint>
+  <link name="Part_1_2_3">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/Part_1_2.stl"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/Part_1_2.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="Part_1_2_3_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="Part_1_2_3"/>
+    <origin xyz="-0.050955 -0.010789 0.018977" rpy="0 0 -1.233812"/>
+  </joint>
+  <link name="PCB_CHAZUO_92_1_2">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/PCB_CHAZUO_92_1.stl"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/PCB_CHAZUO_92_1.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="PCB_CHAZUO_92_1_2_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="PCB_CHAZUO_92_1_2"/>
+    <origin xyz="0.062297 0.038636 0.016935" rpy="3.141593 -0.304321 -2.804608"/>
+  </joint>
+  <link name="v2_1_3">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/v2_1_2.stl"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/v2_1_2.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="v2_1_3_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="v2_1_3"/>
+    <origin xyz="0.100545 0.033282 0.009092" rpy="3.141593 -0.020186 -2.804608"/>
+  </joint>
+  <link name="v2_1_4">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/v2_1.stl"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/v2_1.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="v2_1_4_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="v2_1_4"/>
+    <origin xyz="0.092467 -0.003191 0.011784" rpy="-3.141593 0.251669 0.336985"/>
+  </joint>
+  <link name="GE_27_1_2">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/GE_27_1.stl"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/GE_27_1.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="GE_27_1_2_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="GE_27_1_2"/>
+    <origin xyz="0.087241 0.041018 0.009294" rpy="-1.570796 -0.304321 -2.804608"/>
+  </joint>
+  <link name="ZK_122_1_2">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/ZK_122_1.stl"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/ZK_122_1.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="ZK_122_1_2_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="ZK_122_1_2"/>
+    <origin xyz="0.062297 0.038636 0.016935" rpy="3.141593 -0.304321 -2.804608"/>
+  </joint>
+  <link name="MOTOR_1723_3_1_2">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/MOTOR_1723_3_1.stl"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/MOTOR_1723_3_1.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="MOTOR_1723_3_1_2_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="MOTOR_1723_3_1_2"/>
+    <origin xyz="0.070206 0.017195 0.018127" rpy="0 -1.266475 0.336985"/>
+  </joint>
+  <link name="SG_ZIJI_15_1_2">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/SG_ZIJI_15_1.stl"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/SG_ZIJI_15_1.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="SG_ZIJI_15_1_2_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="SG_ZIJI_15_1_2"/>
+    <origin xyz="0.062297 0.038636 0.016935" rpy="3.141593 -0.304321 -2.804608"/>
+  </joint>
+  <link name="XG_ZIJI_16_1_2">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/XG_ZIJI_16_1.stl"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/XG_ZIJI_16_1.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="XG_ZIJI_16_1_2_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="XG_ZIJI_16_1_2"/>
+    <origin xyz="0.062297 0.038636 0.016935" rpy="3.141593 -0.304321 -2.804608"/>
+  </joint>
+  <link name="PCB_CHAZUO_92_1_3">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/PCB_CHAZUO_92_1.stl"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/PCB_CHAZUO_92_1.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="PCB_CHAZUO_92_1_3_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="PCB_CHAZUO_92_1_3"/>
+    <origin xyz="-0.047544 -0.019767 -0.067523" rpy="-2.804608 -1.570796 0"/>
+  </joint>
+  <link name="v2_1_5">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/v2_1_2.stl"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/v2_1_2.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="v2_1_5_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="v2_1_5"/>
+    <origin xyz="-0.043959 0.000244 -0.093023" rpy="0 0 -2.804608"/>
+  </joint>
+  <link name="v2_1_6">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/v2_1.stl"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/v2_1.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="v2_1_6_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="v2_1_6"/>
+    <origin xyz="-0.073286 0.023612 -0.092034" rpy="0 0.098974 0.336985"/>
+  </joint>
+  <link name="GE_27_1_3">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/GE_27_1.stl"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/GE_27_1.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="GE_27_1_3_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="GE_27_1_3"/>
+    <origin xyz="-0.049528 -0.014104 -0.093023" rpy="-1.233812 -1.570796 0"/>
+  </joint>
+  <link name="ZK_122_1_3">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/ZK_122_1.stl"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/ZK_122_1.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="ZK_122_1_3_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="ZK_122_1_3"/>
+    <origin xyz="-0.047544 -0.019767 -0.067523" rpy="-2.804608 -1.570796 0"/>
+  </joint>
+  <link name="MOTOR_1723_3_1_3">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/MOTOR_1723_3_1.stl"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/MOTOR_1723_3_1.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="MOTOR_1723_3_1_3_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="MOTOR_1723_3_1_3"/>
+    <origin xyz="-0.056279 0.001385 -0.067523" rpy="0 0 -2.804608"/>
+  </joint>
+  <link name="SG_ZIJI_15_1_3">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/SG_ZIJI_15_1.stl"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/SG_ZIJI_15_1.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="SG_ZIJI_15_1_3_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="SG_ZIJI_15_1_3"/>
+    <origin xyz="-0.047544 -0.019767 -0.067523" rpy="-2.804608 -1.570796 0"/>
+  </joint>
+  <link name="XG_ZIJI_16_1_3">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/XG_ZIJI_16_1.stl"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/XG_ZIJI_16_1.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="XG_ZIJI_16_1_3_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="XG_ZIJI_16_1_3"/>
+    <origin xyz="-0.047544 -0.019767 -0.067523" rpy="-2.804608 -1.570796 0"/>
+  </joint>
+  <link name="Part_1_1_4">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/Part_1_1_4.stl"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/Part_1_1_4.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="Part_1_1_4_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="Part_1_1_4"/>
+    <origin xyz="0.019574 0.013496 0.017273" rpy="0.304321 0 1.907781"/>
+  </joint>
+  <link name="Part_1_2_4">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/Part_1_2.stl"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/Part_1_2.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="Part_1_2_4_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="Part_1_2_4"/>
+    <origin xyz="0.055188 0.025973 0.020619" rpy="1.875118 0 1.907781"/>
+  </joint>
+  <link name="PCB_CHAZUO_92_1_4">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/PCB_CHAZUO_92_1.stl"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/PCB_CHAZUO_92_1.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="PCB_CHAZUO_92_1_4_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="PCB_CHAZUO_92_1_4"/>
+    <origin xyz="-0.048016 -0.019932 0.030477" rpy="2.804608 1.570796 0"/>
+  </joint>
+  <link name="v2_1_7">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/v2_1_2.stl"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/v2_1_2.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="v2_1_7_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="v2_1_7"/>
+    <origin xyz="-0.044865 -0.000073 0.052981" rpy="0 -0.304321 -2.804608"/>
+  </joint>
+  <link name="v2_1_8">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/v2_1.stl"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/v2_1.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="v2_1_8_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="v2_1_8"/>
+    <origin xyz="-0.073762 0.023445 0.056925" rpy="0 0.09487 0.336985"/>
+  </joint>
+  <link name="GE_27_1_4">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/GE_27_1.stl"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/GE_27_1.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="GE_27_1_4_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="GE_27_1_4"/>
+    <origin xyz="-0.05 -0.01427 0.055977" rpy="-1.907781 1.570796 0"/>
+  </joint>
+  <link name="ZK_122_1_4">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/ZK_122_1.stl"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/ZK_122_1.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="ZK_122_1_4_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="ZK_122_1_4"/>
+    <origin xyz="-0.048016 -0.019932 0.030477" rpy="2.804608 1.570796 0"/>
+  </joint>
+  <link name="MOTOR_1723_3_1_4">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/MOTOR_1723_3_1.stl"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/MOTOR_1723_3_1.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="MOTOR_1723_3_1_4_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="MOTOR_1723_3_1_4"/>
+    <origin xyz="-0.054392 0.002046 0.030477" rpy="-3.141593 0 0.336985"/>
+  </joint>
+  <link name="SG_ZIJI_15_1_4">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/SG_ZIJI_15_1.stl"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/SG_ZIJI_15_1.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="SG_ZIJI_15_1_4_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="SG_ZIJI_15_1_4"/>
+    <origin xyz="-0.048016 -0.019932 0.030477" rpy="2.804608 1.570796 0"/>
+  </joint>
+  <link name="XG_ZIJI_16_1_4">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/XG_ZIJI_16_1.stl"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/XG_ZIJI_16_1.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="XG_ZIJI_16_1_4_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="XG_ZIJI_16_1_4"/>
+    <origin xyz="-0.048016 -0.019932 0.030477" rpy="2.804608 1.570796 0"/>
+  </joint>
+</robot>

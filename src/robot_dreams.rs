@@ -1,9 +1,9 @@
 use std::error::Error;
 use std::path::Path;
 #[cfg(unix)]
-use std::sync::atomic::{AtomicBool, Ordering};
-#[cfg(unix)]
 use std::sync::Arc;
+#[cfg(unix)]
+use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(unix)]
 use std::thread;
 
@@ -125,7 +125,9 @@ fn validate_virtual_servo_sim_config(config: VirtualServoSimConfig) -> std::io::
 }
 
 #[cfg(unix)]
-fn create_virtual_servo_bus_sim(config: VirtualServoSimConfig) -> robot_utils::servo::sim::FeetechBusSim {
+fn create_virtual_servo_bus_sim(
+    config: VirtualServoSimConfig,
+) -> robot_utils::servo::sim::FeetechBusSim {
     let mut sim = robot_utils::servo::sim::FeetechBusSim::new();
     for id in config.first_servo_id..=config.last_servo_id {
         sim.add_servo(id);
@@ -395,11 +397,7 @@ mod tests {
             while total < packet.len() {
                 let slice = &packet[total..];
                 let written = unsafe {
-                    libc::write(
-                        self.fd,
-                        slice.as_ptr() as *const libc::c_void,
-                        slice.len(),
-                    )
+                    libc::write(self.fd, slice.as_ptr() as *const libc::c_void, slice.len())
                 };
                 if written > 0 {
                     total += written as usize;

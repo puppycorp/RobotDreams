@@ -277,13 +277,8 @@ impl PortHandler for UnixRawPort {
         let mut total = 0usize;
         while total < packet.len() {
             let slice = &packet[total..];
-            let written = unsafe {
-                libc::write(
-                    self.fd,
-                    slice.as_ptr() as *const libc::c_void,
-                    slice.len(),
-                )
-            };
+            let written =
+                unsafe { libc::write(self.fd, slice.as_ptr() as *const libc::c_void, slice.len()) };
             if written > 0 {
                 total += written as usize;
                 continue;
@@ -293,9 +288,7 @@ impl PortHandler for UnixRawPort {
             }
 
             let err = io::Error::last_os_error();
-            if err.kind() == io::ErrorKind::WouldBlock
-                || err.kind() == io::ErrorKind::Interrupted
-            {
+            if err.kind() == io::ErrorKind::WouldBlock || err.kind() == io::ErrorKind::Interrupted {
                 if start.elapsed() > Duration::from_millis(200) {
                     break;
                 }
@@ -778,7 +771,10 @@ fn ticks_to_degrees(ticks: u16, calib: JointCalib) -> f64 {
 }
 
 fn format_target_angle_degrees(servo_id: u8, ticks: u16) -> String {
-    format!("{:.1}", ticks_to_degrees(ticks, joint_calib_for_servo(servo_id)))
+    format!(
+        "{:.1}",
+        ticks_to_degrees(ticks, joint_calib_for_servo(servo_id))
+    )
 }
 
 fn send_target(client: &mut PuppyClient, servo: &mut ServoUiState, time: u16, speed: u16) -> bool {
@@ -813,9 +809,7 @@ fn scan_bus(client: &mut PuppyClient, state: &mut AppState) {
 
     state.status = format!(
         "Scan complete: {} servo(s) found in fixed range {}..={}",
-        discovered,
-        PUPPYARM_FIRST_SERVO_ID,
-        PUPPYARM_LAST_SERVO_ID
+        discovered, PUPPYARM_FIRST_SERVO_ID, PUPPYARM_LAST_SERVO_ID
     );
 }
 
@@ -1217,18 +1211,16 @@ fn open_client(port: &str, baud: u32) -> Result<PuppyClient, Box<dyn std::error:
         if is_unix_tty_path(port) {
             match UnixRawPort::open(port, baud) {
                 Ok(raw) => return Ok(Scscl::new(ClientPort::UnixRaw(raw))),
-                Err(raw_err) => {
-                    match SerialPortHandler::open(port, baud) {
-                        Ok(serial) => return Ok(Scscl::new(ClientPort::Serial(serial))),
-                        Err(serial_err) => {
-                            return Err(format!(
-                                "failed to open {} as raw unix ({}) or serial ({})",
-                                port, raw_err, serial_err
-                            )
-                            .into());
-                        }
+                Err(raw_err) => match SerialPortHandler::open(port, baud) {
+                    Ok(serial) => return Ok(Scscl::new(ClientPort::Serial(serial))),
+                    Err(serial_err) => {
+                        return Err(format!(
+                            "failed to open {} as raw unix ({}) or serial ({})",
+                            port, raw_err, serial_err
+                        )
+                        .into());
                     }
-                }
+                },
             }
         }
     }
