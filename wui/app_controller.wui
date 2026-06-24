@@ -1,0 +1,523 @@
+<VStack
+  spacing=0
+  backgroundColor="#070b12"
+  overflow="hidden"
+>
+  <HStack
+    height=48
+    spacing=14
+    paddingLeft=14
+    paddingRight=14
+    backgroundColor="#080d14"
+    border="1px solid #172030"
+  >
+    <Text value="RobotDreams" color="#f4f8ff" minWidth=170 />
+    <Text value="Projects /" color="#7f8b9b" />
+    <Text value={state.project_name} color="#f4f8ff" />
+    <Text value="/" color="#7f8b9b" />
+    <Text value={state.project_version} color="#f4f8ff" grow=1 />
+    <Text value={state.simulation_label} color="#43d17a" />
+    <Text value={state.simulation_time} color="#aeb8c4" />
+    <Text value={state.gpu_label} color="#aeb8c4" />
+    <Text value="A. Engineer" color="#f4f8ff" />
+  </HStack>
+
+  <HStack
+    height=58
+    spacing=8
+    paddingLeft=14
+    paddingRight=14
+    paddingTop=8
+    backgroundColor="#0d1420"
+    border="1px solid #172030"
+  >
+    <Button text="New" backgroundColor="#111c2b" border="1px solid #26364d" color="#dce7f3" height=36 />
+    <Button text="Open" backgroundColor="#111c2b" border="1px solid #26364d" color="#dce7f3" height=36 />
+    <Button text="Save" backgroundColor="#111c2b" border="1px solid #26364d" color="#dce7f3" height=36 />
+    <Button text="Import" backgroundColor="#111c2b" border="1px solid #26364d" color="#dce7f3" height=36 />
+    <Button text="Export" backgroundColor="#111c2b" border="1px solid #26364d" color="#dce7f3" height=36 />
+    <Text value="" grow=1 />
+    <Button text="Play" onClick="PlaySimulation" backgroundColor="#1267c8" border="1px solid #2a8dff" color="#f4f8ff" height=36 />
+    <Button text="Pause" onClick="PauseSimulation" backgroundColor="#111c2b" border="1px solid #26364d" color="#dce7f3" height=36 />
+    <Button text="Stop" onClick="StopSimulation" backgroundColor="#111c2b" border="1px solid #26364d" color="#dce7f3" height=36 />
+    <Button text="Reset" onClick="ResetSimulation" backgroundColor="#111c2b" border="1px solid #26364d" color="#dce7f3" height=36 />
+    <Text value="" grow=1 />
+    <Button text="Camera" backgroundColor="#111c2b" border="1px solid #26364d" color="#dce7f3" height=36 />
+    <Button text="Select" backgroundColor="#111c2b" border="1px solid #26364d" color="#dce7f3" height=36 />
+    <Button text="Move" backgroundColor="#111c2b" border="1px solid #26364d" color="#dce7f3" height=36 />
+    <Button text="Rotate" backgroundColor="#111c2b" border="1px solid #26364d" color="#dce7f3" height=36 />
+    <Button text="Scale" backgroundColor="#111c2b" border="1px solid #26364d" color="#dce7f3" height=36 />
+    <Button text="Focus" backgroundColor="#111c2b" border="1px solid #26364d" color="#dce7f3" height=36 />
+    <Text value="" grow=1 />
+    <Button text="Build" backgroundColor="#111c2b" border="1px solid #26364d" color="#dce7f3" height=36 />
+    <Button text="Run" backgroundColor="#111c2b" border="1px solid #26364d" color="#dce7f3" height=36 />
+    <Button text="Deploy" backgroundColor="#111c2b" border="1px solid #26364d" color="#dce7f3" height=36 />
+  </HStack>
+
+  <HStack grow=1 minHeight=0 spacing=6 backgroundColor="#07101a" padding=6>
+    <VStack
+      width=280
+      minWidth=220
+      maxWidth=420
+      hresize=true
+      grow=1
+      minHeight=0
+      spacing=14
+      padding=10
+      backgroundColor="#0e1622"
+      border="1px solid #1d2a3b"
+      overflow="auto"
+    >
+      <VStack
+        spacing=8
+      >
+        <HStack>
+          <Text value="SCENE" color="#f4f8ff" grow=1 />
+          <Text value="..." color="#7f8b9b" />
+        </HStack>
+        <TextInput value="" placeholder="Search scene..." fill=true backgroundColor="#101a28" border="1px solid #26364d" color="#dce7f3" height=30 />
+        <For each={state.scene_sections} itemAs="section" key={section.title}>
+          <VStack spacing=3>
+            <HStack spacing=5>
+              <Text value="▾" color="#7f8b9b" />
+              <Text value={section.title} color="#8fbdf2" grow=1 />
+            </HStack>
+            <For each={section.rows} itemAs="row" key={row.label}>
+              <HStack
+                spacing=5
+                padding=4
+                backgroundColor={row.selected ? "#153961" : "#0e1622"}
+                border={row.selected ? "1px solid #245c95" : "1px solid #0e1622"}
+              >
+                <Text value={row.icon} color={row.selected ? "#9bd3ff" : "#7f8b9b"} minWidth=18 textAlign="center" />
+                <Text value={row.label} color="#dce7f3" grow=1 />
+                <Text value={row.detail} color="#7f8b9b" />
+                <Text value={row.status} color={row.status == "◉" ? "#43d17a" : "#607086"} minWidth=16 textAlign="center" />
+              </HStack>
+            </For>
+          </VStack>
+        </For>
+      </VStack>
+
+      <VStack
+        spacing=8
+      >
+        <HStack>
+          <Text value="ASSETS" color="#f4f8ff" grow=1 />
+          <Text value="..." color="#7f8b9b" />
+        </HStack>
+        <HStack spacing=6>
+          <Button text="Robots" backgroundColor="#14365f" border="1px solid #245c95" color="#f4f8ff" height=28 />
+          <Button text="Parts" backgroundColor="#111c2b" border="1px solid #26364d" color="#8a96a8" height=28 />
+          <Button text="Scenes" backgroundColor="#111c2b" border="1px solid #26364d" color="#8a96a8" height=28 />
+        </HStack>
+        <TextInput value="" placeholder="Search assets..." fill=true backgroundColor="#101a28" border="1px solid #26364d" color="#dce7f3" height=30 />
+        <HStack spacing=6 wrap=true>
+          <For each={state.assets} itemAs="asset" key={asset.name}>
+            <VStack
+              width=124
+              height=96
+              spacing=5
+              padding=6
+              backgroundColor="#111c2b"
+              border="1px solid #223149"
+            >
+              <CustomComponent
+                name={asset.preview_name}
+                entry={state.dashboard_preview_entry}
+                props={asset.preview_props}
+                height=42
+                border="1px solid #2f4d68"
+              />
+              <Text value={asset.name} color="#f4f8ff" breakWords=true />
+              <Text value={asset.kind} color="#8996aa" breakWords=true />
+            </VStack>
+          </For>
+        </HStack>
+        <HStack spacing=6>
+          <Button text="Add Asset" backgroundColor="#111c2b" border="1px solid #26364d" color="#dce7f3" />
+          <Button text="Asset Store" backgroundColor="#111c2b" border="1px solid #26364d" color="#dce7f3" />
+        </HStack>
+      </VStack>
+    </VStack>
+
+    <VStack grow=1 minHeight=0 spacing=6>
+      <HStack
+        height=34
+        spacing=6
+        paddingLeft=8
+        backgroundColor="#0d1420"
+        border="1px solid #1d2a3b"
+      >
+        <Text value={state.viewport_title} color="#f4f8ff" />
+        <Text value="x" color="#7f8b9b" grow=1 />
+        <Button text="+" backgroundColor="#111c2b" border="1px solid #26364d" color="#dce7f3" />
+      </HStack>
+
+      <HStack height=640 minHeight=360 maxHeight=640 spacing=6>
+        <VStack minWidth=520 maxWidth=980 hresize=true grow=1 minHeight=0 spacing=6>
+          <HStack
+            height=38
+            spacing=8
+            padding=7
+            backgroundColor="#101a28"
+            border="1px solid #1d2a3b"
+          >
+            <Text value="Perspective" color="#f4f8ff" grow=1 />
+            <Button text="Stages" backgroundColor="#14365f" border="1px solid #245c95" color="#f4f8ff" />
+            <Button text="Grid" backgroundColor="#111c2b" border="1px solid #26364d" color="#dce7f3" />
+            <Button text="Fit" backgroundColor="#111c2b" border="1px solid #26364d" color="#dce7f3" />
+          </HStack>
+          <CustomComponent
+            name={state.robot_scene_name}
+            entry={state.robot_scene_entry}
+            props={state.robot_scene_props}
+            height=596
+            grow=1
+            border="1px solid #245c95"
+          />
+        </VStack>
+
+        <VStack
+          width=220
+          grow=1
+          minHeight=0
+          spacing=10
+          padding=8
+          backgroundColor="#0e1622"
+          border="1px solid #1d2a3b"
+          overflow="auto"
+        >
+          <VStack
+            height=178
+            spacing=6
+            padding=8
+          >
+            <Text value="LIDAR_1" color="#f4f8ff" />
+            <CustomComponent
+              name={state.lidar_preview_name}
+              entry={state.dashboard_preview_entry}
+              props={state.lidar_preview_props}
+              height=132
+              grow=1
+            />
+          </VStack>
+          <VStack
+            height=170
+            spacing=6
+            padding=8
+          >
+            <Text value="SERVO BUS STATUS" color="#f4f8ff" />
+            <HStack spacing=7>
+              <Text value="▣" color="#43d17a" minWidth=18 textAlign="center" />
+              <VStack grow=1 spacing=3>
+                <HStack>
+                  <Text value="Battery" color="#8996aa" grow=1 />
+                  <Text value="78%" color="#dce7f3" />
+                </HStack>
+                <HStack height=6 backgroundColor="#172436" border="1px solid #26364d">
+                  <HStack width=118 backgroundColor="#43d17a" />
+                </HStack>
+              </VStack>
+            </HStack>
+            <HStack spacing=7>
+              <Text value="◉" color="#55a7ff" minWidth=18 textAlign="center" />
+              <Text value="Mode" color="#8996aa" grow=1 />
+              <Text value="Virtual" color="#dce7f3" />
+            </HStack>
+            <HStack spacing=7>
+              <Text value="↗" color="#55a7ff" minWidth=18 textAlign="center" />
+              <Text value="Speed" color="#8996aa" grow=1 />
+              <Text value="1.24 m/s" color="#dce7f3" />
+            </HStack>
+            <HStack spacing=7>
+              <Text value="▤" color="#55a7ff" minWidth=18 textAlign="center" />
+              <Text value="Payload" color="#8996aa" grow=1 />
+              <Text value="12.4 kg" color="#dce7f3" />
+            </HStack>
+            <HStack spacing=7>
+              <Text value="⌁" color="#43d17a" minWidth=18 textAlign="center" />
+              <Text value="Wi-Fi" color="#8996aa" grow=1 />
+              <Text value="Strong" color="#43d17a" />
+            </HStack>
+          </VStack>
+          <VStack
+            grow=1
+            spacing=6
+            padding=8
+          >
+            <Text value="CAMERA_1" color="#f4f8ff" />
+            <CustomComponent
+              name={state.camera_preview_name}
+              entry={state.dashboard_preview_entry}
+              props={state.camera_preview_props}
+              height=112
+              grow=1
+            />
+          </VStack>
+        </VStack>
+      </HStack>
+
+      <HStack
+        grow=1
+        minHeight=170
+        spacing=4
+        backgroundColor="#07101a"
+      >
+        <VStack
+          width=330
+          minWidth=260
+          maxWidth=520
+          hresize=true
+          spacing=6
+          padding=0
+          backgroundColor="#0e1622"
+          border="1px solid #1d2a3b"
+          overflow="scroll"
+        >
+          <HStack height=30 spacing=8 paddingLeft=8 paddingRight=8 backgroundColor="#0d1420" border="1px solid #172030">
+            <Text value="CONSOLE" color="#f4f8ff" />
+            <Text value="SCRIPT EDITOR" color="#7f8b9b" />
+            <Text value="TIMELINE" color="#7f8b9b" />
+            <Text value="LOGS" color="#7f8b9b" grow=1 textAlign="right" />
+          </HStack>
+          <VStack spacing=5 paddingLeft=8 paddingRight=8>
+            <For each={state.logs} itemAs="log" key={log.time}>
+              <HStack spacing=5>
+                <Text value={log.time} color="#7f8b9b" />
+                <Text value={log.level} color={log.color} />
+                <Text value={log.message} color="#dce7f3" grow=1 breakWords=true />
+              </HStack>
+            </For>
+          </VStack>
+          <TextInput value="" placeholder="Type a command..." fill=true backgroundColor="#101a28" border="1px solid #26364d" color="#dce7f3" height=28 />
+        </VStack>
+
+        <VStack
+          width=300
+          minWidth=240
+          maxWidth=520
+          hresize=true
+          spacing=4
+          padding=0
+          backgroundColor="#0e1622"
+          border="1px solid #1d2a3b"
+          overflow="scroll"
+        >
+          <HStack height=30 spacing=8 paddingLeft=8 paddingRight=8 backgroundColor="#0d1420" border="1px solid #172030">
+            <Text value="SCRIPT EDITOR" color="#f4f8ff" grow=1 />
+            <Text value="pick_and_place.py" color="#55a7ff" />
+          </HStack>
+          <VStack spacing=4 paddingLeft=8 paddingRight=8>
+            <For each={state.script_lines} itemAs="line" key={line.number}>
+              <HStack spacing=8>
+                <Text value={line.number} color="#546174" minWidth=24 />
+                <Text value={line.text} color="#dce7f3" grow=1 breakWords=true />
+              </HStack>
+            </For>
+          </VStack>
+        </VStack>
+
+        <VStack
+          grow=1
+          minHeight=150
+          spacing=7
+          padding=0
+          backgroundColor="#0e1622"
+          border="1px solid #1d2a3b"
+        >
+          <HStack height=30 spacing=8 paddingLeft=8 paddingRight=8 backgroundColor="#0d1420" border="1px solid #172030">
+            <Text value="PLOTTER" color="#f4f8ff" grow=1 />
+            <Text value="Joint Positions" color="#55a7ff" />
+            <Text value="Velocity" color="#8996aa" />
+            <Text value="Battery" color="#8996aa" />
+            <Text value="Lidar Points" color="#8996aa" />
+          </HStack>
+          <CustomComponent
+            name={state.telemetry_plot_name}
+            entry={state.dashboard_preview_entry}
+            props={state.telemetry_plot_props}
+            height=166
+            border="1px solid #1d2a3b"
+          />
+        </VStack>
+      </HStack>
+    </VStack>
+
+    <VStack
+      width=340
+      minWidth=300
+      maxWidth=560
+      hresize=true
+      grow=1
+      minHeight=0
+      spacing=14
+      padding=10
+      backgroundColor="#0e1622"
+      border="1px solid #1d2a3b"
+      overflow="auto"
+    >
+      <VStack
+        grow=1
+        minHeight=420
+        spacing=8
+      >
+        <HStack spacing=6>
+          <Button text="PROPERTIES" backgroundColor="#14365f" border="1px solid #245c95" color="#f4f8ff" height=28 />
+          <Button text="INSPECTOR" backgroundColor="#111c2b" border="1px solid #26364d" color="#8a96a8" height=28 />
+          <Text value="" grow=1 />
+        </HStack>
+        <VStack
+          minHeight=130
+          maxHeight=260
+          spacing=8
+          padding=10
+          backgroundColor="#111c2b"
+          border="1px solid #223149"
+        >
+          <HStack spacing=10>
+            <VStack
+              width=54
+              height=54
+              backgroundColor={state.selected_accent}
+              border="1px solid #2f6fa3"
+            >
+              <Text value={state.selected_badge} color="#f4f8ff" grow=1 textAlign="center" />
+            </VStack>
+            <VStack grow=1 spacing=5>
+              <HStack spacing=6>
+                <Text value={state.selected_name} color="#f4f8ff" grow=1 />
+                <Button text="+" backgroundColor="#111c2b" border="1px solid #26364d" color="#dce7f3" height=24 />
+                <Button text="⌖" backgroundColor="#111c2b" border="1px solid #26364d" color="#dce7f3" height=24 />
+              </HStack>
+              <HStack>
+                <Text value="Type" color="#8996aa" grow=1 />
+                <Text value={state.selected_type} color="#dce7f3" />
+              </HStack>
+              <HStack>
+                <Text value="Status" color="#8996aa" grow=1 />
+                <Text value={state.selected_status} color="#43d17a" />
+              </HStack>
+            </VStack>
+          </HStack>
+          <Text value={state.file_label} color="#8996aa" breakWords=true />
+          <HStack>
+            <Text value="Loaded" color="#8996aa" grow=1 />
+            <Text value={state.loaded_summary} color="#dce7f3" />
+          </HStack>
+          <Button text="Reload URDF" onClick="ReloadUrdf" backgroundColor="#111c2b" border="1px solid #26364d" color="#dce7f3" height=30 />
+        </VStack>
+
+        <Text value="Transform" color="#55a7ff" />
+        <For each={state.transform_properties} itemAs="prop" key={prop.name}>
+          <HStack spacing=8>
+            <Text value={prop.name} color="#8996aa" grow=1 />
+            <Text value={prop.value} color="#dce7f3" />
+          </HStack>
+        </For>
+
+        <Text value="Joints" color="#55a7ff" />
+        <HStack spacing=5>
+          <Text value="Joint" color="#8996aa" grow=1 />
+          <Text value="Position" color="#8996aa" minWidth=56 textAlign="right" />
+          <Text value="Velocity" color="#8996aa" minWidth=52 textAlign="right" />
+          <Text value="Torque" color="#8996aa" minWidth=48 textAlign="right" />
+        </HStack>
+        <If test={state.no_movable_joints}>
+          <Text value="No movable URDF joints detected." color="#f3b84f" />
+        </If>
+        <For each={state.joint_controls} itemAs="joint" key={joint.index}>
+          <VStack spacing=2>
+            <HStack spacing=5>
+              <Text value={joint.label} color="#dce7f3" grow=1 breakWords=true />
+              <Text value={joint.display_value} color="#55a7ff" minWidth=56 textAlign="right" />
+              <Text value={joint.velocity_display} color="#dce7f3" minWidth=52 textAlign="right" />
+              <Text value={joint.torque_display} color="#dce7f3" minWidth=48 textAlign="right" />
+            </HStack>
+            <Slider
+              min={joint.min}
+              max={joint.max}
+              value={joint.value}
+              step=1
+              onSliderChange="SetJointControl"
+              arg={joint.index}
+            />
+          </VStack>
+        </For>
+
+        <Text value="Base Control" color="#55a7ff" />
+        <For each={state.base_controls} itemAs="control" key={control.index}>
+          <VStack spacing=3>
+            <HStack>
+              <Text value={control.label} color="#dce7f3" grow=1 />
+              <Text value={control.display_value} color="#55a7ff" />
+            </HStack>
+            <Slider
+              min={control.min}
+              max={control.max}
+              value={control.value}
+              step=1
+              onSliderChange="SetBaseControl"
+              arg={control.index}
+            />
+          </VStack>
+        </For>
+
+        <Text value="Physics" color="#55a7ff" />
+        <For each={state.physics_properties} itemAs="prop" key={prop.name}>
+          <HStack spacing=8>
+            <Text value={prop.name} color="#8996aa" grow=1 />
+            <Text value={prop.value} color="#dce7f3" />
+          </HStack>
+        </For>
+
+        <Text value="Sensors" color="#55a7ff" />
+        <For each={state.sensors} itemAs="sensor" key={sensor.name}>
+          <HStack spacing=8>
+            <Text value={sensor.name} color="#dce7f3" grow=1 />
+            <Text value={sensor.target} color="#8996aa" />
+            <Text value={sensor.rate} color="#55a7ff" />
+          </HStack>
+        </For>
+      </VStack>
+
+      <VStack
+        height=126
+        minHeight=96
+        maxHeight=220
+        vresize=true
+        spacing=6
+      >
+        <Text value="SIMULATION CONTROL" color="#f4f8ff" />
+        <HStack>
+          <Text value="Environment" color="#8996aa" grow=1 />
+          <Text value="Warehouse" color="#dce7f3" />
+        </HStack>
+        <HStack>
+          <Text value="Physics" color="#8996aa" grow=1 />
+          <Text value="Realistic" color="#dce7f3" />
+        </HStack>
+        <HStack spacing=8>
+          <Text value="Time Scale" color="#8996aa" />
+          <Slider min=0 max=100 value=50 step=1 />
+          <Text value="1.00" color="#55a7ff" />
+        </HStack>
+      </VStack>
+    </VStack>
+  </HStack>
+
+  <HStack
+    height=30
+    spacing=18
+    paddingLeft=14
+    paddingRight=14
+    backgroundColor="#080d14"
+    border="1px solid #172030"
+  >
+    <Text value="" grow=1 />
+    <Text value="ROS 2 Humble" color="#43d17a" />
+    <Text value="DDS" color="#43d17a" />
+    <Text value="Connected" color="#43d17a" />
+    <Text value={state.memory_label} color="#aeb8c4" />
+  </HStack>
+</VStack>

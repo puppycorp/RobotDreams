@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 #![allow(non_snake_case)]
 
+mod app_controller;
 mod physics;
 mod robot_dreams;
 mod urdf;
@@ -23,8 +24,8 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::app_controller::AppController;
 use crate::robot_dreams::{VirtualServoSimConfig, run_virtual_servo_sim};
-use crate::urdf_view_controller::UrdfViewController;
 use log::LevelFilter;
 #[cfg(unix)]
 use robot_utils::servo::protocol::port_handler::PortHandler;
@@ -44,7 +45,8 @@ const TOGGLE_SERIAL_BRIDGE_BUTTON_ID: u32 = 7;
 const TOGGLE_VIRTUAL_BUS_BUTTON_ID: u32 = 8;
 const URDF_RELOAD_BUTTON_ID: u32 = 1001;
 const ROBOT_SCENE_CONTROLLER_ID: u32 = 1002;
-const ROBOT_SCENE_CONTROLLER_ENTRY: &str = "/fs/wgui-controllers/robot-scene/controller.js";
+const ROBOT_SCENE_CONTROLLER_ENTRY: &str =
+    "/fs/wgui-controllers/robot-scene/controller.js?v=workbench-left-inspector-resize";
 const URDF_JOINT_SLIDER_BASE_ID: u32 = 30_000;
 const URDF_BASE_SLIDER_BASE_ID: u32 = 31_000;
 
@@ -67,6 +69,12 @@ const URDF_TO_VIEW_ROT_X: f32 = -std::f32::consts::FRAC_PI_2;
 )]
 struct Args {
     #[arg(
+        value_name = "PROJECT_OR_URDF_PATH",
+        help = "RobotDreams project/model JSON, URDF file, or folder to open in the workbench"
+    )]
+    path: Option<PathBuf>,
+
+    #[arg(
         long,
         value_name = "PORT",
         help = "Initial serial port path shown in UI (e.g. COM6 or /dev/ttyUSB0)"
@@ -87,6 +95,9 @@ struct Args {
 enum Command {
     /// Run a headless virtual servo bus and print its PTY path.
     Vbus(VbusArgs),
+
+    /// Launch the legacy virtual servo bus UI.
+    ServoBusUi,
 
     /// Launch a WGUI URDF viewer for a model file.
     UrdfView(UrdfViewArgs),
@@ -349,9 +360,84 @@ fn first_urdf_recursive(dir: &Path) -> Option<PathBuf> {
     candidates.into_iter().next()
 }
 
+fn read_json_file(path: &Path) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    let text = std::fs::read_to_string(path)?;
+    Ok(serde_json::from_str(&text)?)
+}
+
+fn json_string_path<'a>(value: &'a serde_json::Value, path: &[&str]) -> Option<&'a str> {
+    let mut current = value;
+    for key in path {
+        current = current.get(*key)?;
+    }
+    current.as_str()
+}
+
+fn resolve_json_urdf_path(path: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let json = read_json_file(path)?;
+    let base = path.parent().unwrap_or_else(|| Path::new("."));
+
+    if let Some(model_profile) = json_string_path(&json, &["modelProfile"]) {
+        return resolve_robot_input_path(base.join(model_profile));
+    }
+
+    if let Some(model_profile) = json
+        .get("scene")
+        .and_then(|scene| scene.get("robots"))
+        .and_then(|robots| robots.as_array())
+        .and_then(|robots| robots.first())
+        .and_then(|robot| robot.get("model"))
+        .and_then(|model| model.as_str())
+    {
+        return resolve_robot_input_path(base.join(model_profile));
+    }
+
+    let model_type = json_string_path(&json, &["robot", "model", "type"]);
+    if model_type.is_none_or(|value| value.eq_ignore_ascii_case("urdf"))
+        && let Some(urdf_path) = json_string_path(&json, &["robot", "model", "path"])
+    {
+        return Ok(base.join(urdf_path));
+    }
+
+    Err(format!(
+        "JSON file '{}' is not a recognized RobotDreams project or model profile",
+        path.display()
+    )
+    .into())
+}
+
+fn resolve_robot_input_path(path: PathBuf) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    if path.is_dir() {
+        for candidate in [
+            path.join("robotdreams.json"),
+            path.join("robotdreams.example.json"),
+            path.join("model/robotdreams.json"),
+        ] {
+            if candidate.exists() {
+                return resolve_json_urdf_path(&candidate);
+            }
+        }
+
+        if let Some(first) = first_urdf_recursive(&path) {
+            return Ok(first);
+        }
+    }
+
+    if path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.eq_ignore_ascii_case("json"))
+        .unwrap_or(false)
+    {
+        return resolve_json_urdf_path(&path);
+    }
+
+    Ok(path)
+}
+
 fn resolve_urdf_path(path: Option<PathBuf>) -> Result<PathBuf, Box<dyn std::error::Error>> {
     if let Some(path) = path {
-        return Ok(path);
+        return resolve_robot_input_path(path);
     }
 
     if let Some(first) = first_urdf_recursive(Path::new("models")) {
@@ -1238,8 +1324,7 @@ fn render_urdf_view(state: &UrdfViewerState) -> Item {
         .as_ref()
         .map(|path| path.display().to_string())
         .unwrap_or_else(|| {
-            "(auto-discovery failed: place a .urdf in ./models, ./examples, or ./model)"
-                .to_string()
+            "(auto-discovery failed: place a .urdf in ./models, ./examples, or ./model)".to_string()
         });
     let base_translation = [
         urdf_slider_value_to_units(state.base_translation_values[0]),
@@ -1937,14 +2022,14 @@ async fn run_urdf_view(
     ensure_ui_bind_available(bind_addr)?;
 
     let browser_url = ui_url(bind_addr);
-    println!("Robot Dreams URDF viewer listening on {}", browser_url);
+    println!("RobotDreams workbench listening on {}", browser_url);
     println!("URDF file: {}", urdf_path.display());
     println!("Press Ctrl-C to stop.");
 
     let mut wgui = Wgui::new(bind_addr);
     wgui.add_page_with("/", move || {
         let urdf_path = urdf_path.clone();
-        async move { UrdfViewController::new(Some(urdf_path)) }
+        async move { AppController::new(Some(urdf_path)) }
     });
     wgui.run().await;
 
@@ -1954,6 +2039,7 @@ async fn run_urdf_view(
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let Args {
+        path,
         port,
         baud,
         bind,
@@ -1988,7 +2074,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             run_urdf_view(urdf_args, bind_addr).await?;
             return Ok(());
         }
-        None => {}
+        None => {
+            let bind_addr: SocketAddr = bind.parse().map_err(|err| {
+                format!(
+                    "invalid --bind value '{}': {} (expected host:port)",
+                    bind, err
+                )
+            })?;
+
+            simple_logger::SimpleLogger::new()
+                .with_level(LevelFilter::Info)
+                .without_timestamps()
+                .init()
+                .unwrap();
+
+            run_urdf_view(UrdfViewArgs { path }, bind_addr).await?;
+            return Ok(());
+        }
+        Some(Command::ServoBusUi) => {}
     }
 
     let bind_addr: SocketAddr = bind.parse().map_err(|err| {

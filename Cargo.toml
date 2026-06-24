@@ -7,7 +7,7 @@ edition = "2024"
 members = [".", "robot_utils"]
 
 [workspace.dependencies]
-wgui = { git = "https://github.com/J45k4/wgui.git", rev = "4cb91b62a9a05c44ea589912e247e24f5f14210d" }
+wgui = { git = "https://github.com/J45k4/wgui.git", rev = "fd0d47f52848159aeccd5a3d031beedae6037260" }
 
 [[bin]]
 name = "robot_dreams"
