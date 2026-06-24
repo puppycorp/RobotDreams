@@ -4,10 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [workspace]
-members = [".", "robot_utils", "puppyarm"]
+members = [".", "robot_utils"]
 
 [workspace.dependencies]
-wgui = { git = "https://github.com/J45k4/wgui.git", rev = "0393a2162f41be130a7d0ce5efc73a12b78a7b9a" }
+wgui = { git = "https://github.com/J45k4/wgui.git", rev = "4cb91b62a9a05c44ea589912e247e24f5f14210d" }
 
 [[bin]]
 name = "robot_dreams"
@@ -21,6 +21,7 @@ rapier3d = { version = "0.23", default-features = false, features = ["dim3", "f3
 robot_utils = { path = "robot_utils" }
 roxmltree = "0.20"
 serialport = "4"
+serde_json = "1"
 simple_logger = "5"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 urdf-rs = "0.7"

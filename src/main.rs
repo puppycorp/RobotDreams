@@ -4,6 +4,7 @@
 mod physics;
 mod robot_dreams;
 mod urdf;
+mod urdf_view_controller;
 
 use clap::{Args as ClapArgs, Parser, Subcommand};
 use std::collections::{HashMap, HashSet};
@@ -23,6 +24,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::robot_dreams::{VirtualServoSimConfig, run_virtual_servo_sim};
+use crate::urdf_view_controller::UrdfViewController;
 use log::LevelFilter;
 #[cfg(unix)]
 use robot_utils::servo::protocol::port_handler::PortHandler;
@@ -41,6 +43,8 @@ const SERIAL_BAUD_INPUT_ID: u32 = 6;
 const TOGGLE_SERIAL_BRIDGE_BUTTON_ID: u32 = 7;
 const TOGGLE_VIRTUAL_BUS_BUTTON_ID: u32 = 8;
 const URDF_RELOAD_BUTTON_ID: u32 = 1001;
+const ROBOT_SCENE_CONTROLLER_ID: u32 = 1002;
+const ROBOT_SCENE_CONTROLLER_ENTRY: &str = "/fs/wgui-controllers/robot-scene/controller.js";
 const URDF_JOINT_SLIDER_BASE_ID: u32 = 30_000;
 const URDF_BASE_SLIDER_BASE_ID: u32 = 31_000;
 
@@ -107,7 +111,7 @@ struct VbusArgs {
 struct UrdfViewArgs {
     #[arg(
         value_name = "URDF_PATH",
-        help = "URDF file path. If omitted, tries ./model/*.urdf then ./puppyarm/model/*.urdf"
+        help = "URDF file path. If omitted, searches ./models, ./examples, then ./model"
     )]
     path: Option<PathBuf>,
 }
@@ -291,39 +295,6 @@ impl UrdfViewerState {
     }
 }
 
-fn reload_urdf_state(state: &mut UrdfViewerState) {
-    if state.urdf_path.is_none() {
-        state.urdf_path = resolve_urdf_path(None).ok();
-    }
-
-    let Some(path) = state.urdf_path.as_ref() else {
-        state.status = "No URDF found in ./model or ./puppyarm/model".to_string();
-        state.robot = None;
-        return;
-    };
-
-    match parse_robot(path, &state.workspace_root) {
-        Ok(robot) => {
-            let mut next_joint_values = vec![0; robot.joints.len()];
-            for (dst, src) in next_joint_values.iter_mut().zip(state.joint_values.iter()) {
-                *dst = *src;
-            }
-            state.joint_values = next_joint_values;
-            state.status = format!(
-                "Loaded {} ({} links, {} joints)",
-                path.display(),
-                robot.links.len(),
-                robot.joints.len()
-            );
-            state.robot = Some(robot);
-        }
-        Err(err) => {
-            state.status = format!("Failed to load {}: {}", path.display(), err);
-            state.robot = None;
-        }
-    }
-}
-
 fn first_urdf_in_dir(dir: &Path) -> Option<PathBuf> {
     if !dir.is_dir() {
         return None;
@@ -347,22 +318,57 @@ fn first_urdf_in_dir(dir: &Path) -> Option<PathBuf> {
     candidates.into_iter().next()
 }
 
+fn collect_urdfs_recursive(dir: &Path, candidates: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_urdfs_recursive(&path, candidates);
+        } else if path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.eq_ignore_ascii_case("urdf"))
+            .unwrap_or(false)
+        {
+            candidates.push(path);
+        }
+    }
+}
+
+fn first_urdf_recursive(dir: &Path) -> Option<PathBuf> {
+    if !dir.is_dir() {
+        return None;
+    }
+
+    let mut candidates = Vec::new();
+    collect_urdfs_recursive(dir, &mut candidates);
+    candidates.sort();
+    candidates.into_iter().next()
+}
+
 fn resolve_urdf_path(path: Option<PathBuf>) -> Result<PathBuf, Box<dyn std::error::Error>> {
     if let Some(path) = path {
         return Ok(path);
     }
 
-    for dir in [Path::new("model"), Path::new("puppyarm/model")] {
-        let preferred = dir.join("PuppyArm.urdf");
-        if preferred.is_file() {
-            return Ok(preferred);
-        }
+    if let Some(first) = first_urdf_recursive(Path::new("models")) {
+        return Ok(first);
+    }
+
+    if let Some(first) = first_urdf_recursive(Path::new("examples")) {
+        return Ok(first);
+    }
+
+    for dir in [Path::new("model")] {
         if let Some(first) = first_urdf_in_dir(dir) {
             return Ok(first);
         }
     }
 
-    Err("No URDF path provided and no .urdf file found in ./model or ./puppyarm/model".into())
+    Err("No URDF path provided and no .urdf file found in ./models, ./examples, or ./model".into())
 }
 
 #[derive(Clone)]
@@ -773,6 +779,39 @@ fn parse_robot(urdf_path: &Path, workspace_root: &Path) -> Result<RobotModel, St
     parse_robot_from_xml(&xml, urdf_dir, workspace_root)
 }
 
+fn reload_urdf_state(state: &mut UrdfViewerState) {
+    if state.urdf_path.is_none() {
+        state.urdf_path = resolve_urdf_path(None).ok();
+    }
+
+    let Some(path) = state.urdf_path.as_ref() else {
+        state.status = "No URDF found in ./models, ./examples, or ./model".to_string();
+        state.robot = None;
+        return;
+    };
+
+    match parse_robot(path, &state.workspace_root) {
+        Ok(robot) => {
+            let mut next_joint_values = vec![0; robot.joints.len()];
+            for (dst, src) in next_joint_values.iter_mut().zip(state.joint_values.iter()) {
+                *dst = *src;
+            }
+            state.joint_values = next_joint_values;
+            state.status = format!(
+                "Loaded {} ({} links, {} joints)",
+                path.display(),
+                robot.links.len(),
+                robot.joints.len()
+            );
+            state.robot = Some(robot);
+        }
+        Err(err) => {
+            state.status = format!("Failed to load {}: {}", path.display(), err);
+            state.robot = None;
+        }
+    }
+}
+
 fn axis_to_euler(axis: [f32; 3], value: f32) -> [f32; 3] {
     let eps = 0.2;
     if axis[0].abs() > 1.0 - eps && axis[1].abs() < eps && axis[2].abs() < eps {
@@ -823,6 +862,16 @@ fn urdf_value_to_joint_units(joint: &JointDef, slider_value: i32) -> f32 {
             urdf_slider_value_to_units(slider_value)
         }
         _ => 0.0,
+    }
+}
+
+fn urdf_joint_type_name(joint_type: UrdfJointType) -> &'static str {
+    match joint_type {
+        UrdfJointType::Fixed => "fixed",
+        UrdfJointType::Revolute => "revolute",
+        UrdfJointType::Continuous => "continuous",
+        UrdfJointType::Prismatic => "prismatic",
+        UrdfJointType::Other => "other",
     }
 }
 
@@ -884,7 +933,8 @@ fn sync_urdf_with_servo_snapshots(state: &mut UrdfViewerState, snapshots: &[Feet
             * URDF_BASE_POSITION_RANGE as f32
             * 0.25)
             .round() as i32;
-        state.base_translation_values[2] = z.clamp(-URDF_BASE_POSITION_RANGE, URDF_BASE_POSITION_RANGE);
+        state.base_translation_values[2] =
+            z.clamp(-URDF_BASE_POSITION_RANGE, URDF_BASE_POSITION_RANGE);
     }
 }
 
@@ -1100,13 +1150,96 @@ fn apply_urdf_slider_change(state: &mut UrdfViewerState, slider_id: u32, value: 
     false
 }
 
+fn log_wgui_controller_event(event: &wgui::OnCustom) {
+    if event.id != ROBOT_SCENE_CONTROLLER_ID {
+        return;
+    }
+    if event.name == "jointSelected" {
+        if let Some(joint) = event.payload.get("joint").and_then(|value| value.as_str()) {
+            println!("robot-scene selected joint: {joint}");
+        }
+    }
+}
+
+fn robot_scene_props(
+    state: &UrdfViewerState,
+    base_translation: [f32; 3],
+    base_rotation: [f32; 3],
+) -> serde_json::Value {
+    let model_path = state
+        .urdf_path
+        .as_ref()
+        .map(|path| path.display().to_string());
+    let model_src = state.urdf_path.as_ref().and_then(|path| {
+        std::fs::canonicalize(path)
+            .ok()
+            .and_then(|canonical| path_to_workspace_url(&canonical, &state.workspace_root))
+            .or_else(|| path_to_workspace_url(path, &state.workspace_root))
+    });
+
+    let package_roots = state.urdf_path.as_ref().and_then(|path| {
+        let urdf_dir = path.parent()?;
+        let package_root = urdf_dir.parent()?;
+        let name = package_root.file_name()?.to_string_lossy().to_string();
+        let url = std::fs::canonicalize(package_root)
+            .ok()
+            .and_then(|canonical| path_to_workspace_url(&canonical, &state.workspace_root))
+            .or_else(|| path_to_workspace_url(package_root, &state.workspace_root))?;
+        Some(serde_json::json!({ name: url }))
+    });
+
+    let robot_summary = state.robot.as_ref().map(|robot| {
+        let movable_joints = robot
+            .movable_joint_indices
+            .iter()
+            .filter_map(|joint_index| {
+                let joint = robot.joints.get(*joint_index)?;
+                let slider_value = state.joint_values.get(*joint_index).copied().unwrap_or(0);
+                Some(serde_json::json!({
+                    "name": joint.name,
+                    "type": urdf_joint_type_name(joint.joint_type),
+                    "value": urdf_value_to_joint_units(joint, slider_value),
+                    "axis": joint.axis,
+                    "parent": joint.parent,
+                    "child": joint.child,
+                    "lower": joint.lower,
+                    "upper": joint.upper
+                }))
+            })
+            .collect::<Vec<_>>();
+
+        serde_json::json!({
+            "linkCount": robot.links.len(),
+            "jointCount": robot.joints.len(),
+            "rootLinks": robot.roots,
+            "movableJoints": movable_joints
+        })
+    });
+
+    serde_json::json!({
+        "model": {
+            "type": "urdf",
+            "path": model_path,
+            "src": model_src
+        },
+        "packageRoots": package_roots.unwrap_or_else(|| serde_json::json!({})),
+        "status": state.status,
+        "base": {
+            "translation": base_translation,
+            "rotation": base_rotation
+        },
+        "robot": robot_summary
+    })
+}
+
 fn render_urdf_view(state: &UrdfViewerState) -> Item {
     let file_label = state
         .urdf_path
         .as_ref()
         .map(|path| path.display().to_string())
         .unwrap_or_else(|| {
-            "(auto-discovery failed: place a .urdf in ./model or ./puppyarm/model)".to_string()
+            "(auto-discovery failed: place a .urdf in ./models, ./examples, or ./model)"
+                .to_string()
         });
     let base_translation = [
         urdf_slider_value_to_units(state.base_translation_values[0]),
@@ -1119,90 +1252,15 @@ fn render_urdf_view(state: &UrdfViewerState) -> Item {
         urdf_slider_value_to_units(state.base_rotation_values[2]),
     ];
 
-    let mut id_gen = 100;
-    let mut scene_children = vec![
-        perspective_camera(2)
-            .prop(
-                "position",
-                ThreePropValue::Vec3 {
-                    x: 0.28,
-                    y: 0.2,
-                    z: 0.35,
-                },
-            )
-            .prop(
-                "lookAt",
-                ThreePropValue::Vec3 {
-                    x: -0.05,
-                    y: 0.0,
-                    z: -0.05,
-                },
-            )
-            .prop("active", ThreePropValue::Bool { value: true }),
-        ambient_light(3).prop("intensity", ThreePropValue::Number { value: 0.65 }),
-        directional_light(4)
-            .prop(
-                "position",
-                ThreePropValue::Vec3 {
-                    x: 0.5,
-                    y: 1.0,
-                    z: 0.4,
-                },
-            )
-            .prop("intensity", ThreePropValue::Number { value: 1.1 }),
-    ];
-
-    if let Some(robot) = state.robot.as_ref() {
-        let mut model_children: Vec<ThreeNode> = Vec::new();
-        for root in &robot.roots {
-            if let Some(root_tree) =
-                build_link_subtree(robot, root, &state.joint_values, &mut id_gen)
-            {
-                model_children.push(root_tree);
-            }
-        }
-        let urdf_frame_group = group(
-            91,
-            [group(92, model_children).prop(
-                "rotation",
-                ThreePropValue::Vec3 {
-                    x: URDF_TO_VIEW_ROT_X,
-                    y: 0.0,
-                    z: 0.0,
-                },
-            )],
-        );
-        scene_children.push(
-            group(90, [urdf_frame_group])
-                .prop(
-                    "position",
-                    ThreePropValue::Vec3 {
-                        x: base_translation[0],
-                        y: base_translation[1],
-                        z: base_translation[2],
-                    },
-                )
-                .prop(
-                    "rotation",
-                    ThreePropValue::Vec3 {
-                        x: base_rotation[0],
-                        y: base_rotation[1],
-                        z: base_rotation[2],
-                    },
-                )
-                .prop(
-                    "rotationOrder",
-                    ThreePropValue::String {
-                        value: URDF_ROTATION_ORDER.to_string(),
-                    },
-                ),
-        );
-    }
-
-    let three_panel = three_view(scene(1, scene_children))
-        .height(520)
-        .border("1px solid #303030")
-        .grow(1);
+    let robot_scene = custom_component(
+        "robot-scene",
+        ROBOT_SCENE_CONTROLLER_ENTRY,
+        robot_scene_props(state, base_translation, base_rotation),
+    )
+    .id(ROBOT_SCENE_CONTROLLER_ID)
+    .height(520)
+    .border("1px solid #303030")
+    .grow(1);
 
     let mut controls = vec![
         text("URDF viewer").margin_bottom(8),
@@ -1321,8 +1379,9 @@ fn render_urdf_view(state: &UrdfViewerState) -> Item {
         );
 
         if robot.movable_joint_indices.is_empty() {
-            controls
-                .push(text("No movable URDF joints detected (all joints are fixed).").margin_bottom(4));
+            controls.push(
+                text("No movable URDF joints detected (all joints are fixed).").margin_bottom(4),
+            );
             controls.push(
                 text("Using servo-driven base transform fallback for visualization.")
                     .margin_bottom(8),
@@ -1360,7 +1419,7 @@ fn render_urdf_view(state: &UrdfViewerState) -> Item {
         .border("1px solid #d0d0d0")
         .background_color("#fafafa");
 
-    hstack([three_panel, controls_panel]).spacing(14).into()
+    hstack([robot_scene, controls_panel]).spacing(14).into()
 }
 
 fn render_servo_state(snapshot: &FeetechServoSnapshot) -> Item {
@@ -1882,38 +1941,12 @@ async fn run_urdf_view(
     println!("URDF file: {}", urdf_path.display());
     println!("Press Ctrl-C to stop.");
 
-    let mut state = UrdfViewerState::new(Some(urdf_path));
-    reload_urdf_state(&mut state);
-
     let mut wgui = Wgui::new(bind_addr);
-    let mut clients = HashSet::new();
-
-    loop {
-        let Some(message) = wgui.next().await else {
-            break;
-        };
-
-        let client_id = message.client_id;
-        match message.event {
-            ClientEvent::Disconnected { id: _ } => {
-                clients.remove(&client_id);
-            }
-            ClientEvent::Connected { id: _ } => {
-                clients.insert(client_id);
-                wgui.render(client_id, render_urdf_view(&state)).await;
-            }
-            ClientEvent::OnClick(click) => {
-                if click.id == URDF_RELOAD_BUTTON_ID {
-                    reload_urdf_state(&mut state);
-                }
-            }
-            _ => {}
-        }
-
-        for id in &clients {
-            wgui.render(*id, render_urdf_view(&state)).await;
-        }
-    }
+    wgui.add_page_with("/", move || {
+        let urdf_path = urdf_path.clone();
+        async move { UrdfViewController::new(Some(urdf_path)) }
+    });
+    wgui.run().await;
 
     Ok(())
 }
@@ -2085,7 +2118,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         .unwrap_or(false)
                                 {
                                     state.serial_status =
-                                        "Serial bridge disabled: this path is the active virtual bus. Use external client (e.g. puppyarm) to connect."
+                                        "Serial bridge disabled: this path is the active virtual bus. Use external firmware/client code to connect."
                                             .to_string();
                                 } else if let Ok(baudrate) = parsed_baud {
                                     serial_bridge = Some(SerialBridge::start(
@@ -2154,6 +2187,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
                         }
+                    }
+                    ClientEvent::OnCustom(custom) => {
+                        log_wgui_controller_event(&custom);
                     }
                     _ => {}
                 }

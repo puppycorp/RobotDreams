@@ -1,0 +1,66 @@
+<HStack spacing=14>
+  <CustomComponent
+    name={state.robot_scene_name}
+    entry={state.robot_scene_entry}
+    props={state.robot_scene_props}
+    height=520
+    border="1px solid #303030"
+    grow=1
+  />
+  <VStack
+    width=340
+    height=520
+    overflow="scroll"
+    padding=12
+    spacing=8
+    border="1px solid #d0d0d0"
+    backgroundColor="#fafafa"
+  >
+    <Text value="URDF viewer" />
+    <Text value={state.file_label} />
+    <Text value={state.status} />
+    <Button text="Reload URDF" onClick="ReloadUrdf" />
+
+    <If test={state.has_robot}>
+      <Text value={state.loaded_summary} />
+      <Text value="Base transform" />
+      <For each={state.base_controls} itemAs="control" key={control.index}>
+        <VStack spacing=4>
+          <Text value={control.label} />
+          <Slider
+            min={control.min}
+            max={control.max}
+            value={control.value}
+            step=1
+            onSliderChange="SetBaseControl"
+            arg={control.index}
+          />
+          <Text value={control.display_value} />
+        </VStack>
+      </For>
+
+      <If test={state.no_movable_joints}>
+        <Text value="No movable URDF joints detected (all joints are fixed)." />
+        <Text value="Using servo-driven base transform fallback for visualization." />
+      </If>
+
+      <For each={state.joint_controls} itemAs="joint" key={joint.index}>
+        <VStack spacing=4>
+          <Text value={joint.label} />
+          <Slider
+            min={joint.min}
+            max={joint.max}
+            value={joint.value}
+            step=1
+            onSliderChange="SetJointControl"
+            arg={joint.index}
+          />
+          <Text value={joint.display_value} />
+        </VStack>
+      </For>
+    </If>
+    <Else>
+      <Text value="No URDF loaded" />
+    </Else>
+  </VStack>
+</HStack>

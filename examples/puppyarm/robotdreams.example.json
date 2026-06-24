@@ -1,0 +1,5 @@
+{
+  "name": "puppyarm-example",
+  "modelProfile": "model/robotdreams.json",
+  "notes": "Example entrypoint for the local demo PuppyArm model profile."
+}
