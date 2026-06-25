@@ -1886,7 +1886,7 @@ checksum = "ccf3ec651a847eb01de73ccad15eb7d99f80485de043efb2f370cd654f4ea44b"
 [[package]]
 name = "wgui"
 version = "0.1.0"
-source = "git+https://github.com/J45k4/wgui.git?rev=fd0d47f52848159aeccd5a3d031beedae6037260#fd0d47f52848159aeccd5a3d031beedae6037260"
+source = "git+https://github.com/J45k4/wgui.git?tag=robotdreams-2026-06-25#f61567a3e2a4bef45691add6ce5d96ad8142550a"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2072,7 +2072,7 @@ checksum = "9edde0db4769d2dc68579893f2306b26c6ecfbe0ef499b013d731b7b9247e0b9"
 [[package]]
 name = "wui-derive"
 version = "0.1.0"
-source = "git+https://github.com/J45k4/wgui.git?rev=fd0d47f52848159aeccd5a3d031beedae6037260#fd0d47f52848159aeccd5a3d031beedae6037260"
+source = "git+https://github.com/J45k4/wgui.git?tag=robotdreams-2026-06-25#f61567a3e2a4bef45691add6ce5d96ad8142550a"
 dependencies = [
  "proc-macro2",
  "quote",

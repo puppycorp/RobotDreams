@@ -12,7 +12,8 @@
     border="1px solid #172030"
   >
     <Text value="RobotDreams" color="#f4f8ff" minWidth=170 />
-    <Text value="Projects /" color="#7f8b9b" />
+    <Link href="/" text="Projects" />
+    <Text value="/" color="#7f8b9b" />
     <Text value={state.project_name} color="#f4f8ff" />
     <Text value="/" color="#7f8b9b" />
     <Text value={state.project_version} color="#f4f8ff" grow=1 />
@@ -79,7 +80,7 @@
         <For each={state.scene_sections} itemAs="section" key={section.title}>
           <VStack spacing=3>
             <HStack spacing=5>
-              <Text value="▾" color="#7f8b9b" />
+              <Text value="v" color="#7f8b9b" />
               <Text value={section.title} color="#8fbdf2" grow=1 />
             </HStack>
             <For each={section.rows} itemAs="row" key={row.label}>
@@ -92,7 +93,7 @@
                 <Text value={row.icon} color={row.selected ? "#9bd3ff" : "#7f8b9b"} minWidth=18 textAlign="center" />
                 <Text value={row.label} color="#dce7f3" grow=1 />
                 <Text value={row.detail} color="#7f8b9b" />
-                <Text value={row.status} color={row.status == "◉" ? "#43d17a" : "#607086"} minWidth=16 textAlign="center" />
+                <Text value={row.status} color={row.status == "ok" ? "#43d17a" : "#607086"} minWidth=20 textAlign="center" />
               </HStack>
             </For>
           </VStack>
@@ -209,7 +210,7 @@
           >
             <Text value="SERVO BUS STATUS" color="#f4f8ff" />
             <HStack spacing=7>
-              <Text value="▣" color="#43d17a" minWidth=18 textAlign="center" />
+              <Text value="B" color="#43d17a" minWidth=18 textAlign="center" />
               <VStack grow=1 spacing=3>
                 <HStack>
                   <Text value="Battery" color="#8996aa" grow=1 />
@@ -221,22 +222,22 @@
               </VStack>
             </HStack>
             <HStack spacing=7>
-              <Text value="◉" color="#55a7ff" minWidth=18 textAlign="center" />
+              <Text value="M" color="#55a7ff" minWidth=18 textAlign="center" />
               <Text value="Mode" color="#8996aa" grow=1 />
               <Text value="Virtual" color="#dce7f3" />
             </HStack>
             <HStack spacing=7>
-              <Text value="↗" color="#55a7ff" minWidth=18 textAlign="center" />
+              <Text value="V" color="#55a7ff" minWidth=18 textAlign="center" />
               <Text value="Speed" color="#8996aa" grow=1 />
               <Text value="1.24 m/s" color="#dce7f3" />
             </HStack>
             <HStack spacing=7>
-              <Text value="▤" color="#55a7ff" minWidth=18 textAlign="center" />
+              <Text value="P" color="#55a7ff" minWidth=18 textAlign="center" />
               <Text value="Payload" color="#8996aa" grow=1 />
               <Text value="12.4 kg" color="#dce7f3" />
             </HStack>
             <HStack spacing=7>
-              <Text value="⌁" color="#43d17a" minWidth=18 textAlign="center" />
+              <Text value="W" color="#43d17a" minWidth=18 textAlign="center" />
               <Text value="Wi-Fi" color="#8996aa" grow=1 />
               <Text value="Strong" color="#43d17a" />
             </HStack>
@@ -388,7 +389,7 @@
               <HStack spacing=6>
                 <Text value={state.selected_name} color="#f4f8ff" grow=1 />
                 <Button text="+" backgroundColor="#111c2b" border="1px solid #26364d" color="#dce7f3" height=24 />
-                <Button text="⌖" backgroundColor="#111c2b" border="1px solid #26364d" color="#dce7f3" height=24 />
+                <Button text="Fit" backgroundColor="#111c2b" border="1px solid #26364d" color="#dce7f3" height=24 />
               </HStack>
               <HStack>
                 <Text value="Type" color="#8996aa" grow=1 />

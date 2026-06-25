@@ -269,16 +269,16 @@ fn scene_sections(state: &UrdfViewerState) -> Vec<WorkbenchSectionModel> {
         WorkbenchSectionModel {
             title: "Environment".to_string(),
             rows: vec![
-                workbench_row("▣", "Warehouse", "world", "◉", false),
-                workbench_row("▤", "Floor", "plane", "◉", false),
-                workbench_row("✦", "Lights", "3 sources", "◉", false),
+                workbench_row("ENV", "Warehouse", "world", "ok", false),
+                workbench_row("PLN", "Floor", "plane", "ok", false),
+                workbench_row("LGT", "Lights", "3 sources", "ok", false),
             ],
         },
         WorkbenchSectionModel {
             title: "Robots".to_string(),
             rows: vec![
-                workbench_row("⚙", "PuppyArm", "URDF", "◉", true),
-                workbench_row("⇄", "Virtual ServoBus", "ST3215", "◉", false),
+                workbench_row("ARM", "PuppyArm", "URDF", "ok", true),
+                workbench_row("BUS", "Virtual ServoBus", "ST3215", "ok", false),
             ],
         },
     ];
@@ -289,7 +289,7 @@ fn scene_sections(state: &UrdfViewerState) -> Vec<WorkbenchSectionModel> {
             rows: robot
                 .roots
                 .iter()
-                .map(|root| workbench_row("◇", root, "root link", "◌", false))
+                .map(|root| workbench_row("RT", root, "root link", "--", false))
                 .collect(),
         });
     }
@@ -297,20 +297,20 @@ fn scene_sections(state: &UrdfViewerState) -> Vec<WorkbenchSectionModel> {
     sections.push(WorkbenchSectionModel {
         title: "Objects".to_string(),
         rows: vec![
-            workbench_row("▤", "Worktable", "fixture", "◉", false),
-            workbench_row("▣", "Bin Blue", "container", "◉", false),
-            workbench_row("▧", "Fixture Plate", "tooling", "◉", false),
-            workbench_row("◇", "Calibration Tag", "marker", "◌", false),
+            workbench_row("TBL", "Worktable", "fixture", "ok", false),
+            workbench_row("BIN", "Bin Blue", "container", "ok", false),
+            workbench_row("FIX", "Fixture Plate", "tooling", "ok", false),
+            workbench_row("TAG", "Calibration Tag", "marker", "--", false),
         ],
     });
 
     sections.push(WorkbenchSectionModel {
         title: "Sensors".to_string(),
         rows: vec![
-            workbench_row("⌁", "Joint States", "100 Hz", "◉", false),
-            workbench_row("⇄", "Servo Bus", "virtual", "◉", false),
-            workbench_row("◎", "Lidar_1", "10 Hz", "◉", false),
-            workbench_row("◉", "Camera_1", "30 Hz", "◌", false),
+            workbench_row("JS", "Joint States", "100 Hz", "ok", false),
+            workbench_row("BUS", "Servo Bus", "virtual", "ok", false),
+            workbench_row("LDR", "Lidar_1", "10 Hz", "ok", false),
+            workbench_row("CAM", "Camera_1", "30 Hz", "--", false),
         ],
     });
 
@@ -525,7 +525,7 @@ impl AppController {
 
         WorkbenchModel {
             project_name: "SmartFactory".to_string(),
-            project_version: "v2.4.1 ▾".to_string(),
+            project_version: "v2.4.1 v".to_string(),
             simulation_label: if self.simulation_running {
                 "Simulation".to_string()
             } else {

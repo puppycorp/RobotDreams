@@ -1,0 +1,129 @@
+<VStack
+  fill=true
+  spacing=0
+  backgroundColor="#070b12"
+  overflow="hidden"
+>
+  <HStack
+    height=48
+    spacing=14
+    paddingLeft=14
+    paddingRight=14
+    backgroundColor="#080d14"
+    border="1px solid #172030"
+  >
+    <Text value="RobotDreams" color="#f4f8ff" minWidth=170 />
+    <Text value="Projects" color="#f4f8ff" grow=1 />
+    <Text value="Simulation" color="#43d17a" />
+    <Text value="00:12:48" color="#aeb8c4" />
+    <Text value="A. Engineer" color="#f4f8ff" />
+  </HStack>
+
+  <HStack
+    grow=1
+    minHeight=0
+    spacing=0
+    backgroundColor="#07101a"
+  >
+    <VStack
+      width=260
+      minHeight=0
+      spacing=12
+      padding=14
+      backgroundColor="#0e1622"
+      border="1px solid #1d2a3b"
+    >
+      <Text value="NAVIGATION" color="#8996aa" />
+      <Link href="/workbench" text="Workbench" />
+      <Text value="Projects" color="#55a7ff" />
+      <Text value="Assets" color="#8996aa" />
+      <Text value="Settings" color="#8996aa" />
+    </VStack>
+
+    <VStack
+      grow=1
+      minHeight=0
+      spacing=14
+      padding=18
+      overflow="auto"
+    >
+      <HStack spacing=10>
+        <VStack grow=1 spacing=4>
+          <Text value="Projects" color="#f4f8ff" />
+          <Text value="Open a RobotDreams project or model harness." color="#8996aa" />
+        </VStack>
+        <Button text="New Project" backgroundColor="#1267c8" border="1px solid #2a8dff" color="#f4f8ff" height=34 />
+        <Button text="Import" backgroundColor="#111c2b" border="1px solid #26364d" color="#dce7f3" height=34 />
+      </HStack>
+
+      <HStack
+        spacing=12
+        wrap=true
+      >
+        <For each={state.projects} itemAs="project" key={project.name}>
+          <VStack
+            width=300
+            height=168
+            spacing=8
+            padding=12
+            backgroundColor="#111c2b"
+            border="1px solid #223149"
+          >
+            <HStack spacing=10>
+              <VStack
+                width=48
+                height=48
+                backgroundColor={project.accent}
+                border="1px solid #2f6fa3"
+              >
+                <Text value={project.badge} color="#f4f8ff" grow=1 textAlign="center" />
+              </VStack>
+              <VStack grow=1 spacing=4>
+                <Text value={project.name} color="#f4f8ff" />
+                <Text value={project.kind} color="#8996aa" />
+              </VStack>
+              <Text value={project.status} color="#43d17a" />
+            </HStack>
+            <Text value={project.path} color="#8996aa" breakWords=true grow=1 />
+            <HStack>
+              <Text value={project.updated} color="#8996aa" grow=1 />
+              <Link href="/workbench" text="Open" />
+            </HStack>
+          </VStack>
+        </For>
+      </HStack>
+
+      <VStack
+        spacing=8
+        padding=12
+        backgroundColor="#0e1622"
+        border="1px solid #1d2a3b"
+      >
+        <Text value="RECENT ACTIVITY" color="#f4f8ff" />
+        <For each={state.activity} itemAs="item" key={item.time}>
+          <HStack spacing=10>
+            <Text value={item.time} color="#7f8b9b" minWidth=46 />
+            <VStack grow=1 spacing=3>
+              <Text value={item.title} color="#dce7f3" />
+              <Text value={item.detail} color="#8996aa" breakWords=true />
+            </VStack>
+          </HStack>
+        </For>
+      </VStack>
+    </VStack>
+  </HStack>
+
+  <HStack
+    height=30
+    spacing=18
+    paddingLeft=14
+    paddingRight=14
+    backgroundColor="#080d14"
+    border="1px solid #172030"
+  >
+    <Text value="" grow=1 />
+    <Text value="ROS 2 Humble" color="#43d17a" />
+    <Text value="DDS" color="#43d17a" />
+    <Text value="Connected" color="#43d17a" />
+  </HStack>
+</VStack>

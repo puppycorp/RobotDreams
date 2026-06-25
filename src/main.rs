@@ -3,6 +3,7 @@
 
 mod app_controller;
 mod physics;
+mod projects_controller;
 mod robot_dreams;
 mod urdf;
 mod urdf_view_controller;
@@ -25,6 +26,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::app_controller::AppController;
+use crate::projects_controller::ProjectsController;
 use crate::robot_dreams::{VirtualServoSimConfig, run_virtual_servo_sim};
 use log::LevelFilter;
 #[cfg(unix)]
@@ -47,6 +49,7 @@ const URDF_RELOAD_BUTTON_ID: u32 = 1001;
 const ROBOT_SCENE_CONTROLLER_ID: u32 = 1002;
 const ROBOT_SCENE_CONTROLLER_ENTRY: &str =
     "/fs/wgui-controllers/robot-scene/controller.js?v=workbench-left-inspector-resize";
+const ROBOT_DREAMS_CSS: &str = include_str!("../wui/robotdreams.css");
 const URDF_JOINT_SLIDER_BASE_ID: u32 = 30_000;
 const URDF_BASE_SLIDER_BASE_ID: u32 = 31_000;
 
@@ -2022,12 +2025,15 @@ async fn run_urdf_view(
     ensure_ui_bind_available(bind_addr)?;
 
     let browser_url = ui_url(bind_addr);
-    println!("RobotDreams workbench listening on {}", browser_url);
+    println!("RobotDreams projects page listening on {}", browser_url);
     println!("URDF file: {}", urdf_path.display());
     println!("Press Ctrl-C to stop.");
 
     let mut wgui = Wgui::new(bind_addr);
-    wgui.add_page_with("/", move || {
+    wgui.set_css(ROBOT_DREAMS_CSS);
+    wgui.add_page_with("/", || async { ProjectsController::new() });
+    wgui.add_page_with("/projects", || async { ProjectsController::new() });
+    wgui.add_page_with("/workbench", move || {
         let urdf_path = urdf_path.clone();
         async move { AppController::new(Some(urdf_path)) }
     });
