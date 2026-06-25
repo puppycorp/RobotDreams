@@ -11,7 +11,7 @@ use crate::{
 };
 
 const DASHBOARD_PREVIEW_CONTROLLER_ENTRY: &str =
-    "/fs/wgui-controllers/dashboard-preview/controller.js?v=workbench-assets";
+    "/fs/wgui-controllers/dashboard-preview/controller.js?v=workbench-assets-window-resize";
 const SCENE_SECTION_ENVIRONMENT: u32 = 1;
 const SCENE_SECTION_ROBOTS: u32 = 2;
 const SCENE_SECTION_LINKS: u32 = 3;
@@ -65,20 +65,6 @@ pub(crate) struct WorkbenchAssetModel {
 }
 
 #[derive(Debug, Clone, WguiModel)]
-pub(crate) struct WorkbenchLogModel {
-    time: String,
-    level: String,
-    message: String,
-    color: String,
-}
-
-#[derive(Debug, Clone, WguiModel)]
-pub(crate) struct WorkbenchScriptLineModel {
-    number: u32,
-    text: String,
-}
-
-#[derive(Debug, Clone, WguiModel)]
 pub(crate) struct WorkbenchSliderModel {
     index: u32,
     label: String,
@@ -119,8 +105,6 @@ pub(crate) struct WorkbenchModel {
     lidar_preview_props: WuiValue,
     camera_preview_name: String,
     camera_preview_props: WuiValue,
-    telemetry_plot_name: String,
-    telemetry_plot_props: WuiValue,
     viewport_title: String,
     file_label: String,
     status: String,
@@ -134,9 +118,6 @@ pub(crate) struct WorkbenchModel {
     no_movable_joints: bool,
     scene_sections: Vec<WorkbenchSectionModel>,
     assets: Vec<WorkbenchAssetModel>,
-    logs: Vec<WorkbenchLogModel>,
-    script_lines: Vec<WorkbenchScriptLineModel>,
-    plot_series: Vec<WorkbenchPropertyModel>,
     transform_properties: Vec<WorkbenchPropertyModel>,
     physics_properties: Vec<WorkbenchPropertyModel>,
     base_controls: Vec<WorkbenchSliderModel>,
@@ -308,31 +289,17 @@ fn joint_controls(state: &UrdfViewerState) -> Vec<WorkbenchSliderModel> {
         return Vec::new();
     };
 
-    let display_labels = [
-        "Shoulder Pan",
-        "Shoulder Lift",
-        "Elbow",
-        "Wrist 1",
-        "Wrist 2",
-        "Wrist 3",
-    ];
-
     robot
         .movable_joint_indices
         .iter()
         .enumerate()
-        .take(display_labels.len())
         .filter_map(|(slider_slot, joint_index)| {
             let joint = robot.joints.get(*joint_index)?;
             let value = state.joint_values.get(*joint_index).copied().unwrap_or(0);
             let (min, max) = urdf_joint_slider_range(joint);
             Some(WorkbenchSliderModel {
                 index: slider_slot as u32,
-                label: display_labels
-                    .get(slider_slot)
-                    .copied()
-                    .unwrap_or(joint.name.as_str())
-                    .to_string(),
+                label: joint.name.clone(),
                 min,
                 max,
                 value,
@@ -647,67 +614,6 @@ fn asset_models() -> Vec<WorkbenchAssetModel> {
     .collect()
 }
 
-fn logs(state: &UrdfViewerState) -> Vec<WorkbenchLogModel> {
-    [
-        ("12:45:58", "INFO", "Workbench initialized", "#43d17a"),
-        (
-            "12:45:59",
-            "INFO",
-            "Loading PuppyArm model profile",
-            "#43d17a",
-        ),
-        ("12:46:00", "INFO", state.status.as_str(), "#43d17a"),
-        ("12:46:02", "INFO", "Virtual ServoBus attached", "#43d17a"),
-        (
-            "12:46:05",
-            "WARN",
-            "Calibration offsets are placeholders",
-            "#f3b84f",
-        ),
-    ]
-    .into_iter()
-    .map(|(time, level, message, color)| WorkbenchLogModel {
-        time: time.to_string(),
-        level: level.to_string(),
-        message: message.to_string(),
-        color: color.to_string(),
-    })
-    .collect()
-}
-
-fn script_lines() -> Vec<WorkbenchScriptLineModel> {
-    [
-        "import rds",
-        "from rds import Robot, Pose",
-        "",
-        "robot = Robot(\"PuppyArm\")",
-        "bus = robot.virtual_bus(\"ST3215\")",
-        "robot.move_joints(home_pose)",
-        "bus.connect_firmware()",
-        "robot.watch_telemetry()",
-    ]
-    .iter()
-    .enumerate()
-    .map(|(index, text)| WorkbenchScriptLineModel {
-        number: index as u32 + 1,
-        text: (*text).to_string(),
-    })
-    .collect()
-}
-
-fn plot_series() -> Vec<WorkbenchPropertyModel> {
-    [
-        ("Shoulder pan", "124 deg"),
-        ("Shoulder lift", "82 deg"),
-        ("Elbow", "-31 deg"),
-        ("Wrist 1", "18 deg"),
-        ("Wrist 2", "-44 deg"),
-    ]
-    .into_iter()
-    .map(|(name, value)| workbench_property(name, value))
-    .collect()
-}
-
 fn transform_properties() -> Vec<WorkbenchPropertyModel> {
     [
         ("Frame", "World"),
@@ -990,7 +896,7 @@ fn sensors() -> Vec<WorkbenchSensorModel> {
     vec![
         workbench_sensor("Joint States", "JS_1", "100 Hz"),
         workbench_sensor("Servo Bus", "ST3215", "1 MHz"),
-        workbench_sensor("Camera", "Wrist_Cam", "30 Hz"),
+        workbench_sensor("Camera", "Camera_1", "30 Hz"),
     ]
 }
 
@@ -1005,19 +911,8 @@ fn dashboard_preview_props(mode: &str) -> WuiValue {
         "camera" => serde_json::json!({
             "mode": "camera",
             "title": "CAMERA_1",
-            "subtitle": "Wrist_Cam",
+            "subtitle": "Camera_1",
             "rate": "30 Hz"
-        }),
-        "plot" => serde_json::json!({
-            "mode": "plot",
-            "title": "Joint Positions",
-            "series": [
-                { "name": "Shoulder Pan", "color": "#2aa7ff" },
-                { "name": "Shoulder Lift", "color": "#43d17a" },
-                { "name": "Elbow", "color": "#f3b84f" },
-                { "name": "Wrist 1", "color": "#ff4f70" },
-                { "name": "Wrist 2", "color": "#d45cff" }
-            ]
         }),
         _ => serde_json::json!({ "mode": mode }),
     };
@@ -1092,8 +987,6 @@ impl AppController {
             lidar_preview_props: dashboard_preview_props("lidar"),
             camera_preview_name: "camera-preview".to_string(),
             camera_preview_props: dashboard_preview_props("camera"),
-            telemetry_plot_name: "telemetry-plot".to_string(),
-            telemetry_plot_props: dashboard_preview_props("plot"),
             viewport_title: "Viewport 1".to_string(),
             file_label: file_label(&self.urdf_state),
             status: self.urdf_state.status.clone(),
@@ -1111,9 +1004,6 @@ impl AppController {
                 &self.collapsed_scene_section_ids,
             ),
             assets: asset_models(),
-            logs: logs(&self.urdf_state),
-            script_lines: script_lines(),
-            plot_series: plot_series(),
             transform_properties: selected_info.transform_properties,
             physics_properties: selected_info.physics_properties,
             base_controls: base_controls(&self.urdf_state),
