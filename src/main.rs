@@ -48,7 +48,7 @@ const TOGGLE_VIRTUAL_BUS_BUTTON_ID: u32 = 8;
 const URDF_RELOAD_BUTTON_ID: u32 = 1001;
 const ROBOT_SCENE_CONTROLLER_ID: u32 = 1002;
 const ROBOT_SCENE_CONTROLLER_ENTRY: &str =
-    "/fs/wgui-controllers/robot-scene/controller.js?v=threejs-camera";
+    "/fs/wgui-controllers/robot-scene/controller.js?v=urdf-gltf-meshes";
 const ROBOT_DREAMS_CSS: &str = include_str!("../wui/robotdreams.css");
 const ROBOT_DREAMS_PROJECT_FORMAT: &str = "robotdreams.project.v1";
 const URDF_JOINT_SLIDER_BASE_ID: u32 = 30_000;
@@ -1264,6 +1264,58 @@ fn log_wgui_controller_event(event: &wgui::OnCustom) {
     }
 }
 
+fn robot_scene_tree(
+    state: &UrdfViewerState,
+    base_translation: [f32; 3],
+    base_rotation: [f32; 3],
+) -> Option<ThreeNode> {
+    let robot = state.robot.as_ref()?;
+    let mut id_gen = 100;
+    let mut model_children: Vec<ThreeNode> = Vec::new();
+    for root in &robot.roots {
+        if let Some(root_tree) = build_link_subtree(robot, root, &state.joint_values, &mut id_gen) {
+            model_children.push(root_tree);
+        }
+    }
+
+    let urdf_frame_group = group(
+        91,
+        [group(92, model_children).prop(
+            "rotation",
+            ThreePropValue::Vec3 {
+                x: URDF_TO_VIEW_ROT_X,
+                y: 0.0,
+                z: 0.0,
+            },
+        )],
+    );
+    Some(
+        group(90, [urdf_frame_group])
+            .prop(
+                "position",
+                ThreePropValue::Vec3 {
+                    x: base_translation[0],
+                    y: base_translation[1],
+                    z: base_translation[2],
+                },
+            )
+            .prop(
+                "rotation",
+                ThreePropValue::Vec3 {
+                    x: base_rotation[0],
+                    y: base_rotation[1],
+                    z: base_rotation[2],
+                },
+            )
+            .prop(
+                "rotationOrder",
+                ThreePropValue::String {
+                    value: URDF_ROTATION_ORDER.to_string(),
+                },
+            ),
+    )
+}
+
 fn robot_scene_props(
     state: &UrdfViewerState,
     base_translation: [f32; 3],
@@ -1331,7 +1383,8 @@ fn robot_scene_props(
             "translation": base_translation,
             "rotation": base_rotation
         },
-        "robot": robot_summary
+        "robot": robot_summary,
+        "scene": robot_scene_tree(state, base_translation, base_rotation)
     })
 }
 
