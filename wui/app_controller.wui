@@ -183,7 +183,7 @@
       </HStack>
 
       <HStack height=640 minHeight=360 maxHeight=640 spacing=6>
-        <VStack minWidth=520 maxWidth=980 hresize=true grow=1 minHeight=0 spacing=6>
+        <VStack minWidth=520 hresize=true grow=1 minHeight=0 spacing=6>
           <HStack
             height=38
             spacing=8
@@ -206,84 +206,6 @@
           />
         </VStack>
 
-        <VStack
-          width=220
-          grow=1
-          minHeight=0
-          spacing=10
-          padding=8
-          backgroundColor="#0e1622"
-          border="1px solid #1d2a3b"
-          overflow="auto"
-        >
-          <VStack
-            height=178
-            spacing=6
-            padding=8
-          >
-            <Text value="LIDAR_1" color="#f4f8ff" />
-            <CustomComponent
-              name={state.lidar_preview_name}
-              entry={state.dashboard_preview_entry}
-              props={state.lidar_preview_props}
-              height=132
-              grow=1
-            />
-          </VStack>
-          <VStack
-            height=170
-            spacing=6
-            padding=8
-          >
-            <Text value="SERVO BUS STATUS" color="#f4f8ff" />
-            <HStack spacing=7>
-              <Text value="B" color="#43d17a" minWidth=18 textAlign="center" />
-              <VStack grow=1 spacing=3>
-                <HStack>
-                  <Text value="Battery" color="#8996aa" grow=1 />
-                  <Text value="78%" color="#dce7f3" />
-                </HStack>
-                <HStack height=6 backgroundColor="#172436" border="1px solid #26364d">
-                  <HStack width=118 backgroundColor="#43d17a" />
-                </HStack>
-              </VStack>
-            </HStack>
-            <HStack spacing=7>
-              <Text value="M" color="#55a7ff" minWidth=18 textAlign="center" />
-              <Text value="Mode" color="#8996aa" grow=1 />
-              <Text value="Virtual" color="#dce7f3" />
-            </HStack>
-            <HStack spacing=7>
-              <Text value="V" color="#55a7ff" minWidth=18 textAlign="center" />
-              <Text value="Speed" color="#8996aa" grow=1 />
-              <Text value="1.24 m/s" color="#dce7f3" />
-            </HStack>
-            <HStack spacing=7>
-              <Text value="P" color="#55a7ff" minWidth=18 textAlign="center" />
-              <Text value="Payload" color="#8996aa" grow=1 />
-              <Text value="12.4 kg" color="#dce7f3" />
-            </HStack>
-            <HStack spacing=7>
-              <Text value="W" color="#43d17a" minWidth=18 textAlign="center" />
-              <Text value="Wi-Fi" color="#8996aa" grow=1 />
-              <Text value="Strong" color="#43d17a" />
-            </HStack>
-          </VStack>
-          <VStack
-            grow=1
-            spacing=6
-            padding=8
-          >
-            <Text value="CAMERA_1" color="#f4f8ff" />
-            <CustomComponent
-              name={state.camera_preview_name}
-              entry={state.dashboard_preview_entry}
-              props={state.camera_preview_props}
-              height=112
-              grow=1
-            />
-          </VStack>
-        </VStack>
       </HStack>
 
     </VStack>

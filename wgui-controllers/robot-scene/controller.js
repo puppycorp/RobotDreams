@@ -101,7 +101,9 @@ const material = (color, options = {}) =>
 
 const disposeObject = (object) => {
   object.traverse((child) => {
-    child.geometry?.dispose?.()
+    if (child.geometry && !child.geometry.userData?.shared) {
+      child.geometry.dispose?.()
+    }
     if (Array.isArray(child.material)) {
       child.material.forEach((item) => item.dispose?.())
     } else {
@@ -169,7 +171,11 @@ const resolveBufferUri = (uri, src) => new URL(uri, new URL(src, window.location
 
 const loadGltfData = async (src) => {
   const sourceBuffer = await fetchArrayBuffer(src)
-  if (isGlbBuffer(sourceBuffer)) return parseGlb(sourceBuffer)
+  if (isGlbBuffer(sourceBuffer)) {
+    const data = parseGlb(sourceBuffer)
+    data.geometryCache = new Map()
+    return data
+  }
 
   const json = JSON.parse(textFromBuffer(sourceBuffer))
   const buffers = []
@@ -183,7 +189,7 @@ const loadGltfData = async (src) => {
       : resolveBufferUri(bufferDef.uri, src)
     buffers.push(await fetchArrayBuffer(bufferSrc))
   }
-  return { json, buffers }
+  return { json, buffers, geometryCache: new Map() }
 }
 
 const gltfData = (src) => {
@@ -268,7 +274,11 @@ const readAccessor = (data, accessorIndex) => {
   return new THREE.BufferAttribute(out, itemSize, accessor.normalized ?? false)
 }
 
-const primitiveGeometry = (data, primitive) => {
+const primitiveGeometry = (data, primitive, cacheKey) => {
+  if (cacheKey && data.geometryCache?.has(cacheKey)) {
+    return data.geometryCache.get(cacheKey)
+  }
+
   const geometry = new THREE.BufferGeometry()
   const attributes = primitive.attributes ?? {}
   const names = [
@@ -289,6 +299,8 @@ const primitiveGeometry = (data, primitive) => {
     geometry.computeVertexNormals()
   }
   geometry.computeBoundingSphere()
+  geometry.userData.shared = true
+  if (cacheKey) data.geometryCache?.set(cacheKey, geometry)
   return geometry
 }
 
@@ -329,9 +341,9 @@ const buildGltfNode = (data, nodeIndex, overrideMaterial) => {
 
   applyGltfNodeTransform(group, nodeDef)
   const meshDef = data.json.meshes?.[nodeDef.mesh]
-  for (const primitive of meshDef?.primitives ?? []) {
+  for (const [primitiveIndex, primitive] of (meshDef?.primitives ?? []).entries()) {
     if (primitive.mode !== undefined && primitive.mode !== 4) continue
-    const geometry = primitiveGeometry(data, primitive)
+    const geometry = primitiveGeometry(data, primitive, `${nodeDef.mesh}:${primitiveIndex}`)
     const hasVertexColors = Boolean(geometry.getAttribute("color"))
     const meshMaterial = overrideMaterial
       ? overrideMaterial.clone()
@@ -405,6 +417,18 @@ const applyObjectProps = (object, node) => {
   }
   if (props.get("scale")?.isVector3) object.scale.copy(props.get("scale"))
   if (typeof props.get("name") === "string") object.name = props.get("name")
+}
+
+const updateObjectProps = (object, node) => {
+  if (!object) return
+  applyObjectProps(object, node)
+}
+
+const sceneStructureSignature = (node) => {
+  if (!isObject(node)) return "null"
+  const src = node.kind === "stlGeometry" ? propByKey(node, "src") ?? "" : ""
+  const children = (node.children ?? []).map(sceneStructureSignature).join(",")
+  return `${node.id}:${node.kind}:${src}[${children}]`
 }
 
 const addSphere = (group, position, radius, mat) => {
@@ -558,8 +582,10 @@ export default class RobotSceneController {
 
     this.fitAfterBuild = true
     this.modelKey = null
+    this.nodeObjects = new Map()
     this.pendingMeshLoads = 0
     this.robotGeneration = 0
+    this.sceneStructureKey = null
     this.resize = this.resize.bind(this)
     this.render = this.render.bind(this)
     this.cameraRig = new CameraRig(this.canvas, this.camera, this.render)
@@ -574,11 +600,29 @@ export default class RobotSceneController {
   }
 
   setProps(props) {
-    this.props = props ?? {}
-    const nextModelKey = this.props?.model?.src ?? this.props?.model?.path ?? ""
+    const nextProps = props ?? {}
+    const nextModelKey = nextProps?.model?.src ?? nextProps?.model?.path ?? ""
+    const nextSceneStructureKey = isObject(nextProps?.scene)
+      ? sceneStructureSignature(nextProps.scene)
+      : null
+    const canUpdateTransforms =
+      nextModelKey === this.modelKey &&
+      nextSceneStructureKey !== null &&
+      nextSceneStructureKey === this.sceneStructureKey &&
+      this.nodeObjects.size > 0
+
+    this.props = nextProps
     this.fitAfterBuild = nextModelKey !== this.modelKey
     this.modelKey = nextModelKey
+    this.sceneStructureKey = nextSceneStructureKey
     this.renderPanel()
+
+    if (canUpdateTransforms) {
+      this.updateThreeNode(this.props.scene)
+      this.render()
+      return
+    }
+
     this.buildRobot()
     this.render()
   }
@@ -608,6 +652,7 @@ export default class RobotSceneController {
   buildRobot() {
     this.robotGeneration += 1
     const generation = this.robotGeneration
+    this.nodeObjects.clear()
     this.pendingMeshLoads = 0
     disposeObject(this.robotGroup)
     this.robotGroup.clear()
@@ -630,6 +675,7 @@ export default class RobotSceneController {
       case "group": {
         const group = new THREE.Group()
         applyObjectProps(group, node)
+        this.nodeObjects.set(node.id, group)
         for (const child of node.children ?? []) {
           const childObject = this.buildThreeNode(child, generation)
           if (childObject) group.add(childObject)
@@ -643,6 +689,14 @@ export default class RobotSceneController {
     }
   }
 
+  updateThreeNode(node) {
+    if (!isObject(node)) return
+    updateObjectProps(this.nodeObjects.get(node.id), node)
+    for (const child of node.children ?? []) {
+      this.updateThreeNode(child)
+    }
+  }
+
   buildMeshNode(node, generation) {
     const children = Array.isArray(node.children) ? node.children : []
     const geometryNode = children.find((child) => child?.kind?.endsWith("Geometry"))
@@ -653,6 +707,7 @@ export default class RobotSceneController {
     if (typeof src === "string" && /\.(glb|gltf)(\?|#|$)/i.test(src)) {
       const group = new THREE.Group()
       applyObjectProps(group, node)
+      this.nodeObjects.set(node.id, group)
       this.pendingMeshLoads += 1
       loadGltfScene(src, meshMaterial)
         .then((object) => {
@@ -676,6 +731,7 @@ export default class RobotSceneController {
 
     const mesh = new THREE.Mesh(createGeometryFromNode(geometryNode), meshMaterial)
     applyObjectProps(mesh, node)
+    this.nodeObjects.set(node.id, mesh)
     return mesh
   }
 
