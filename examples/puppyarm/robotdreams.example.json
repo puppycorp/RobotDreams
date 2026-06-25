@@ -1,5 +1,6 @@
 {
+  "format": "robotdreams.project.v1",
   "name": "puppyarm-example",
   "modelProfile": "model/robotdreams.json",
-  "notes": "Example entrypoint for the local demo PuppyArm model profile."
+  "notes": "Compatibility entrypoint. Prefer project.json for new RobotDreams projects."
 }

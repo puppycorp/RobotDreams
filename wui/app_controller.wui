@@ -1,4 +1,6 @@
 <VStack
+  fill=true
+  grow=1
   spacing=0
   backgroundColor="#070b12"
   overflow="hidden"
@@ -61,16 +63,18 @@
       minWidth=220
       maxWidth=420
       hresize=true
-      grow=1
       minHeight=0
       spacing=14
       padding=10
       backgroundColor="#0e1622"
       border="1px solid #1d2a3b"
-      overflow="auto"
+      overflow="hidden"
     >
       <VStack
+        grow=1
+        minHeight=0
         spacing=8
+        overflow="auto"
       >
         <HStack>
           <Text value="SCENE" color="#f4f8ff" grow=1 />
@@ -80,28 +84,51 @@
         <For each={state.scene_sections} itemAs="section" key={section.title}>
           <VStack spacing=3>
             <HStack spacing=5>
-              <Text value="v" color="#7f8b9b" />
+              <Button
+                text={section.toggle_label}
+                onClick="ToggleSceneSection"
+                arg={section.id}
+                height=22
+                backgroundColor="#0e1622"
+                border="1px solid transparent"
+                color="#7f8b9b"
+              />
               <Text value={section.title} color="#8fbdf2" grow=1 />
             </HStack>
-            <For each={section.rows} itemAs="row" key={row.label}>
-              <HStack
-                spacing=5
-                padding=4
-                backgroundColor={row.selected ? "#153961" : "#0e1622"}
-                border={row.selected ? "1px solid #245c95" : "1px solid #0e1622"}
-              >
-                <Text value={row.icon} color={row.selected ? "#9bd3ff" : "#7f8b9b"} minWidth=18 textAlign="center" />
-                <Text value={row.label} color="#dce7f3" grow=1 />
-                <Text value={row.detail} color="#7f8b9b" />
-                <Text value={row.status} color={row.status == "ok" ? "#43d17a" : "#607086"} minWidth=20 textAlign="center" />
-              </HStack>
-            </For>
+            <If test={section.expanded}>
+              <For each={section.rows} itemAs="row" key={row.label}>
+                <HStack
+                  spacing=5
+                  padding=4
+                  backgroundColor={row.selected ? "#153961" : "#0e1622"}
+                  border={row.selected ? "1px solid #245c95" : "1px solid #0e1622"}
+                >
+                  <Text value="" minWidth={row.indent_width} />
+                  <Text value={row.icon} color={row.selected ? "#f4f8ff" : "#7f8b9b"} minWidth=30 textAlign="center" />
+                  <Button
+                    text={row.label}
+                    onClick="SelectSceneRow"
+                    arg={row.id}
+                    height=24
+                    backgroundColor={row.selected ? "#153961" : "#0e1622"}
+                    border="1px solid transparent"
+                    color={row.selected ? "#f4f8ff" : "#dce7f3"}
+                  />
+                  <Text value={row.detail} color="#7f8b9b" />
+                  <Text value="" grow=1 />
+                  <Text value={row.status} color={row.status == "ok" ? "#43d17a" : "#607086"} minWidth=20 textAlign="center" />
+                </HStack>
+              </For>
+            </If>
           </VStack>
         </For>
       </VStack>
 
       <VStack
+        height=260
+        minHeight=180
         spacing=8
+        overflow="auto"
       >
         <HStack>
           <Text value="ASSETS" color="#f4f8ff" grow=1 />
@@ -350,7 +377,6 @@
       minWidth=300
       maxWidth=560
       hresize=true
-      grow=1
       minHeight=0
       spacing=14
       padding=10

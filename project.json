@@ -1,0 +1,6 @@
+{
+  "format": "robotdreams.project.v1",
+  "name": "PuppyArm Demo",
+  "modelProfile": "examples/puppyarm/model/robotdreams.json",
+  "notes": "Convenience project manifest for launching the demo from the RobotDreams crate root."
+}

@@ -22,6 +22,12 @@ body * {
   box-sizing: border-box;
 }
 
+body .flex-col,
+body .flex-row {
+  min-height: 0;
+  min-width: 0;
+}
+
 body a {
   color: #9bd3ff !important;
   cursor: pointer;
@@ -198,6 +204,80 @@ body > .flex-col > .flex-row:nth-of-type(2) > button:nth-of-type(15)::before { c
 body > .flex-col > .flex-row:nth-of-type(2) > button:nth-of-type(16)::before { content: "B"; }
 body > .flex-col > .flex-row:nth-of-type(2) > button:nth-of-type(17)::before { content: "RUN"; }
 body > .flex-col > .flex-row:nth-of-type(2) > button:nth-of-type(18)::before { content: "D"; }
+
+body > .flex-col > .flex-row:nth-of-type(3) {
+  min-height: 0;
+}
+
+body > .flex-col > .flex-row:nth-of-type(3) > .flex-col:first-child {
+  flex: 0 0 280px !important;
+  min-height: 0;
+}
+
+body > .flex-col > .flex-row:nth-of-type(3) > .flex-col:first-child > .flex-col:first-child {
+  flex: 1 1 0 !important;
+  min-height: 0;
+  overflow-x: hidden !important;
+  overflow-y: auto !important;
+}
+
+body > .flex-col > .flex-row:nth-of-type(3) > .flex-col:first-child > .flex-col:nth-child(2) {
+  flex: 0 0 260px !important;
+}
+
+body > div[style*="flex-direction:column"] {
+  min-height: 0;
+}
+
+body > div > div:nth-of-type(3) {
+  min-height: 0;
+}
+
+body > div > div:nth-of-type(3) > div:first-child {
+  flex: 0 0 280px !important;
+  min-height: 0;
+}
+
+body > div > div:nth-of-type(3) > div:first-child > div:first-child {
+  flex: 1 1 0 !important;
+  min-height: 0;
+  overflow-x: hidden !important;
+  overflow-y: auto !important;
+}
+
+body > div > div:nth-of-type(3) > div:first-child > div:nth-child(2) {
+  flex: 0 0 260px !important;
+}
+
+body > div > div:nth-of-type(3) > div:first-child > div:first-child * {
+  min-width: 0;
+}
+
+body > div > div:nth-of-type(3) > div:first-child > div:first-child > *,
+body > div > div:nth-of-type(3) > div:first-child > div:first-child > div > * {
+  flex-shrink: 0;
+}
+
+body > div > div:nth-of-type(3) > div:first-child > div:first-child div[style*="flex-direction:row"] {
+  max-width: 100%;
+  min-width: 0;
+}
+
+body > div > div:nth-of-type(3) > div:first-child > div:first-child button {
+  flex-shrink: 1;
+  overflow: hidden;
+  padding-left: 4px;
+  padding-right: 4px;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+body > div > div:nth-of-type(3) > div:first-child > div:first-child span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 * {
   scrollbar-color: #607086 #101722;

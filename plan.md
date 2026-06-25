@@ -2,13 +2,26 @@
 
 ## Goal
 
-Use WGUI WDB as the RobotDreams project database layer. WDB gives us a typed Rust database API, a `schema.wdb` file, generated model/table code, and SQLite persistence through WGUI's `sqlite` feature.
+Start with a git-friendly RobotDreams project manifest. A project folder should be openable with:
 
-JSON files should remain for portable robot model, harness, servo profile, and import/export definitions. WDB should be the local source of truth for project browsing and mutable workspace state.
+```text
+cargo run -- ./project.json
+```
+
+SQLite/WDB should come after the project file format settles. WDB is useful as a local index, cache, and mutable workspace-state store, and later as the hosted database layer, but the portable project definition should remain JSON.
 
 ## Storage Split
 
-WDB should store local application state:
+JSON should store portable project definitions:
+
+- `project.json` project manifests
+- robot model descriptors
+- harness definitions
+- servo profiles such as `ST3215`
+- artifact references using relative paths
+- export snapshots for sharing or version control
+
+WDB should store local or hosted application state:
 
 - project registry
 - recent/opened projects
@@ -18,18 +31,44 @@ WDB should store local application state:
 - calibration revisions and active calibration selection
 - UI/editor metadata
 - timestamps and last-opened state
+- indexed artifact metadata and checksums
 
-JSON should store portable definitions:
+Real files should live as artifacts:
 
-- robot model descriptors
-- harness definitions
-- servo profiles such as `ST3215`
-- generated/imported CAD metadata
-- export snapshots for sharing or version control
+- local mode: files beside the manifest or under an `artifacts/` folder
+- hosted mode: object storage entries scoped by workspace/tenant
+
+## Project Manifest v1
+
+Preferred file name:
+
+```text
+project.json
+```
+
+Initial shape:
+
+```json
+{
+  "format": "robotdreams.project.v1",
+  "name": "PuppyArm",
+  "modelProfile": "model/robotdreams.json"
+}
+```
+
+All relative paths are resolved relative to the JSON file containing them. A project manifest can point to a model profile, and the model profile can point to URDF, meshes, servo profiles, and other artifacts relative to itself.
+
+Supported launch forms:
+
+```text
+cargo run -- examples/puppyarm/project.json
+cargo run -- examples/puppyarm/model/robotdreams.json
+cargo run -- examples/puppyarm/model/final/urdf/final.urdf
+```
 
 ## WGUI WDB Workflow
 
-Follow the pattern from WGUI's `examples/puppychat`:
+Follow the pattern from WGUI's `examples/puppychat` after the JSON project flow is stable:
 
 ```text
 schema.wdb
@@ -68,7 +107,7 @@ sqlite = ["wgui/sqlite"]
 For normal development runs, use the feature:
 
 ```text
-cargo run --features sqlite -- --bind 127.0.0.1:12345 examples/puppyarm/robotdreams.example.json
+cargo run --features sqlite -- --bind 127.0.0.1:12345 examples/puppyarm/project.json
 ```
 
 Without the feature, WDB can still behave as an in-memory table layer, which is useful for quick demos and tests.
@@ -112,27 +151,32 @@ model Project {
   slug: String
   name: String
   kind: String
-  root_path: String
+  manifest_path: String
   status: String
   badge: String
   accent: String
   created_at: String
   updated_at: String
   last_opened_at: String?
-  files: ProjectFile[] @relation(project_id)
+  artifacts: Artifact[] @relation(project_id)
   robot_models: RobotModel[] @relation(project_id)
   components: Component[] @relation(project_id)
   servo_bus_bindings: ServoBusBinding[] @relation(project_id)
   workspace_state: WorkspaceState? @relation(project_id)
 }
 
-model ProjectFile {
+model Artifact {
   id: Int @id
   project_id: Int
   project: Project? @relation(project_id)
   kind: String
-  path: String
+  uri: String
+  filename: String?
+  content_type: String?
+  checksum: String?
+  size_bytes: Int?
   format: String
+  metadata: Json
   created_at: String
   updated_at: String
 }
@@ -142,8 +186,8 @@ model RobotModel {
   project_id: Int
   project: Project? @relation(project_id)
   name: String
-  source_file_id: Int?
-  source_file: ProjectFile? @relation(source_file_id)
+  source_artifact_id: Int?
+  source_artifact: Artifact? @relation(source_artifact_id)
   root_link: String?
   metadata: Json
   created_at: String
@@ -204,7 +248,8 @@ model WorkspaceState {
 Notes:
 
 - Use numeric `id: Int @id` because WGUI's generator maps that cleanly to `u32` and `HasId`.
-- Use `slug` for stable project URLs, e.g. `/workbench?project=smartfactory`.
+- Use `slug` for stable project URLs, e.g. `/project/smartfactory`.
+- Do not store `root_path`; derive local project roots from `manifest_path.parent()` and model real files as artifacts.
 - Use `Json` columns for flexible config payloads that are still stored inside WDB.
 - Add custom SQL indexes in migrations where needed, for example unique project slugs or servo profile names.
 
@@ -216,7 +261,7 @@ After generation, expect roughly:
 #[derive(Debug, Wdb)]
 pub struct RobotDreamsDb {
     pub projects: DbTable<Project>,
-    pub project_files: DbTable<ProjectFile>,
+    pub artifacts: DbTable<Artifact>,
     pub robot_models: DbTable<RobotModel>,
     pub components: DbTable<Component>,
     pub servo_profiles: DbTable<ServoProfile>,
@@ -298,8 +343,7 @@ If the `Project` table is empty, seed one demo project:
 - slug: `smartfactory`
 - name: `SmartFactory`
 - kind: `Robot simulation`
-- root path: `examples/puppyarm`
-- project descriptor: `examples/puppyarm/robotdreams.example.json`
+- project manifest: `examples/puppyarm/project.json`
 - URDF: `examples/puppyarm/model/final/urdf/final.urdf`
 - servo profile: `ST3215`
 
@@ -315,26 +359,27 @@ Keep:
 
 Add:
 
-- `/workbench?project=<project_slug>` loads the selected project from WDB
+- `/project/<project_slug>` loads the selected project from WDB
 
 Project cards should link to:
 
 ```text
-/workbench?project=<project_slug>
+/project/<project_slug>
 ```
 
 ## Migration Plan
 
-1. Enable WGUI SQLite feature in RobotDreams behind a `sqlite` feature.
-2. Add `schema.wdb` and `wgui.toml`.
-3. Generate `src/db.rs` with WGUI.
-4. Create and apply initial migrations with WGUI.
-5. Add `ProjectStore` as a small typed wrapper over generated WDB tables.
-6. Seed the puppyarm demo when `projects` is empty.
-7. Change `ProjectsController` to list projects from WDB.
-8. Change project card links to include `project=<slug>`.
-9. Change `AppController` creation to load the selected project.
-10. Keep JSON model/harness files as project files referenced by WDB.
+1. Keep `project.json` as the portable project manifest.
+2. Enable WGUI SQLite feature in RobotDreams behind a `sqlite` feature.
+3. Add `schema.wdb` and `wgui.toml`.
+4. Generate `src/db.rs` with WGUI.
+5. Create and apply initial migrations with WGUI.
+6. Add `ProjectStore` as a small typed wrapper over generated WDB tables.
+7. Seed the puppyarm demo when `projects` is empty.
+8. Change `ProjectsController` to list projects from WDB.
+9. Change project card links to use `/project/<slug>`.
+10. Change `AppController` creation to load the selected project.
+11. Keep JSON model/harness files as artifacts referenced by WDB.
 
 ## Open Decisions
 

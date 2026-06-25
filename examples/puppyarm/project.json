@@ -1,0 +1,6 @@
+{
+  "format": "robotdreams.project.v1",
+  "name": "PuppyArm",
+  "modelProfile": "model/robotdreams.json",
+  "notes": "Git-friendly RobotDreams project manifest for the local demo PuppyArm model."
+}

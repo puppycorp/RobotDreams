@@ -50,6 +50,7 @@ const ROBOT_SCENE_CONTROLLER_ID: u32 = 1002;
 const ROBOT_SCENE_CONTROLLER_ENTRY: &str =
     "/fs/wgui-controllers/robot-scene/controller.js?v=workbench-left-inspector-resize";
 const ROBOT_DREAMS_CSS: &str = include_str!("../wui/robotdreams.css");
+const ROBOT_DREAMS_PROJECT_FORMAT: &str = "robotdreams.project.v1";
 const URDF_JOINT_SLIDER_BASE_ID: u32 = 30_000;
 const URDF_BASE_SLIDER_BASE_ID: u32 = 31_000;
 
@@ -380,6 +381,18 @@ fn resolve_json_urdf_path(path: &Path) -> Result<PathBuf, Box<dyn std::error::Er
     let json = read_json_file(path)?;
     let base = path.parent().unwrap_or_else(|| Path::new("."));
 
+    if json_string_path(&json, &["format"]) == Some(ROBOT_DREAMS_PROJECT_FORMAT) {
+        if let Some(model_profile) = json_string_path(&json, &["modelProfile"]) {
+            return resolve_robot_input_path(base.join(model_profile));
+        }
+
+        return Err(format!(
+            "RobotDreams project '{}' is missing modelProfile",
+            path.display()
+        )
+        .into());
+    }
+
     if let Some(model_profile) = json_string_path(&json, &["modelProfile"]) {
         return resolve_robot_input_path(base.join(model_profile));
     }
@@ -412,6 +425,7 @@ fn resolve_json_urdf_path(path: &Path) -> Result<PathBuf, Box<dyn std::error::Er
 fn resolve_robot_input_path(path: PathBuf) -> Result<PathBuf, Box<dyn std::error::Error>> {
     if path.is_dir() {
         for candidate in [
+            path.join("project.json"),
             path.join("robotdreams.json"),
             path.join("robotdreams.example.json"),
             path.join("model/robotdreams.json"),
@@ -2006,6 +2020,130 @@ fn ui_url(bind_addr: SocketAddr) -> String {
     }
 }
 
+#[derive(Debug, Clone)]
+struct ProjectLaunch {
+    name: String,
+    slug: String,
+}
+
+fn project_slug_from_name(name: &str) -> String {
+    let mut slug = String::new();
+    let mut previous_separator = false;
+
+    for character in name.chars() {
+        if character.is_ascii_alphanumeric() {
+            slug.push(character.to_ascii_lowercase());
+            previous_separator = false;
+        } else if !previous_separator && !slug.is_empty() {
+            slug.push('-');
+            previous_separator = true;
+        }
+    }
+
+    while slug.ends_with('-') {
+        slug.pop();
+    }
+
+    if slug.is_empty() {
+        "project".to_string()
+    } else {
+        slug
+    }
+}
+
+fn project_launch_from_manifest(path: &Path) -> Option<ProjectLaunch> {
+    if !path.is_file()
+        || !path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.eq_ignore_ascii_case("json"))
+            .unwrap_or(false)
+    {
+        return None;
+    }
+
+    let json = read_json_file(path).ok()?;
+    if json_string_path(&json, &["format"]) != Some(ROBOT_DREAMS_PROJECT_FORMAT) {
+        return None;
+    }
+
+    let name = json_string_path(&json, &["name"])
+        .map(str::to_string)
+        .or_else(|| {
+            path.file_stem()
+                .and_then(|stem| stem.to_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "Project".to_string());
+    let slug = project_slug_from_name(&name);
+
+    Some(ProjectLaunch { name, slug })
+}
+
+fn project_launch_for_input_path(path: &Path) -> Option<ProjectLaunch> {
+    if let Some(project_launch) = project_launch_from_manifest(path) {
+        return Some(project_launch);
+    }
+
+    if path.is_dir() {
+        for candidate in [
+            path.join("project.json"),
+            path.join("robotdreams.json"),
+            path.join("robotdreams.example.json"),
+        ] {
+            if let Some(project_launch) = project_launch_from_manifest(&candidate) {
+                return Some(project_launch);
+            }
+        }
+    }
+
+    None
+}
+
+fn project_route(project_launch: &ProjectLaunch) -> String {
+    format!("/project/{}", project_launch.slug)
+}
+
+fn project_url(bind_addr: SocketAddr, project_launch: &ProjectLaunch) -> String {
+    format!("{}{}", ui_url(bind_addr), project_route(project_launch))
+}
+
+fn add_workbench_page(wgui: &mut Wgui, route: &str, urdf_path: PathBuf) {
+    wgui.add_page_with(route, move || {
+        let urdf_path = urdf_path.clone();
+        async move { AppController::new(Some(urdf_path)) }
+    });
+}
+
+fn add_launched_project_page(
+    wgui: &mut Wgui,
+    project_launch: Option<ProjectLaunch>,
+    urdf_path: PathBuf,
+) {
+    if let Some(project_launch) = project_launch {
+        let route = project_route(&project_launch);
+        add_workbench_page(wgui, &route, urdf_path);
+    }
+}
+
+fn project_launch_log_line(bind_addr: SocketAddr, project_launch: &ProjectLaunch) -> String {
+    if project_launch.name == project_launch.slug {
+        format!("Project URL: {}", project_url(bind_addr, project_launch))
+    } else {
+        format!(
+            "Project URL: {} ({})",
+            project_url(bind_addr, project_launch),
+            project_launch.name
+        )
+    }
+}
+
+fn log_project_url(bind_addr: SocketAddr, project_launch: Option<&ProjectLaunch>) {
+    if let Some(project_launch) = project_launch {
+        println!("{}", project_launch_log_line(bind_addr, project_launch));
+    }
+}
+
 fn ensure_ui_bind_available(bind_addr: SocketAddr) -> Result<(), Box<dyn std::error::Error>> {
     let listener = std::net::TcpListener::bind(bind_addr).map_err(|err| {
         format!(
@@ -2021,11 +2159,16 @@ async fn run_urdf_view(
     urdf_args: UrdfViewArgs,
     bind_addr: SocketAddr,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let project_launch = urdf_args
+        .path
+        .as_deref()
+        .and_then(project_launch_for_input_path);
     let urdf_path = resolve_urdf_path(urdf_args.path)?;
     ensure_ui_bind_available(bind_addr)?;
 
     let browser_url = ui_url(bind_addr);
     println!("RobotDreams projects page listening on {}", browser_url);
+    log_project_url(bind_addr, project_launch.as_ref());
     println!("URDF file: {}", urdf_path.display());
     println!("Press Ctrl-C to stop.");
 
@@ -2033,10 +2176,8 @@ async fn run_urdf_view(
     wgui.set_css(ROBOT_DREAMS_CSS);
     wgui.add_page_with("/", || async { ProjectsController::new() });
     wgui.add_page_with("/projects", || async { ProjectsController::new() });
-    wgui.add_page_with("/workbench", move || {
-        let urdf_path = urdf_path.clone();
-        async move { AppController::new(Some(urdf_path)) }
-    });
+    add_workbench_page(&mut wgui, "/workbench", urdf_path.clone());
+    add_launched_project_page(&mut wgui, project_launch, urdf_path);
     wgui.run().await;
 
     Ok(())

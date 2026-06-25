@@ -59,7 +59,7 @@ fn projects() -> Vec<ProjectCardModel> {
         project_card(
             "SmartFactory",
             "Robot simulation",
-            "examples/puppyarm/robotdreams.example.json",
+            "examples/puppyarm/project.json",
             "Today",
             "Ready",
             "SF",
