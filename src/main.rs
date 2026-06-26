@@ -48,7 +48,7 @@ const TOGGLE_VIRTUAL_BUS_BUTTON_ID: u32 = 8;
 const URDF_RELOAD_BUTTON_ID: u32 = 1001;
 const ROBOT_SCENE_CONTROLLER_ID: u32 = 1002;
 const ROBOT_SCENE_CONTROLLER_ENTRY: &str =
-    "/fs/wgui-controllers/robot-scene/controller.js?v=urdf-gltf-meshes-fast";
+    "/fs/wgui-controllers/robot-scene/controller.js?v=backend-node-transforms";
 const ROBOT_DREAMS_CSS: &str = include_str!("../wui/robotdreams.css");
 const ROBOT_DREAMS_PROJECT_FORMAT: &str = "robotdreams.project.v1";
 const URDF_JOINT_SLIDER_BASE_ID: u32 = 30_000;
@@ -989,6 +989,32 @@ fn servo_ticks_to_slider_value(ticks: i16, min: i32, max: i32) -> i32 {
     (min as f32 + (max - min) as f32 * t).round() as i32
 }
 
+fn slider_value_to_servo_ticks(slider_value: i32, min: i32, max: i32) -> i16 {
+    if max <= min {
+        return 0;
+    }
+
+    let t = (slider_value - min) as f32 / (max - min) as f32;
+    (t.clamp(0.0, 1.0) * 4095.0).round() as i16
+}
+
+fn urdf_slider_servo_target(
+    state: &UrdfViewerState,
+    slider_id: u32,
+    value: i32,
+) -> Option<(u8, i16)> {
+    if slider_id < URDF_JOINT_SLIDER_BASE_ID {
+        return None;
+    }
+
+    let robot = state.robot.as_ref()?;
+    let slot = (slider_id - URDF_JOINT_SLIDER_BASE_ID) as usize;
+    let joint_index = robot.movable_joint_indices.get(slot)?;
+    let (min, max) = urdf_joint_slider_range(&robot.joints[*joint_index]);
+    let servo_id = u8::try_from(slot + 1).ok()?;
+    Some((servo_id, slider_value_to_servo_ticks(value, min, max)))
+}
+
 fn sync_urdf_with_servo_snapshots(state: &mut UrdfViewerState, snapshots: &[FeetechServoSnapshot]) {
     if snapshots.is_empty() {
         return;
@@ -1137,10 +1163,9 @@ fn push_link_visuals(link: &LinkDef, id_gen: &mut u32, children: &mut Vec<ThreeN
     }
 }
 
-fn build_link_subtree(
+fn build_static_link_subtree(
     robot: &RobotModel,
     link_name: &str,
-    joint_values: &[i32],
     id_gen: &mut u32,
 ) -> Option<ThreeNode> {
     let link = robot.links.get(link_name)?;
@@ -1158,35 +1183,8 @@ fn build_link_subtree(
             let motion_group_id = *id_gen;
 
             let mut motion_group = group(motion_group_id, []);
-            let joint_value = joint_values.get(*joint_index).copied().unwrap_or(0);
-            let unit_value = urdf_value_to_joint_units(joint, joint_value);
-            match joint.joint_type {
-                UrdfJointType::Revolute | UrdfJointType::Continuous => {
-                    let delta = axis_to_euler(joint.axis, unit_value);
-                    motion_group = motion_group.prop(
-                        "rotation",
-                        ThreePropValue::Vec3 {
-                            x: delta[0],
-                            y: delta[1],
-                            z: delta[2],
-                        },
-                    );
-                }
-                UrdfJointType::Prismatic => {
-                    motion_group = motion_group.prop(
-                        "position",
-                        ThreePropValue::Vec3 {
-                            x: joint.axis[0] * unit_value,
-                            y: joint.axis[1] * unit_value,
-                            z: joint.axis[2] * unit_value,
-                        },
-                    );
-                }
-                _ => {}
-            }
 
-            if let Some(child_tree) = build_link_subtree(robot, &joint.child, joint_values, id_gen)
-            {
+            if let Some(child_tree) = build_static_link_subtree(robot, &joint.child, id_gen) {
                 motion_group = motion_group.child(child_tree);
             }
 
@@ -1224,6 +1222,92 @@ fn build_link_subtree(
             value: link.name.clone(),
         },
     ))
+}
+
+fn transform_vec3_json(value: [f32; 3]) -> serde_json::Value {
+    serde_json::json!([value[0], value[1], value[2]])
+}
+
+fn insert_transform(
+    transforms: &mut serde_json::Map<String, serde_json::Value>,
+    id: u32,
+    position: Option<[f32; 3]>,
+    rotation: Option<[f32; 3]>,
+    rotation_order: Option<&str>,
+) {
+    let mut transform = serde_json::Map::new();
+    if let Some(position) = position {
+        transform.insert("position".to_string(), transform_vec3_json(position));
+    }
+    if let Some(rotation) = rotation {
+        transform.insert("rotation".to_string(), transform_vec3_json(rotation));
+    }
+    if let Some(rotation_order) = rotation_order {
+        transform.insert(
+            "rotationOrder".to_string(),
+            serde_json::Value::String(rotation_order.to_string()),
+        );
+    }
+    transforms.insert(id.to_string(), serde_json::Value::Object(transform));
+}
+
+fn collect_dynamic_link_transforms(
+    robot: &RobotModel,
+    link_name: &str,
+    joint_values: &[i32],
+    id_gen: &mut u32,
+    transforms: &mut serde_json::Map<String, serde_json::Value>,
+) -> Option<()> {
+    let link = robot.links.get(link_name)?;
+    *id_gen += 1;
+    *id_gen += (link.visuals.len() as u32) * 4;
+
+    if let Some(child_joint_indices) = robot.children_by_parent.get(link_name) {
+        for joint_index in child_joint_indices {
+            let joint = &robot.joints[*joint_index];
+            *id_gen += 1;
+            *id_gen += 1;
+            let motion_group_id = *id_gen;
+
+            let joint_value = joint_values.get(*joint_index).copied().unwrap_or(0);
+            let unit_value = urdf_value_to_joint_units(joint, joint_value);
+            match joint.joint_type {
+                UrdfJointType::Revolute | UrdfJointType::Continuous => {
+                    insert_transform(
+                        transforms,
+                        motion_group_id,
+                        None,
+                        Some(axis_to_euler(joint.axis, unit_value)),
+                        Some(URDF_ROTATION_ORDER),
+                    );
+                }
+                UrdfJointType::Prismatic => {
+                    insert_transform(
+                        transforms,
+                        motion_group_id,
+                        Some([
+                            joint.axis[0] * unit_value,
+                            joint.axis[1] * unit_value,
+                            joint.axis[2] * unit_value,
+                        ]),
+                        None,
+                        None,
+                    );
+                }
+                _ => {}
+            }
+
+            let _ = collect_dynamic_link_transforms(
+                robot,
+                &joint.child,
+                joint_values,
+                id_gen,
+                transforms,
+            );
+        }
+    }
+
+    Some(())
 }
 
 fn apply_urdf_slider_change(state: &mut UrdfViewerState, slider_id: u32, value: i32) -> bool {
@@ -1264,16 +1348,12 @@ fn log_wgui_controller_event(event: &wgui::OnCustom) {
     }
 }
 
-fn robot_scene_tree(
-    state: &UrdfViewerState,
-    base_translation: [f32; 3],
-    base_rotation: [f32; 3],
-) -> Option<ThreeNode> {
+fn robot_static_scene(state: &UrdfViewerState) -> Option<ThreeNode> {
     let robot = state.robot.as_ref()?;
     let mut id_gen = 100;
     let mut model_children: Vec<ThreeNode> = Vec::new();
     for root in &robot.roots {
-        if let Some(root_tree) = build_link_subtree(robot, root, &state.joint_values, &mut id_gen) {
+        if let Some(root_tree) = build_static_link_subtree(robot, root, &mut id_gen) {
             model_children.push(root_tree);
         }
     }
@@ -1289,31 +1369,67 @@ fn robot_scene_tree(
             },
         )],
     );
-    Some(
-        group(90, [urdf_frame_group])
-            .prop(
-                "position",
-                ThreePropValue::Vec3 {
-                    x: base_translation[0],
-                    y: base_translation[1],
-                    z: base_translation[2],
-                },
-            )
-            .prop(
-                "rotation",
-                ThreePropValue::Vec3 {
-                    x: base_rotation[0],
-                    y: base_rotation[1],
-                    z: base_rotation[2],
-                },
-            )
-            .prop(
-                "rotationOrder",
-                ThreePropValue::String {
-                    value: URDF_ROTATION_ORDER.to_string(),
-                },
-            ),
-    )
+    Some(group(90, [urdf_frame_group]))
+}
+
+fn robot_dynamic_state(
+    state: &UrdfViewerState,
+    base_translation: [f32; 3],
+    base_rotation: [f32; 3],
+) -> serde_json::Value {
+    let mut transforms = serde_json::Map::new();
+    insert_transform(
+        &mut transforms,
+        90,
+        Some(base_translation),
+        Some(base_rotation),
+        Some(URDF_ROTATION_ORDER),
+    );
+
+    if let Some(robot) = state.robot.as_ref() {
+        let mut id_gen = 100;
+        for root in &robot.roots {
+            let _ = collect_dynamic_link_transforms(
+                robot,
+                root,
+                &state.joint_values,
+                &mut id_gen,
+                &mut transforms,
+            );
+        }
+    }
+
+    serde_json::json!({
+        "schemaVersion": 1,
+        "transforms": transforms
+    })
+}
+
+fn robot_static_scene_key(state: &UrdfViewerState) -> Option<String> {
+    let robot = state.robot.as_ref()?;
+    let path = state
+        .urdf_path
+        .as_ref()
+        .map(|path| path.display().to_string())
+        .unwrap_or_default();
+    let modified = state
+        .urdf_path
+        .as_ref()
+        .and_then(|path| path.metadata().ok())
+        .and_then(|metadata| metadata.modified().ok())
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_millis())
+        .unwrap_or_default();
+    let visual_count = robot
+        .links
+        .values()
+        .map(|link| link.visuals.len())
+        .sum::<usize>();
+    Some(format!(
+        "{path}|{modified}|{}|{}|{visual_count}",
+        robot.links.len(),
+        robot.joints.len()
+    ))
 }
 
 fn robot_scene_props(
@@ -1384,7 +1500,9 @@ fn robot_scene_props(
             "rotation": base_rotation
         },
         "robot": robot_summary,
-        "scene": robot_scene_tree(state, base_translation, base_rotation)
+        "staticSceneKey": robot_static_scene_key(state),
+        "staticScene": robot_static_scene(state),
+        "dynamicState": robot_dynamic_state(state, base_translation, base_rotation)
     })
 }
 
@@ -2476,7 +2594,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         _ => {}
                     },
                     ClientEvent::OnSliderChange(s) => {
-                        if !apply_urdf_slider_change(&mut state.urdf_view, s.id, s.value) {
+                        if apply_urdf_slider_change(&mut state.urdf_view, s.id, s.value) {
+                            if let Some((servo_id, target)) =
+                                urdf_slider_servo_target(&state.urdf_view, s.id, s.value)
+                            {
+                                let _ = sim.set_target_position(servo_id, target);
+                                state.snapshots = sim.servo_snapshots();
+                            }
+                        } else {
                             if s.id == SERVO_COUNT_SLIDER_ID {
                                 state.desired_servo_count = s.value.clamp(1, 32);
                             }

@@ -431,6 +431,25 @@ const sceneStructureSignature = (node) => {
   return `${node.id}:${node.kind}:${src}[${children}]`
 }
 
+const vectorFromArray = (value) => {
+  if (!Array.isArray(value) || value.length < 3) return null
+  return new THREE.Vector3(finite(value[0]), finite(value[1]), finite(value[2]))
+}
+
+const applyTransformValue = (object, transform) => {
+  if (!object || !isObject(transform)) return
+  const position = vectorFromArray(transform.position)
+  const rotation = vectorFromArray(transform.rotation)
+  const scale = vectorFromArray(transform.scale)
+
+  if (position) object.position.copy(position)
+  if (rotation) object.rotation.set(rotation.x, rotation.y, rotation.z)
+  if (typeof transform.rotationOrder === "string" && object.rotation) {
+    object.rotation.order = transform.rotationOrder
+  }
+  if (scale) object.scale.copy(scale)
+}
+
 const addSphere = (group, position, radius, mat) => {
   const mesh = new THREE.Mesh(new THREE.SphereGeometry(radius, 32, 16), mat)
   mesh.position.copy(position)
@@ -602,8 +621,11 @@ export default class RobotSceneController {
   setProps(props) {
     const nextProps = props ?? {}
     const nextModelKey = nextProps?.model?.src ?? nextProps?.model?.path ?? ""
-    const nextSceneStructureKey = isObject(nextProps?.scene)
-      ? sceneStructureSignature(nextProps.scene)
+    const nextStaticScene = nextProps?.staticScene ?? nextProps?.scene
+    const nextSceneStructureKey = typeof nextProps?.staticSceneKey === "string"
+      ? nextProps.staticSceneKey
+      : isObject(nextStaticScene)
+      ? sceneStructureSignature(nextStaticScene)
       : null
     const canUpdateTransforms =
       nextModelKey === this.modelKey &&
@@ -618,7 +640,9 @@ export default class RobotSceneController {
     this.renderPanel()
 
     if (canUpdateTransforms) {
-      this.updateThreeNode(this.props.scene)
+      if (!this.applyDynamicState(this.props.dynamicState)) {
+        this.updateThreeNode(nextStaticScene)
+      }
       this.render()
       return
     }
@@ -657,10 +681,12 @@ export default class RobotSceneController {
     disposeObject(this.robotGroup)
     this.robotGroup.clear()
 
-    if (isObject(this.props?.scene)) {
-      const object = this.buildThreeNode(this.props.scene, generation)
+    const staticScene = this.props?.staticScene ?? this.props?.scene
+    if (isObject(staticScene)) {
+      const object = this.buildThreeNode(staticScene, generation)
       if (object) {
         this.robotGroup.add(object)
+        this.applyDynamicState(this.props?.dynamicState)
         if (this.pendingMeshLoads === 0) this.fitRobotIfNeeded()
         this.render()
       }
@@ -695,6 +721,15 @@ export default class RobotSceneController {
     for (const child of node.children ?? []) {
       this.updateThreeNode(child)
     }
+  }
+
+  applyDynamicState(dynamicState) {
+    const transforms = dynamicState?.transforms
+    if (!isObject(transforms)) return false
+    for (const [id, transform] of Object.entries(transforms)) {
+      applyTransformValue(this.nodeObjects.get(Number(id)), transform)
+    }
+    return true
   }
 
   buildMeshNode(node, generation) {
@@ -780,10 +815,11 @@ export default class RobotSceneController {
 
   renderPanel() {
     const robot = this.props?.robot
+    const hasMeshes = isObject(this.props?.staticScene) || isObject(this.props?.scene)
     const rows = [
       ["Camera", "Perspective"],
       ["Renderer", "Three.js"],
-      ["Meshes", isObject(this.props?.scene) ? "GLTF" : "Fallback"],
+      ["Meshes", hasMeshes ? "GLTF" : "Fallback"],
       ["Links", robot?.linkCount ?? "-"],
       ["Joints", robot?.jointCount ?? "-"],
       ["Movable", robot?.movableJoints?.length ?? "-"],
