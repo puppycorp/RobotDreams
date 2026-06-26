@@ -198,12 +198,14 @@ impl FeetechServo {
             return;
         }
 
-        let mode = self.registers[REG_MODE];
-        if mode != 0 {
-            // Only position mode is simulated for now.
-            return;
+        match self.registers[REG_MODE] {
+            0 => self.update_position_mode(dt),
+            1 => self.update_wheel_mode(dt),
+            _ => self.stop_motion(dt),
         }
+    }
 
+    fn update_position_mode(&mut self, dt: f32) {
         let target = read_i16_word(&self.registers, REG_TARGET_POS) as f32;
         let mut min_angle = read_i16_word(&self.registers, REG_MIN_ANGLE) as f32;
         let mut max_angle = read_i16_word(&self.registers, REG_MAX_ANGLE) as f32;
@@ -241,7 +243,71 @@ impl FeetechServo {
         let torque_demand = (position_error * 0.05) + accel_steps_s2.abs() * 0.002;
         let current_raw = (torque_demand * 300.0).clamp(0.0, 1000.0);
         let load_raw = (torque_demand * 400.0).clamp(0.0, 1000.0);
+        self.write_effort_telemetry(current_raw, load_raw, dt);
 
+        write_u16_word(
+            &mut self.registers,
+            REG_PRESENT_POS,
+            self.position_steps.round().clamp(-32767.0, 32767.0) as i16 as u16,
+        );
+        write_u16_word(
+            &mut self.registers,
+            REG_PRESENT_SPEED,
+            encode_signed_speed(self.velocity_steps_s),
+        );
+        self.registers[REG_MOVING] = if self.velocity_steps_s.abs() > 0.5 {
+            1
+        } else {
+            0
+        };
+    }
+
+    fn update_wheel_mode(&mut self, dt: f32) {
+        let target_speed = decode_signed_15bit(read_u16_word(&self.registers, REG_TARGET_SPEED));
+        let accel = self.registers[REG_ACCEL] as f32 * 100.0;
+        let accel = if accel <= 0.0 { 1000.0 } else { accel };
+
+        let desired_vel = target_speed as f32;
+        let dv = (desired_vel - self.velocity_steps_s).clamp(-accel * dt, accel * dt);
+        self.velocity_steps_s += dv;
+        self.position_steps = (self.position_steps + self.velocity_steps_s * dt).rem_euclid(4096.0);
+
+        let accel_steps_s2 = (self.velocity_steps_s - self.last_velocity_steps_s) / dt;
+        self.last_velocity_steps_s = self.velocity_steps_s;
+        let effort = (self.velocity_steps_s.abs() * 0.01) + accel_steps_s2.abs() * 0.002;
+        let current_raw = (effort * 300.0).clamp(0.0, 1000.0);
+        let load_raw = (effort * 400.0).clamp(0.0, 1000.0);
+        self.write_effort_telemetry(current_raw, load_raw, dt);
+
+        write_u16_word(
+            &mut self.registers,
+            REG_PRESENT_POS,
+            self.position_steps.round().clamp(0.0, 4095.0) as u16,
+        );
+        write_u16_word(
+            &mut self.registers,
+            REG_PRESENT_SPEED,
+            encode_signed_speed(self.velocity_steps_s),
+        );
+        self.registers[REG_MOVING] = if self.velocity_steps_s.abs() > 0.5 {
+            1
+        } else {
+            0
+        };
+    }
+
+    fn stop_motion(&mut self, dt: f32) {
+        self.velocity_steps_s = 0.0;
+        self.last_velocity_steps_s = 0.0;
+        self.registers[REG_MOVING] = 0;
+        write_u16_word(&mut self.registers, REG_PRESENT_SPEED, 0);
+        write_u16_word(&mut self.registers, REG_PRESENT_LOAD, 0);
+        write_u16_word(&mut self.registers, REG_PRESENT_CURRENT, 0);
+        self.temperature_c = cool_temperature(self.temperature_c, dt);
+        self.registers[REG_PRESENT_TEMP] = self.temperature_c.round().clamp(0.0, 255.0) as u8;
+    }
+
+    fn write_effort_telemetry(&mut self, current_raw: f32, load_raw: f32, dt: f32) {
         write_u16_word(
             &mut self.registers,
             REG_PRESENT_CURRENT,
@@ -259,22 +325,6 @@ impl FeetechServo {
 
         self.temperature_c = heat_temperature(self.temperature_c, current_raw, dt);
         self.registers[REG_PRESENT_TEMP] = self.temperature_c.round().clamp(0.0, 255.0) as u8;
-
-        write_u16_word(
-            &mut self.registers,
-            REG_PRESENT_POS,
-            self.position_steps.round().clamp(-32767.0, 32767.0) as i16 as u16,
-        );
-        write_u16_word(
-            &mut self.registers,
-            REG_PRESENT_SPEED,
-            encode_signed_speed(self.velocity_steps_s),
-        );
-        self.registers[REG_MOVING] = if self.velocity_steps_s.abs() > 0.5 {
-            1
-        } else {
-            0
-        };
     }
 
     fn snapshot(&self, id: u8) -> FeetechServoSnapshot {
@@ -489,9 +539,9 @@ impl FeetechBusSim {
 }
 
 fn read_u16_word(registers: &[u8; REGISTER_COUNT], address: usize) -> u16 {
-    let hi = registers[address] as u16;
-    let lo = registers[address + 1] as u16;
-    (hi << 8) | lo
+    let lo = registers[address] as u16;
+    let hi = registers[address + 1] as u16;
+    lo | (hi << 8)
 }
 
 fn read_i16_word(registers: &[u8; REGISTER_COUNT], address: usize) -> i16 {
@@ -504,8 +554,8 @@ fn read_i16_word(registers: &[u8; REGISTER_COUNT], address: usize) -> i16 {
 }
 
 fn write_u16_word(registers: &mut [u8; REGISTER_COUNT], address: usize, value: u16) {
-    registers[address] = (value >> 8) as u8;
-    registers[address + 1] = (value & 0xFF) as u8;
+    registers[address] = (value & 0xFF) as u8;
+    registers[address + 1] = (value >> 8) as u8;
 }
 
 fn encode_signed_speed(speed: f32) -> u16 {

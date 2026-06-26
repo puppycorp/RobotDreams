@@ -127,8 +127,8 @@ fn validate_virtual_servo_sim_config(config: VirtualServoSimConfig) -> std::io::
 #[cfg(unix)]
 fn create_virtual_servo_bus_sim(
     config: VirtualServoSimConfig,
-) -> robot_utils::servo::sim::FeetechBusSim {
-    let mut sim = robot_utils::servo::sim::FeetechBusSim::new();
+) -> feetech_servo::servo::sim::FeetechBusSim {
+    let mut sim = feetech_servo::servo::sim::FeetechBusSim::new();
     for id in config.first_servo_id..=config.last_servo_id {
         sim.add_servo(id);
     }
@@ -137,13 +137,13 @@ fn create_virtual_servo_bus_sim(
 
 #[cfg(unix)]
 fn run_virtual_servo_sim_loop(
-    mut port: robot_utils::servo::protocol::virtual_uart::VirtualUartPort,
+    mut port: feetech_servo::servo::protocol::virtual_uart::VirtualUartPort,
     config: VirtualServoSimConfig,
     stop: Option<Arc<AtomicBool>>,
 ) {
     use std::time::Duration;
 
-    use robot_utils::servo::protocol::port_handler::PortHandler;
+    use feetech_servo::servo::protocol::port_handler::PortHandler;
 
     let mut sim = create_virtual_servo_bus_sim(config);
     let mut buffer: Vec<u8> = Vec::new();
@@ -190,7 +190,7 @@ fn run_virtual_servo_sim_loop(
 pub fn spawn_virtual_servo_sim(
     config: VirtualServoSimConfig,
 ) -> std::io::Result<VirtualServoSimHandle> {
-    use robot_utils::servo::protocol::virtual_uart::VirtualUartPort;
+    use feetech_servo::servo::protocol::virtual_uart::VirtualUartPort;
 
     validate_virtual_servo_sim_config(config)?;
 
@@ -212,7 +212,7 @@ pub fn spawn_virtual_servo_sim(
 
 #[cfg(unix)]
 pub fn run_virtual_servo_sim(config: VirtualServoSimConfig) -> std::io::Result<()> {
-    use robot_utils::servo::protocol::virtual_uart::VirtualUartPort;
+    use feetech_servo::servo::protocol::virtual_uart::VirtualUartPort;
 
     validate_virtual_servo_sim_config(config)?;
 
@@ -299,9 +299,9 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant};
 
-    use robot_utils::servo::protocol::port_handler::PortHandler;
-    use robot_utils::servo::protocol::stservo_def::COMM_SUCCESS;
-    use robot_utils::servo::scscl::{SCSCL_GOAL_POSITION_L, Scscl};
+    use feetech_servo::servo::protocol::port_handler::PortHandler;
+    use feetech_servo::servo::protocol::stservo_def::COMM_SUCCESS;
+    use feetech_servo::servo::scscl::{SCSCL_GOAL_POSITION_L, Scscl};
 
     struct UnixRawTestPort {
         fd: RawFd,

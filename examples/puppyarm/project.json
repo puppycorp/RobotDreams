@@ -78,6 +78,12 @@
               "zeroOffset": 2048,
               "direction": 1
             }
+          },
+          {
+            "type": "servo",
+            "id": 5,
+            "name": "Steering Servo",
+            "profile": "ST3215"
           }
         ]
       }

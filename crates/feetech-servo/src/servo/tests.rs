@@ -5,7 +5,7 @@ use crate::servo::protocol::protocol_packet_handler::ProtocolPacketHandler;
 use crate::servo::protocol::stservo_def::COMM_SUCCESS;
 use crate::servo::scscl::{SCSCL_GOAL_POSITION_L, Scscl};
 use crate::servo::sim::FeetechBusSim;
-use crate::servo::sts::{STS_ACC, STS_PRESENT_POSITION_L, Sts};
+use crate::servo::sts::{STS_ACC, STS_MODE, STS_PRESENT_POSITION_L, Sts};
 
 #[test]
 fn write_read_roundtrip() {
@@ -126,6 +126,54 @@ fn sts_helper_writes_expected_registers() {
         .write_tx_rx(1, STS_PRESENT_POSITION_L, 2, &[0x78, 0x56]);
     let (pos, _, _) = sts.read_pos(1);
     assert_eq!(pos, 0x5678);
+}
+
+#[test]
+fn sts_wheel_helpers_match_python_sdk_registers() {
+    let mut sim = FeetechBusSim::new();
+    sim.add_servo(1);
+
+    let port = SimPort::new(sim);
+    let mut sts = Sts::new(port);
+
+    let (result, error) = sts.wheel_mode(1);
+    assert_eq!(result, COMM_SUCCESS);
+    assert_eq!(error, 0);
+
+    let (mode, _, _) = sts.handler.read_tx_rx(1, STS_MODE, 1);
+    assert_eq!(mode, vec![1]);
+
+    let (result, error) = sts.write_spec(1, -321, 7);
+    assert_eq!(result, COMM_SUCCESS);
+    assert_eq!(error, 0);
+
+    let (data, _, _) = sts.handler.read_tx_rx(1, STS_ACC, 7);
+    assert_eq!(data, vec![7, 0, 0, 0, 0, 0x41, 0x81]);
+}
+
+#[test]
+fn sts_wheel_mode_simulates_velocity() {
+    let mut sim = FeetechBusSim::new();
+    sim.add_servo(1);
+
+    let port = SimPort::new(sim);
+    let mut sts = Sts::new(port);
+
+    let (result, error) = sts.wheel_mode(1);
+    assert_eq!(result, COMM_SUCCESS);
+    assert_eq!(error, 0);
+    let (result, error) = sts.write_spec(1, 600, 10);
+    assert_eq!(result, COMM_SUCCESS);
+    assert_eq!(error, 0);
+
+    let sim = sts.handler.port_mut().sim_mut();
+    sim.step(0.25);
+    let snapshot = sim.servo_snapshots().remove(0);
+
+    assert_eq!(snapshot.mode, 1);
+    assert!(snapshot.moving);
+    assert!(snapshot.present_speed > 0);
+    assert!(snapshot.present_position > 0);
 }
 
 #[test]

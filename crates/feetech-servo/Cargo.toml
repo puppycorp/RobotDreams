@@ -1,5 +1,5 @@
 [package]
-name = "robot_utils"
+name = "feetech-servo"
 version = "0.1.0"
 edition = "2024"
 

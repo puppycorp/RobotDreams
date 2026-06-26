@@ -16,9 +16,7 @@
     <Text value="RobotDreams" color="#f4f8ff" minWidth=170 />
     <Link href="/" text="Projects" />
     <Text value="/" color="#7f8b9b" />
-    <Text value={state.project_name} color="#f4f8ff" />
-    <Text value="/" color="#7f8b9b" />
-    <Text value={state.project_version} color="#f4f8ff" grow=1 />
+    <Text value={state.project_name} color="#f4f8ff" grow=1 />
     <Text value={state.simulation_label} color="#43d17a" />
     <Text value={state.simulation_time} color="#aeb8c4" />
     <Text value={state.gpu_label} color="#aeb8c4" />
@@ -105,15 +103,82 @@
                 >
                   <Text value="" minWidth={row.indent_width} />
                   <Text value={row.icon} color={row.selected ? "#f4f8ff" : "#7f8b9b"} minWidth=30 textAlign="center" />
-                  <Button
-                    text={row.label}
-                    onClick="SelectSceneRow"
-                    arg={row.id}
-                    height=24
-                    backgroundColor={row.selected ? "#153961" : "#0e1622"}
-                    border="1px solid transparent"
-                    color={row.selected ? "#f4f8ff" : "#dce7f3"}
-                  />
+                  <If test={row.select_static_action}>
+                    <Button
+                      text={row.label}
+                      onClick="SelectStaticSceneRow"
+                      arg={row.action_arg}
+                      height=24
+                      backgroundColor={row.selected ? "#153961" : "#0e1622"}
+                      border="1px solid transparent"
+                      color={row.selected ? "#f4f8ff" : "#dce7f3"}
+                    />
+                  </If>
+                  <If test={row.select_robot_action}>
+                    <Button
+                      text={row.label}
+                      onClick="SelectRobot"
+                      height=24
+                      backgroundColor={row.selected ? "#153961" : "#0e1622"}
+                      border="1px solid transparent"
+                      color={row.selected ? "#f4f8ff" : "#dce7f3"}
+                    />
+                  </If>
+                  <If test={row.select_link_action}>
+                    <Button
+                      text={row.label}
+                      onClick="SelectLink"
+                      arg={row.action_arg}
+                      height=24
+                      backgroundColor={row.selected ? "#153961" : "#0e1622"}
+                      border="1px solid transparent"
+                      color={row.selected ? "#f4f8ff" : "#dce7f3"}
+                    />
+                  </If>
+                  <If test={row.select_joint_action}>
+                    <Button
+                      text={row.label}
+                      onClick="SelectJoint"
+                      arg={row.action_arg}
+                      height=24
+                      backgroundColor={row.selected ? "#153961" : "#0e1622"}
+                      border="1px solid transparent"
+                      color={row.selected ? "#f4f8ff" : "#dce7f3"}
+                    />
+                  </If>
+                  <If test={row.select_bus_action}>
+                    <Button
+                      text={row.label}
+                      onClick="SelectBus"
+                      arg={row.action_arg}
+                      height=24
+                      backgroundColor={row.selected ? "#153961" : "#0e1622"}
+                      border="1px solid transparent"
+                      color={row.selected ? "#f4f8ff" : "#dce7f3"}
+                    />
+                  </If>
+                  <If test={row.select_device_action}>
+                    <Button
+                      text={row.label}
+                      onClick="SelectDevice"
+                      arg={row.action_arg}
+                      height=24
+                      backgroundColor={row.selected ? "#153961" : "#0e1622"}
+                      border="1px solid transparent"
+                      color={row.selected ? "#f4f8ff" : "#dce7f3"}
+                    />
+                  </If>
+                  <If test={row.toggle_section_action}>
+                    <Button
+                      text={row.label}
+                      onClick="ToggleSceneSection"
+                      arg={row.action_arg}
+                      height=24
+                      backgroundColor={row.selected ? "#153961" : "#0e1622"}
+                      border="1px solid transparent"
+                      color={row.selected ? "#f4f8ff" : "#dce7f3"}
+                    />
+                  </If>
                   <Text value={row.detail} color="#7f8b9b" />
                   <Text value="" grow=1 />
                   <Text value={row.status} color={row.status == "ok" ? "#43d17a" : "#607086"} minWidth=20 textAlign="center" />
@@ -124,49 +189,6 @@
         </For>
       </VStack>
 
-      <VStack
-        height=260
-        minHeight=180
-        spacing=8
-        overflow="auto"
-      >
-        <HStack>
-          <Text value="ASSETS" color="#f4f8ff" grow=1 />
-          <Text value="..." color="#7f8b9b" />
-        </HStack>
-        <HStack spacing=6>
-          <Button text="Robots" backgroundColor="#14365f" border="1px solid #245c95" color="#f4f8ff" height=28 />
-          <Button text="Parts" backgroundColor="#111c2b" border="1px solid #26364d" color="#8a96a8" height=28 />
-          <Button text="Scenes" backgroundColor="#111c2b" border="1px solid #26364d" color="#8a96a8" height=28 />
-        </HStack>
-        <TextInput value="" placeholder="Search assets..." fill=true backgroundColor="#101a28" border="1px solid #26364d" color="#dce7f3" height=30 />
-        <HStack spacing=6 wrap=true>
-          <For each={state.assets} itemAs="asset" key={asset.name}>
-            <VStack
-              width=124
-              height=96
-              spacing=5
-              padding=6
-              backgroundColor="#111c2b"
-              border="1px solid #223149"
-            >
-              <CustomComponent
-                name={asset.preview_name}
-                entry={state.dashboard_preview_entry}
-                props={asset.preview_props}
-                height=42
-                border="1px solid #2f4d68"
-              />
-              <Text value={asset.name} color="#f4f8ff" breakWords=true />
-              <Text value={asset.kind} color="#8996aa" breakWords=true />
-            </VStack>
-          </For>
-        </HStack>
-        <HStack spacing=6>
-          <Button text="Add Asset" backgroundColor="#111c2b" border="1px solid #26364d" color="#dce7f3" />
-          <Button text="Asset Store" backgroundColor="#111c2b" border="1px solid #26364d" color="#dce7f3" />
-        </HStack>
-      </VStack>
     </VStack>
 
     <VStack grow=1 minHeight=0 spacing=6>
@@ -192,9 +214,6 @@
             border="1px solid #1d2a3b"
           >
             <Text value="Perspective" color="#f4f8ff" grow=1 />
-            <Button text="Stages" backgroundColor="#14365f" border="1px solid #245c95" color="#f4f8ff" />
-            <Button text="Grid" backgroundColor="#111c2b" border="1px solid #26364d" color="#dce7f3" />
-            <Button text="Fit" backgroundColor="#111c2b" border="1px solid #26364d" color="#dce7f3" />
           </HStack>
           <CustomComponent
             name={state.robot_scene_name}
@@ -227,11 +246,7 @@
         minHeight=420
         spacing=8
       >
-        <HStack spacing=6>
-          <Button text="PROPERTIES" backgroundColor="#14365f" border="1px solid #245c95" color="#f4f8ff" height=28 />
-          <Button text="INSPECTOR" backgroundColor="#111c2b" border="1px solid #26364d" color="#8a96a8" height=28 />
-          <Text value="" grow=1 />
-        </HStack>
+        <Text value="INSPECTOR" color="#f4f8ff" />
         <VStack
           minHeight=130
           maxHeight=260
@@ -270,10 +285,15 @@
             <Text value="Loaded" color="#8996aa" grow=1 />
             <Text value={state.loaded_summary} color="#dce7f3" />
           </HStack>
-          <Button text="Reload URDF" onClick="ReloadUrdf" backgroundColor="#111c2b" border="1px solid #26364d" color="#dce7f3" height=30 />
+          <HStack spacing=6>
+            <Button text="Reload URDF" onClick="ReloadUrdf" backgroundColor="#111c2b" border="1px solid #26364d" color="#dce7f3" height=30 />
+            <If test={state.show_bus_controls}>
+              <Button text={state.bus_control_label} onClick="ToggleSelectedVirtualBus" backgroundColor="#14365f" border="1px solid #245c95" color="#f4f8ff" height=30 />
+            </If>
+          </HStack>
         </VStack>
 
-        <Text value="Transform" color="#55a7ff" />
+        <Text value="Details" color="#55a7ff" />
         <For each={state.transform_properties} itemAs="prop" key={prop.name}>
           <HStack spacing=8>
             <Text value={prop.name} color="#8996aa" grow=1 />
@@ -281,54 +301,7 @@
           </HStack>
         </For>
 
-        <Text value="Joints" color="#55a7ff" />
-        <HStack spacing=5>
-          <Text value="Joint" color="#8996aa" grow=1 />
-          <Text value="Position" color="#8996aa" minWidth=56 textAlign="right" />
-          <Text value="Velocity" color="#8996aa" minWidth=52 textAlign="right" />
-          <Text value="Torque" color="#8996aa" minWidth=48 textAlign="right" />
-        </HStack>
-        <If test={state.no_movable_joints}>
-          <Text value="No movable URDF joints detected." color="#f3b84f" />
-        </If>
-        <For each={state.joint_controls} itemAs="joint" key={joint.index}>
-          <VStack spacing=2>
-            <HStack spacing=5>
-              <Text value={joint.label} color="#dce7f3" grow=1 breakWords=true />
-              <Text value={joint.display_value} color="#55a7ff" minWidth=56 textAlign="right" />
-              <Text value={joint.velocity_display} color="#dce7f3" minWidth=52 textAlign="right" />
-              <Text value={joint.torque_display} color="#dce7f3" minWidth=48 textAlign="right" />
-            </HStack>
-            <Slider
-              min={joint.min}
-              max={joint.max}
-              value={joint.value}
-              step=1
-              onSliderChange="SetJointControl"
-              arg={joint.index}
-            />
-          </VStack>
-        </For>
-
-        <Text value="Base Control" color="#55a7ff" />
-        <For each={state.base_controls} itemAs="control" key={control.index}>
-          <VStack spacing=3>
-            <HStack>
-              <Text value={control.label} color="#dce7f3" grow=1 />
-              <Text value={control.display_value} color="#55a7ff" />
-            </HStack>
-            <Slider
-              min={control.min}
-              max={control.max}
-              value={control.value}
-              step=1
-              onSliderChange="SetBaseControl"
-              arg={control.index}
-            />
-          </VStack>
-        </For>
-
-        <Text value="Physics" color="#55a7ff" />
+        <Text value="Runtime" color="#55a7ff" />
         <For each={state.physics_properties} itemAs="prop" key={prop.name}>
           <HStack spacing=8>
             <Text value={prop.name} color="#8996aa" grow=1 />
@@ -336,37 +309,74 @@
           </HStack>
         </For>
 
-        <Text value="Sensors" color="#55a7ff" />
-        <For each={state.sensors} itemAs="sensor" key={sensor.name}>
-          <HStack spacing=8>
-            <Text value={sensor.name} color="#dce7f3" grow=1 />
-            <Text value={sensor.target} color="#8996aa" />
-            <Text value={sensor.rate} color="#55a7ff" />
-          </HStack>
-        </For>
-      </VStack>
+        <If test={state.show_servo_controls}>
+          <Text value="Servo Control" color="#55a7ff" />
+          <For each={state.servo_target_controls} itemAs="servo" key={servo.index}>
+            <VStack spacing=3>
+              <HStack>
+                <Text value={servo.label} color="#dce7f3" grow=1 />
+                <Text value={servo.display_value} color="#55a7ff" />
+              </HStack>
+              <Slider
+                min={servo.min}
+                max={servo.max}
+                value={servo.value}
+                step=1
+                onSliderChange="SetSelectedServoTarget"
+                arg={servo.index}
+              />
+            </VStack>
+          </For>
+        </If>
 
-      <VStack
-        height=126
-        minHeight=96
-        maxHeight=220
-        vresize=true
-        spacing=6
-      >
-        <Text value="SIMULATION CONTROL" color="#f4f8ff" />
-        <HStack>
-          <Text value="Environment" color="#8996aa" grow=1 />
-          <Text value="Warehouse" color="#dce7f3" />
-        </HStack>
-        <HStack>
-          <Text value="Physics" color="#8996aa" grow=1 />
-          <Text value="Realistic" color="#dce7f3" />
-        </HStack>
-        <HStack spacing=8>
-          <Text value="Time Scale" color="#8996aa" />
-          <Slider min=0 max=100 value=50 step=1 />
-          <Text value="1.00" color="#55a7ff" />
-        </HStack>
+        <If test={state.show_robot_controls}>
+          <Text value="Joints" color="#55a7ff" />
+          <HStack spacing=5>
+            <Text value="Joint" color="#8996aa" grow=1 />
+            <Text value="Position" color="#8996aa" minWidth=56 textAlign="right" />
+            <Text value="Velocity" color="#8996aa" minWidth=52 textAlign="right" />
+            <Text value="Torque" color="#8996aa" minWidth=48 textAlign="right" />
+          </HStack>
+          <If test={state.no_movable_joints}>
+            <Text value="No movable URDF joints detected." color="#f3b84f" />
+          </If>
+          <For each={state.joint_controls} itemAs="joint" key={joint.index}>
+            <VStack spacing=2>
+              <HStack spacing=5>
+                <Text value={joint.label} color="#dce7f3" grow=1 breakWords=true />
+                <Text value={joint.display_value} color="#55a7ff" minWidth=56 textAlign="right" />
+                <Text value={joint.velocity_display} color="#dce7f3" minWidth=52 textAlign="right" />
+                <Text value={joint.torque_display} color="#dce7f3" minWidth=48 textAlign="right" />
+              </HStack>
+              <Slider
+                min={joint.min}
+                max={joint.max}
+                value={joint.value}
+                step=1
+                onSliderChange="SetJointControl"
+                arg={joint.index}
+              />
+            </VStack>
+          </For>
+
+          <Text value="Base Control" color="#55a7ff" />
+          <For each={state.base_controls} itemAs="control" key={control.index}>
+            <VStack spacing=3>
+              <HStack>
+                <Text value={control.label} color="#dce7f3" grow=1 />
+                <Text value={control.display_value} color="#55a7ff" />
+              </HStack>
+              <Slider
+                min={control.min}
+                max={control.max}
+                value={control.value}
+                step=1
+                onSliderChange="SetBaseControl"
+                arg={control.index}
+              />
+            </VStack>
+          </For>
+        </If>
       </VStack>
     </VStack>
   </HStack>

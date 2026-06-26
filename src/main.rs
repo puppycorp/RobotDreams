@@ -28,12 +28,12 @@ use std::time::{Duration, Instant};
 use crate::app_controller::AppController;
 use crate::projects_controller::ProjectsController;
 use crate::robot_dreams::{VirtualServoSimConfig, run_virtual_servo_sim};
+#[cfg(unix)]
+use feetech_servo::servo::protocol::port_handler::PortHandler;
+#[cfg(unix)]
+use feetech_servo::servo::protocol::virtual_uart::VirtualUartPort;
+use feetech_servo::servo::sim::{FeetechBusSim, FeetechServoSnapshot};
 use log::LevelFilter;
-#[cfg(unix)]
-use robot_utils::servo::protocol::port_handler::PortHandler;
-#[cfg(unix)]
-use robot_utils::servo::protocol::virtual_uart::VirtualUartPort;
-use robot_utils::servo::sim::{FeetechBusSim, FeetechServoSnapshot};
 use roxmltree::Document;
 use wgui::*;
 
@@ -286,6 +286,7 @@ struct AppState {
     urdf_view: UrdfViewerState,
 }
 
+#[derive(Clone)]
 struct UrdfViewerState {
     urdf_path: Option<PathBuf>,
     workspace_root: PathBuf,
@@ -348,6 +349,7 @@ pub(crate) struct BusConfig {
 #[derive(Clone, Debug)]
 pub(crate) struct BusTransportConfig {
     pub(crate) type_name: String,
+    pub(crate) path: Option<String>,
     pub(crate) baud: Option<u32>,
 }
 
@@ -544,6 +546,7 @@ fn parse_bus_transport_config(value: &serde_json::Value) -> BusTransportConfig {
         type_name: json_string_path(value, &["transport", "type"])
             .unwrap_or("virtual")
             .to_string(),
+        path: json_string_path(value, &["transport", "path"]).map(str::to_string),
         baud: json_u32_path(value, &["transport", "baud"]),
     }
 }
@@ -1298,7 +1301,7 @@ fn servo_ticks_to_radians(ticks: i16) -> f32 {
     (ticks - 2048.0) * (std::f32::consts::TAU / 4096.0)
 }
 
-fn servo_ticks_to_slider_value(ticks: i16, min: i32, max: i32) -> i32 {
+pub(crate) fn servo_ticks_to_slider_value(ticks: i16, min: i32, max: i32) -> i32 {
     let ticks = ticks.clamp(0, 4095) as f32;
     let t = ticks / 4095.0;
     (min as f32 + (max - min) as f32 * t).round() as i32
@@ -1747,10 +1750,11 @@ fn robot_static_scene_key(state: &UrdfViewerState) -> Option<String> {
     ))
 }
 
-fn robot_scene_props(
+pub(crate) fn robot_scene_props_with_static_scene(
     state: &UrdfViewerState,
     base_translation: [f32; 3],
     base_rotation: [f32; 3],
+    include_static_scene: bool,
 ) -> serde_json::Value {
     let model_path = state
         .urdf_path
@@ -1802,7 +1806,7 @@ fn robot_scene_props(
         })
     });
 
-    serde_json::json!({
+    let mut props = serde_json::json!({
         "model": {
             "type": "urdf",
             "path": model_path,
@@ -1816,9 +1820,25 @@ fn robot_scene_props(
         },
         "robot": robot_summary,
         "staticSceneKey": robot_static_scene_key(state),
-        "staticScene": robot_static_scene(state),
         "dynamicState": robot_dynamic_state(state, base_translation, base_rotation)
-    })
+    });
+
+    if include_static_scene && let Some(props) = props.as_object_mut() {
+        props.insert(
+            "staticScene".to_string(),
+            serde_json::json!(robot_static_scene(state)),
+        );
+    }
+
+    props
+}
+
+fn robot_scene_props(
+    state: &UrdfViewerState,
+    base_translation: [f32; 3],
+    base_rotation: [f32; 3],
+) -> serde_json::Value {
+    robot_scene_props_with_static_scene(state, base_translation, base_rotation, true)
 }
 
 fn render_urdf_view(state: &UrdfViewerState) -> Item {
