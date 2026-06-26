@@ -4,8 +4,9 @@ use wgui::wui::runtime::WuiValue;
 use wgui::{WguiModel, wgui_controller};
 
 use crate::{
-    ROBOT_SCENE_CONTROLLER_ENTRY, URDF_BASE_SLIDER_BASE_ID, URDF_JOINT_SLIDER_BASE_ID,
-    UrdfViewerState, apply_urdf_slider_change, reload_urdf_state, robot_scene_props,
+    BusConfig, DeviceConfig, HardwareConfig, ProjectConfig, ROBOT_SCENE_CONTROLLER_ENTRY,
+    ServoDeviceConfig, URDF_BASE_SLIDER_BASE_ID, URDF_JOINT_SLIDER_BASE_ID, UrdfViewerState,
+    apply_urdf_slider_change, reload_urdf_state, robot_scene_props, slider_value_to_servo_ticks,
     urdf_joint_slider_range, urdf_joint_type_name, urdf_slider_value_to_units,
     urdf_value_to_joint_units,
 };
@@ -16,23 +17,25 @@ const SCENE_SECTION_ENVIRONMENT: u32 = 1;
 const SCENE_SECTION_ROBOTS: u32 = 2;
 const SCENE_SECTION_LINKS: u32 = 3;
 const SCENE_SECTION_JOINTS: u32 = 4;
-const SCENE_SECTION_OBJECTS: u32 = 5;
-const SCENE_SECTION_SENSORS: u32 = 6;
+const SCENE_SECTION_HARDWARE: u32 = 5;
+const SCENE_SECTION_OBJECTS: u32 = 6;
+const SCENE_SECTION_SENSORS: u32 = 7;
 const SCENE_ROW_WAREHOUSE: u32 = 1;
 const SCENE_ROW_FLOOR: u32 = 2;
 const SCENE_ROW_LIGHTS: u32 = 3;
 const SCENE_ROW_ROBOT: u32 = 100;
-const SCENE_ROW_SERVO_BUS: u32 = 101;
 const SCENE_ROW_OBJECT_WORKTABLE: u32 = 200;
 const SCENE_ROW_OBJECT_BIN: u32 = 201;
 const SCENE_ROW_OBJECT_FIXTURE: u32 = 202;
 const SCENE_ROW_OBJECT_TAG: u32 = 203;
 const SCENE_ROW_SENSOR_JOINT_STATES: u32 = 300;
-const SCENE_ROW_SENSOR_SERVO_BUS: u32 = 301;
 const SCENE_ROW_SENSOR_LIDAR: u32 = 302;
 const SCENE_ROW_SENSOR_CAMERA: u32 = 303;
 const SCENE_ROW_LINK_BASE: u32 = 10_000;
 const SCENE_ROW_JOINT_BASE: u32 = 20_000;
+const SCENE_ROW_BUS_BASE: u32 = 30_000;
+const SCENE_ROW_DEVICE_BASE: u32 = 40_000;
+const SCENE_ROW_DEVICE_BUS_STRIDE: u32 = 1_000;
 
 #[derive(Debug, Clone, WguiModel)]
 pub(crate) struct WorkbenchSectionModel {
@@ -127,6 +130,8 @@ pub(crate) struct WorkbenchModel {
 
 pub(crate) struct AppController {
     urdf_state: UrdfViewerState,
+    project_config: Option<ProjectConfig>,
+    hardware_runtime: HardwareRuntime,
     simulation_running: bool,
     selected_scene_row_id: u32,
     collapsed_scene_section_ids: Vec<u32>,
@@ -232,6 +237,196 @@ fn workbench_sensor(name: &str, target: &str, rate: &str) -> WorkbenchSensorMode
     }
 }
 
+#[derive(Debug, Clone)]
+struct HardwareRuntime {
+    buses: Vec<HardwareBusRuntime>,
+}
+
+#[derive(Debug, Clone)]
+struct HardwareBusRuntime {
+    id: String,
+    name: String,
+    transport_type: String,
+    baud: Option<u32>,
+    protocol: String,
+    devices: Vec<HardwareDeviceRuntime>,
+}
+
+#[derive(Debug, Clone)]
+enum HardwareDeviceRuntime {
+    Servo(HardwareServoRuntime),
+    Imu(HardwareImuRuntime),
+    IoBoard(HardwareIoBoardRuntime),
+}
+
+#[derive(Debug, Clone)]
+struct HardwareServoRuntime {
+    id: u32,
+    name: String,
+    profile: String,
+    drives_robot: String,
+    drives_joint: String,
+    zero_offset: i16,
+    direction: i8,
+    target_position: i16,
+    present_position: i16,
+    torque_enabled: bool,
+    temperature_c: i16,
+    voltage_v: f32,
+}
+
+#[derive(Debug, Clone)]
+struct HardwareImuRuntime {
+    id: u32,
+    name: String,
+    profile: String,
+    mounted_robot: Option<String>,
+    mounted_link: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct HardwareIoBoardRuntime {
+    id: u32,
+    name: String,
+    profile: String,
+    digital_inputs: usize,
+    digital_outputs: usize,
+    analog_inputs: usize,
+}
+
+fn inferred_servo_runtime(slot: usize, joint_name: &str) -> HardwareDeviceRuntime {
+    HardwareDeviceRuntime::Servo(HardwareServoRuntime {
+        id: (slot + 1) as u32,
+        name: format!("Servo {}", slot + 1),
+        profile: "ST3215".to_string(),
+        drives_robot: "puppyarm".to_string(),
+        drives_joint: joint_name.to_string(),
+        zero_offset: 2048,
+        direction: 1,
+        target_position: 2048,
+        present_position: 2048,
+        torque_enabled: true,
+        temperature_c: 25,
+        voltage_v: 7.4,
+    })
+}
+
+fn servo_runtime_from_config(config: &ServoDeviceConfig) -> HardwareServoRuntime {
+    let drives = config.drives.as_ref();
+    HardwareServoRuntime {
+        id: config.id,
+        name: config.name.clone(),
+        profile: config.profile.clone(),
+        drives_robot: drives
+            .map(|mapping| mapping.robot.clone())
+            .unwrap_or_else(|| "puppyarm".to_string()),
+        drives_joint: drives
+            .map(|mapping| mapping.target.clone())
+            .unwrap_or_else(|| "-".to_string()),
+        zero_offset: config.calibration.zero_offset,
+        direction: config.calibration.direction,
+        target_position: config.calibration.zero_offset,
+        present_position: config.calibration.zero_offset,
+        torque_enabled: true,
+        temperature_c: 25,
+        voltage_v: 7.4,
+    }
+}
+
+fn device_runtime_from_config(config: &DeviceConfig) -> HardwareDeviceRuntime {
+    match config {
+        DeviceConfig::Servo(config) => {
+            HardwareDeviceRuntime::Servo(servo_runtime_from_config(config))
+        }
+        DeviceConfig::Imu(config) => HardwareDeviceRuntime::Imu(HardwareImuRuntime {
+            id: config.id,
+            name: config.name.clone(),
+            profile: config.profile.clone(),
+            mounted_robot: config
+                .mounted_on
+                .as_ref()
+                .map(|mapping| mapping.robot.clone()),
+            mounted_link: config
+                .mounted_on
+                .as_ref()
+                .map(|mapping| mapping.target.clone()),
+        }),
+        DeviceConfig::IoBoard(config) => HardwareDeviceRuntime::IoBoard(HardwareIoBoardRuntime {
+            id: config.id,
+            name: config.name.clone(),
+            profile: config.profile.clone(),
+            digital_inputs: 0,
+            digital_outputs: 0,
+            analog_inputs: 0,
+        }),
+    }
+}
+
+fn bus_runtime_from_config(config: &BusConfig) -> HardwareBusRuntime {
+    HardwareBusRuntime {
+        id: config.id.clone(),
+        name: config.name.clone(),
+        transport_type: config.transport.type_name.clone(),
+        baud: config.transport.baud,
+        protocol: config.protocol.clone(),
+        devices: config
+            .devices
+            .iter()
+            .map(device_runtime_from_config)
+            .collect(),
+    }
+}
+
+fn inferred_hardware_runtime(state: &UrdfViewerState) -> HardwareRuntime {
+    let devices = state
+        .robot
+        .as_ref()
+        .map(|robot| {
+            robot
+                .movable_joint_indices
+                .iter()
+                .enumerate()
+                .filter_map(|(slot, joint_index)| {
+                    robot
+                        .joints
+                        .get(*joint_index)
+                        .map(|joint| inferred_servo_runtime(slot, &joint.name))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    HardwareRuntime {
+        buses: vec![HardwareBusRuntime {
+            id: "main_bus".to_string(),
+            name: "Main Serial Bus".to_string(),
+            transport_type: "virtual".to_string(),
+            baud: Some(1_000_000),
+            protocol: "feetech".to_string(),
+            devices,
+        }],
+    }
+}
+
+fn hardware_runtime_from_config(hardware: &HardwareConfig) -> HardwareRuntime {
+    HardwareRuntime {
+        buses: hardware.buses.iter().map(bus_runtime_from_config).collect(),
+    }
+}
+
+fn hardware_runtime_from_project(
+    project_config: Option<&ProjectConfig>,
+    state: &UrdfViewerState,
+) -> HardwareRuntime {
+    if let Some(project_config) = project_config
+        && !project_config.hardware.buses.is_empty()
+    {
+        return hardware_runtime_from_config(&project_config.hardware);
+    }
+
+    inferred_hardware_runtime(state)
+}
+
 fn file_label(state: &UrdfViewerState) -> String {
     state
         .urdf_path
@@ -317,6 +512,14 @@ fn link_row_id(index: usize) -> u32 {
 
 fn joint_row_id(index: usize) -> u32 {
     SCENE_ROW_JOINT_BASE + index as u32
+}
+
+fn bus_row_id(index: usize) -> u32 {
+    SCENE_ROW_BUS_BASE + index as u32
+}
+
+fn device_row_id(bus_index: usize, device_index: usize) -> u32 {
+    SCENE_ROW_DEVICE_BASE + bus_index as u32 * SCENE_ROW_DEVICE_BUS_STRIDE + device_index as u32
 }
 
 fn selected_row(selected_scene_row_id: u32, row_id: u32) -> bool {
@@ -437,20 +640,75 @@ fn robot_rows(
         }
     }
 
-    rows.push(workbench_row(
-        SCENE_ROW_SERVO_BUS,
-        "BUS",
-        "Virtual ServoBus",
-        "ST3215",
-        "ok",
-        selected_row(selected_scene_row_id, SCENE_ROW_SERVO_BUS),
-    ));
+    rows
+}
+
+fn device_row_detail(device: &HardwareDeviceRuntime) -> String {
+    match device {
+        HardwareDeviceRuntime::Servo(device) => {
+            format!("{} -> {}", device.profile, device.drives_joint)
+        }
+        HardwareDeviceRuntime::Imu(device) => device
+            .mounted_link
+            .as_ref()
+            .map(|link| format!("{} on {}", device.profile, link))
+            .unwrap_or_else(|| device.profile.clone()),
+        HardwareDeviceRuntime::IoBoard(device) => device.profile.clone(),
+    }
+}
+
+fn device_row_label(device: &HardwareDeviceRuntime) -> &str {
+    match device {
+        HardwareDeviceRuntime::Servo(device) => &device.name,
+        HardwareDeviceRuntime::Imu(device) => &device.name,
+        HardwareDeviceRuntime::IoBoard(device) => &device.name,
+    }
+}
+
+fn device_row_icon(device: &HardwareDeviceRuntime) -> &'static str {
+    match device {
+        HardwareDeviceRuntime::Servo(_) => "SRV",
+        HardwareDeviceRuntime::Imu(_) => "IMU",
+        HardwareDeviceRuntime::IoBoard(_) => "IO",
+    }
+}
+
+fn hardware_rows(
+    hardware_runtime: &HardwareRuntime,
+    selected_scene_row_id: u32,
+) -> Vec<WorkbenchRowModel> {
+    let mut rows = Vec::new();
+    for (bus_index, bus) in hardware_runtime.buses.iter().enumerate() {
+        let row_id = bus_row_id(bus_index);
+        rows.push(workbench_row(
+            row_id,
+            "BUS",
+            &bus.name,
+            &format!("{} / {}", bus.transport_type, bus.protocol),
+            "ok",
+            selected_row(selected_scene_row_id, row_id),
+        ));
+
+        for (device_index, device) in bus.devices.iter().enumerate() {
+            let row_id = device_row_id(bus_index, device_index);
+            rows.push(indented_workbench_row(
+                1,
+                row_id,
+                device_row_icon(device),
+                device_row_label(device),
+                &device_row_detail(device),
+                "ok",
+                selected_row(selected_scene_row_id, row_id),
+            ));
+        }
+    }
 
     rows
 }
 
 fn scene_sections(
     state: &UrdfViewerState,
+    hardware_runtime: &HardwareRuntime,
     selected_scene_row_id: u32,
     collapsed_scene_section_ids: &[u32],
 ) -> Vec<WorkbenchSectionModel> {
@@ -493,6 +751,13 @@ fn scene_sections(
             collapsed_scene_section_ids,
         ),
     ];
+
+    sections.push(workbench_section(
+        SCENE_SECTION_HARDWARE,
+        "Hardware",
+        hardware_rows(hardware_runtime, selected_scene_row_id),
+        collapsed_scene_section_ids,
+    ));
 
     sections.push(workbench_section(
         SCENE_SECTION_OBJECTS,
@@ -545,14 +810,6 @@ fn scene_sections(
                 "100 Hz",
                 "ok",
                 selected_row(selected_scene_row_id, SCENE_ROW_SENSOR_JOINT_STATES),
-            ),
-            workbench_row(
-                SCENE_ROW_SENSOR_SERVO_BUS,
-                "BUS",
-                "Servo Bus",
-                "virtual",
-                "ok",
-                selected_row(selected_scene_row_id, SCENE_ROW_SENSOR_SERVO_BUS),
             ),
             workbench_row(
                 SCENE_ROW_SENSOR_LIDAR,
@@ -692,6 +949,20 @@ fn robot_scene_info(state: &UrdfViewerState) -> SelectedSceneInfo {
     }
 }
 
+fn mapped_servo_for_joint<'a>(
+    hardware_runtime: &'a HardwareRuntime,
+    joint_name: &str,
+) -> Option<&'a HardwareServoRuntime> {
+    hardware_runtime
+        .buses
+        .iter()
+        .flat_map(|bus| bus.devices.iter())
+        .find_map(|device| match device {
+            HardwareDeviceRuntime::Servo(servo) if servo.drives_joint == joint_name => Some(servo),
+            _ => None,
+        })
+}
+
 fn selected_link_info(
     state: &UrdfViewerState,
     selected_scene_row_id: u32,
@@ -732,6 +1003,7 @@ fn selected_link_info(
 
 fn selected_joint_info(
     state: &UrdfViewerState,
+    hardware_runtime: &HardwareRuntime,
     selected_scene_row_id: u32,
 ) -> Option<SelectedSceneInfo> {
     if selected_scene_row_id < SCENE_ROW_JOINT_BASE {
@@ -750,6 +1022,9 @@ fn selected_joint_info(
         (Some(lower), Some(upper)) => format!("{lower:.3} .. {upper:.3}"),
         _ => "unbounded".to_string(),
     };
+    let mapped_device = mapped_servo_for_joint(hardware_runtime, &joint.name)
+        .map(|servo| format!("Servo {} ({})", servo.id, servo.name))
+        .unwrap_or_else(|| "-".to_string());
 
     Some(SelectedSceneInfo {
         name: joint.name.clone(),
@@ -767,8 +1042,137 @@ fn selected_joint_info(
         physics_properties: vec![
             workbench_property("Current", current_value),
             workbench_property("Limits", limit),
-            workbench_property("Control", "slider / servo bus"),
+            workbench_property("Mapped device", mapped_device),
+            workbench_property("Control", "slider / hardware mapping"),
         ],
+    })
+}
+
+fn selected_bus_info(
+    hardware_runtime: &HardwareRuntime,
+    selected_scene_row_id: u32,
+) -> Option<SelectedSceneInfo> {
+    if !(SCENE_ROW_BUS_BASE..SCENE_ROW_DEVICE_BASE).contains(&selected_scene_row_id) {
+        return None;
+    }
+
+    let bus_index = (selected_scene_row_id - SCENE_ROW_BUS_BASE) as usize;
+    let bus = hardware_runtime.buses.get(bus_index)?;
+    Some(SelectedSceneInfo {
+        name: bus.name.clone(),
+        selected_type: "hardware bus".to_string(),
+        status: "OK".to_string(),
+        badge: "BUS".to_string(),
+        accent: "#245c95".to_string(),
+        transform_properties: vec![
+            workbench_property("Id", bus.id.clone()),
+            workbench_property("Transport", bus.transport_type.clone()),
+            workbench_property("Protocol", bus.protocol.clone()),
+            workbench_property(
+                "Baud",
+                bus.baud
+                    .map(|baud| baud.to_string())
+                    .unwrap_or_else(|| "-".to_string()),
+            ),
+        ],
+        physics_properties: vec![
+            workbench_property("Devices", bus.devices.len().to_string()),
+            workbench_property("Connection", "virtual"),
+        ],
+    })
+}
+
+fn selected_servo_info(servo: &HardwareServoRuntime) -> SelectedSceneInfo {
+    SelectedSceneInfo {
+        name: servo.name.clone(),
+        selected_type: "servo device".to_string(),
+        status: "OK".to_string(),
+        badge: "SRV".to_string(),
+        accent: "#245c95".to_string(),
+        transform_properties: vec![
+            workbench_property("Id", servo.id.to_string()),
+            workbench_property("Profile", servo.profile.clone()),
+            workbench_property("Mapped robot", servo.drives_robot.clone()),
+            workbench_property("Mapped joint", servo.drives_joint.clone()),
+            workbench_property("Zero offset", servo.zero_offset.to_string()),
+            workbench_property("Direction", servo.direction.to_string()),
+        ],
+        physics_properties: vec![
+            workbench_property("Target position", servo.target_position.to_string()),
+            workbench_property("Present position", servo.present_position.to_string()),
+            workbench_property("Torque", if servo.torque_enabled { "on" } else { "off" }),
+            workbench_property("Temperature", format!("{} C", servo.temperature_c)),
+            workbench_property("Voltage", format!("{:.1} V", servo.voltage_v)),
+        ],
+    }
+}
+
+fn selected_imu_info(imu: &HardwareImuRuntime) -> SelectedSceneInfo {
+    SelectedSceneInfo {
+        name: imu.name.clone(),
+        selected_type: "imu device".to_string(),
+        status: "OK".to_string(),
+        badge: "IMU".to_string(),
+        accent: "#245c95".to_string(),
+        transform_properties: vec![
+            workbench_property("Id", imu.id.to_string()),
+            workbench_property("Profile", imu.profile.clone()),
+            workbench_property(
+                "Mounted robot",
+                imu.mounted_robot.clone().unwrap_or_else(|| "-".to_string()),
+            ),
+            workbench_property(
+                "Mounted link",
+                imu.mounted_link.clone().unwrap_or_else(|| "-".to_string()),
+            ),
+        ],
+        physics_properties: vec![
+            workbench_property("Orientation", "0.000, 0.000, 0.000"),
+            workbench_property("Angular velocity", "0.000, 0.000, 0.000"),
+            workbench_property("Linear acceleration", "0.000, 0.000, 0.000"),
+        ],
+    }
+}
+
+fn selected_io_board_info(io_board: &HardwareIoBoardRuntime) -> SelectedSceneInfo {
+    SelectedSceneInfo {
+        name: io_board.name.clone(),
+        selected_type: "io board device".to_string(),
+        status: "OK".to_string(),
+        badge: "IO".to_string(),
+        accent: "#245c95".to_string(),
+        transform_properties: vec![
+            workbench_property("Id", io_board.id.to_string()),
+            workbench_property("Profile", io_board.profile.clone()),
+        ],
+        physics_properties: vec![
+            workbench_property("Digital inputs", io_board.digital_inputs.to_string()),
+            workbench_property("Digital outputs", io_board.digital_outputs.to_string()),
+            workbench_property("Analog inputs", io_board.analog_inputs.to_string()),
+        ],
+    }
+}
+
+fn selected_device_info(
+    hardware_runtime: &HardwareRuntime,
+    selected_scene_row_id: u32,
+) -> Option<SelectedSceneInfo> {
+    if selected_scene_row_id < SCENE_ROW_DEVICE_BASE {
+        return None;
+    }
+
+    let raw = selected_scene_row_id - SCENE_ROW_DEVICE_BASE;
+    let bus_index = (raw / SCENE_ROW_DEVICE_BUS_STRIDE) as usize;
+    let device_index = (raw % SCENE_ROW_DEVICE_BUS_STRIDE) as usize;
+    let device = hardware_runtime
+        .buses
+        .get(bus_index)?
+        .devices
+        .get(device_index)?;
+    Some(match device {
+        HardwareDeviceRuntime::Servo(servo) => selected_servo_info(servo),
+        HardwareDeviceRuntime::Imu(imu) => selected_imu_info(imu),
+        HardwareDeviceRuntime::IoBoard(io_board) => selected_io_board_info(io_board),
     })
 }
 
@@ -809,17 +1213,6 @@ fn selected_static_scene_info(
                 workbench_property("Mode", "viewport"),
             ],
         ),
-        SCENE_ROW_SERVO_BUS => static_scene_info(
-            "Virtual ServoBus",
-            "servo bus",
-            "BUS",
-            "#245c95",
-            vec![
-                workbench_property("Profile", "ST3215"),
-                workbench_property("Transport", "virtual"),
-                workbench_property("Rate", "1 MHz"),
-            ],
-        ),
         SCENE_ROW_OBJECT_WORKTABLE => static_scene_info(
             "Worktable",
             "fixture",
@@ -855,13 +1248,6 @@ fn selected_static_scene_info(
             "#245c95",
             vec![workbench_property("Rate", "100 Hz")],
         ),
-        SCENE_ROW_SENSOR_SERVO_BUS => static_scene_info(
-            "Servo Bus",
-            "telemetry",
-            "BUS",
-            "#245c95",
-            vec![workbench_property("Source", "virtual bus")],
-        ),
         SCENE_ROW_SENSOR_LIDAR => static_scene_info(
             "Lidar_1",
             "sensor",
@@ -880,12 +1266,24 @@ fn selected_static_scene_info(
     }
 }
 
-fn selected_scene_info(state: &UrdfViewerState, selected_scene_row_id: u32) -> SelectedSceneInfo {
+fn selected_scene_info(
+    state: &UrdfViewerState,
+    hardware_runtime: &HardwareRuntime,
+    selected_scene_row_id: u32,
+) -> SelectedSceneInfo {
     if let Some(info) = selected_link_info(state, selected_scene_row_id) {
         return info;
     }
 
-    if let Some(info) = selected_joint_info(state, selected_scene_row_id) {
+    if let Some(info) = selected_joint_info(state, hardware_runtime, selected_scene_row_id) {
+        return info;
+    }
+
+    if let Some(info) = selected_bus_info(hardware_runtime, selected_scene_row_id) {
+        return info;
+    }
+
+    if let Some(info) = selected_device_info(hardware_runtime, selected_scene_row_id) {
         return info;
     }
 
@@ -895,7 +1293,6 @@ fn selected_scene_info(state: &UrdfViewerState, selected_scene_row_id: u32) -> S
 fn sensors() -> Vec<WorkbenchSensorModel> {
     vec![
         workbench_sensor("Joint States", "JS_1", "100 Hz"),
-        workbench_sensor("Servo Bus", "ST3215", "1 MHz"),
         workbench_sensor("Camera", "Camera_1", "30 Hz"),
     ]
 }
@@ -919,13 +1316,53 @@ fn dashboard_preview_props(mode: &str) -> WuiValue {
     serde_json_to_wui_value(&value)
 }
 
+fn project_name(project_config: Option<&ProjectConfig>) -> String {
+    project_config
+        .map(|config| config.name.clone())
+        .unwrap_or_else(|| "PuppyArm".to_string())
+}
+
+fn mapped_servo_for_joint_mut<'a>(
+    hardware_runtime: &'a mut HardwareRuntime,
+    joint_name: &str,
+) -> Option<&'a mut HardwareServoRuntime> {
+    hardware_runtime
+        .buses
+        .iter_mut()
+        .flat_map(|bus| bus.devices.iter_mut())
+        .find_map(|device| match device {
+            HardwareDeviceRuntime::Servo(servo) if servo.drives_joint == joint_name => Some(servo),
+            _ => None,
+        })
+}
+
+fn route_joint_command_through_hardware(
+    hardware_runtime: &mut HardwareRuntime,
+    state: &UrdfViewerState,
+    slider_slot: usize,
+    value: i32,
+) -> Option<i32> {
+    let robot = state.robot.as_ref()?;
+    let joint_index = *robot.movable_joint_indices.get(slider_slot)?;
+    let joint = robot.joints.get(joint_index)?;
+    let (min, max) = urdf_joint_slider_range(joint);
+    let target = slider_value_to_servo_ticks(value, min, max);
+    let servo = mapped_servo_for_joint_mut(hardware_runtime, &joint.name)?;
+    servo.target_position = target;
+    servo.present_position = target;
+    Some(value)
+}
+
 #[wgui_controller(template = "app_controller")]
 impl AppController {
-    pub(crate) fn new(urdf_path: Option<PathBuf>) -> Self {
+    pub(crate) fn new(urdf_path: Option<PathBuf>, project_config: Option<ProjectConfig>) -> Self {
         let mut urdf_state = UrdfViewerState::new(urdf_path);
         reload_urdf_state(&mut urdf_state);
+        let hardware_runtime = hardware_runtime_from_project(project_config.as_ref(), &urdf_state);
         Self {
             urdf_state,
+            project_config,
+            hardware_runtime,
             simulation_running: true,
             selected_scene_row_id: SCENE_ROW_ROBOT,
             collapsed_scene_section_ids: Vec::new(),
@@ -962,10 +1399,14 @@ impl AppController {
             .as_ref()
             .map(|robot| robot.movable_joint_indices.is_empty())
             .unwrap_or(false);
-        let selected_info = selected_scene_info(&self.urdf_state, self.selected_scene_row_id);
+        let selected_info = selected_scene_info(
+            &self.urdf_state,
+            &self.hardware_runtime,
+            self.selected_scene_row_id,
+        );
 
         WorkbenchModel {
-            project_name: "SmartFactory".to_string(),
+            project_name: project_name(self.project_config.as_ref()),
             project_version: "v2.4.1 v".to_string(),
             simulation_label: if self.simulation_running {
                 "Simulation".to_string()
@@ -1000,6 +1441,7 @@ impl AppController {
             no_movable_joints,
             scene_sections: scene_sections(
                 &self.urdf_state,
+                &self.hardware_runtime,
                 self.selected_scene_row_id,
                 &self.collapsed_scene_section_ids,
             ),
@@ -1031,10 +1473,14 @@ impl AppController {
     pub(crate) fn reset_simulation(&mut self) {
         self.simulation_running = false;
         reload_urdf_state(&mut self.urdf_state);
+        self.hardware_runtime =
+            hardware_runtime_from_project(self.project_config.as_ref(), &self.urdf_state);
     }
 
     pub(crate) fn reload_urdf(&mut self) {
         reload_urdf_state(&mut self.urdf_state);
+        self.hardware_runtime =
+            hardware_runtime_from_project(self.project_config.as_ref(), &self.urdf_state);
     }
 
     pub(crate) fn select_scene_row(&mut self, arg: u32) {
@@ -1064,7 +1510,17 @@ impl AppController {
     }
 
     pub(crate) fn set_joint_control(&mut self, arg: u32, value: i32) {
-        let _ =
-            apply_urdf_slider_change(&mut self.urdf_state, URDF_JOINT_SLIDER_BASE_ID + arg, value);
+        let routed_value = route_joint_command_through_hardware(
+            &mut self.hardware_runtime,
+            &self.urdf_state,
+            arg as usize,
+            value,
+        )
+        .unwrap_or(value);
+        let _ = apply_urdf_slider_change(
+            &mut self.urdf_state,
+            URDF_JOINT_SLIDER_BASE_ID + arg,
+            routed_value,
+        );
     }
 }

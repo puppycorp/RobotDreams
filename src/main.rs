@@ -88,7 +88,7 @@ struct Args {
     #[arg(long, default_value_t = 1_000_000)]
     baud: u32,
 
-    #[arg(long, default_value = "0.0.0.0:12347")]
+    #[arg(long, default_value = "0.0.0.0:8345")]
     bind: String,
 
     #[command(subcommand)]
@@ -310,6 +310,90 @@ impl UrdfViewerState {
     }
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct ProjectConfig {
+    pub(crate) format: String,
+    pub(crate) name: String,
+    pub(crate) robots: Vec<ProjectRobotConfig>,
+    pub(crate) hardware: HardwareConfig,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ProjectRobotConfig {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) model: ProjectRobotModelConfig,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ProjectRobotModelConfig {
+    pub(crate) type_name: String,
+    pub(crate) path: String,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct HardwareConfig {
+    pub(crate) buses: Vec<BusConfig>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct BusConfig {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) transport: BusTransportConfig,
+    pub(crate) protocol: String,
+    pub(crate) devices: Vec<DeviceConfig>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct BusTransportConfig {
+    pub(crate) type_name: String,
+    pub(crate) baud: Option<u32>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum DeviceConfig {
+    Servo(ServoDeviceConfig),
+    Imu(ImuDeviceConfig),
+    IoBoard(IoBoardDeviceConfig),
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct DeviceMapping {
+    pub(crate) robot: String,
+    pub(crate) target: String,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ServoCalibrationConfig {
+    pub(crate) zero_offset: i16,
+    pub(crate) direction: i8,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ServoDeviceConfig {
+    pub(crate) id: u32,
+    pub(crate) name: String,
+    pub(crate) profile: String,
+    pub(crate) drives: Option<DeviceMapping>,
+    pub(crate) calibration: ServoCalibrationConfig,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ImuDeviceConfig {
+    pub(crate) id: u32,
+    pub(crate) name: String,
+    pub(crate) profile: String,
+    pub(crate) mounted_on: Option<DeviceMapping>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct IoBoardDeviceConfig {
+    pub(crate) id: u32,
+    pub(crate) name: String,
+    pub(crate) profile: String,
+}
+
 fn first_urdf_in_dir(dir: &Path) -> Option<PathBuf> {
     if !dir.is_dir() {
         return None;
@@ -377,6 +461,210 @@ fn json_string_path<'a>(value: &'a serde_json::Value, path: &[&str]) -> Option<&
     current.as_str()
 }
 
+fn json_u32_path(value: &serde_json::Value, path: &[&str]) -> Option<u32> {
+    let mut current = value;
+    for key in path {
+        current = current.get(*key)?;
+    }
+    current.as_u64().and_then(|value| u32::try_from(value).ok())
+}
+
+fn json_i16_path(value: &serde_json::Value, path: &[&str]) -> Option<i16> {
+    let mut current = value;
+    for key in path {
+        current = current.get(*key)?;
+    }
+    current.as_i64().and_then(|value| i16::try_from(value).ok())
+}
+
+fn json_i8_path(value: &serde_json::Value, path: &[&str]) -> Option<i8> {
+    let mut current = value;
+    for key in path {
+        current = current.get(*key)?;
+    }
+    current.as_i64().and_then(|value| i8::try_from(value).ok())
+}
+
+fn parse_device_mapping(
+    value: &serde_json::Value,
+    field: &str,
+    target: &str,
+) -> Option<DeviceMapping> {
+    let mapping = value.get(field)?;
+    Some(DeviceMapping {
+        robot: json_string_path(mapping, &["robot"])
+            .unwrap_or("puppyarm")
+            .to_string(),
+        target: json_string_path(mapping, &[target])?.to_string(),
+    })
+}
+
+fn parse_servo_calibration(value: &serde_json::Value) -> ServoCalibrationConfig {
+    ServoCalibrationConfig {
+        zero_offset: json_i16_path(value, &["calibration", "zeroOffset"]).unwrap_or(2048),
+        direction: json_i8_path(value, &["calibration", "direction"]).unwrap_or(1),
+    }
+}
+
+fn parse_device_config(value: &serde_json::Value) -> Option<DeviceConfig> {
+    let device_type = json_string_path(value, &["type"])?;
+    let id = json_u32_path(value, &["id"])?;
+    let name = json_string_path(value, &["name"])
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("{device_type} {id}"));
+    let profile = json_string_path(value, &["profile"])
+        .map(str::to_string)
+        .unwrap_or_else(|| "custom".to_string());
+
+    match device_type {
+        "servo" => Some(DeviceConfig::Servo(ServoDeviceConfig {
+            id,
+            name,
+            profile,
+            drives: parse_device_mapping(value, "drives", "joint"),
+            calibration: parse_servo_calibration(value),
+        })),
+        "imu" => Some(DeviceConfig::Imu(ImuDeviceConfig {
+            id,
+            name,
+            profile,
+            mounted_on: parse_device_mapping(value, "mountedOn", "link"),
+        })),
+        "io_board" => Some(DeviceConfig::IoBoard(IoBoardDeviceConfig {
+            id,
+            name,
+            profile,
+        })),
+        _ => None,
+    }
+}
+
+fn parse_bus_transport_config(value: &serde_json::Value) -> BusTransportConfig {
+    BusTransportConfig {
+        type_name: json_string_path(value, &["transport", "type"])
+            .unwrap_or("virtual")
+            .to_string(),
+        baud: json_u32_path(value, &["transport", "baud"]),
+    }
+}
+
+fn parse_bus_config(value: &serde_json::Value) -> Option<BusConfig> {
+    let id = json_string_path(value, &["id"])?.to_string();
+    let name = json_string_path(value, &["name"])
+        .map(str::to_string)
+        .unwrap_or_else(|| id.clone());
+    let protocol = json_string_path(value, &["protocol"])
+        .unwrap_or("feetech")
+        .to_string();
+    let devices = value
+        .get("devices")
+        .and_then(|devices| devices.as_array())
+        .map(|devices| devices.iter().filter_map(parse_device_config).collect())
+        .unwrap_or_default();
+
+    Some(BusConfig {
+        id,
+        name,
+        transport: parse_bus_transport_config(value),
+        protocol,
+        devices,
+    })
+}
+
+fn parse_hardware_config(value: &serde_json::Value) -> HardwareConfig {
+    let buses = value
+        .get("hardware")
+        .and_then(|hardware| hardware.get("buses"))
+        .and_then(|buses| buses.as_array())
+        .map(|buses| buses.iter().filter_map(parse_bus_config).collect())
+        .unwrap_or_default();
+    HardwareConfig { buses }
+}
+
+fn parse_project_robot_model_config(value: &serde_json::Value) -> Option<ProjectRobotModelConfig> {
+    let model = value.get("model")?;
+    Some(ProjectRobotModelConfig {
+        type_name: json_string_path(model, &["type"])
+            .unwrap_or("urdf")
+            .to_string(),
+        path: json_string_path(model, &["path"])?.to_string(),
+    })
+}
+
+fn parse_project_robot_config(value: &serde_json::Value) -> Option<ProjectRobotConfig> {
+    let id = json_string_path(value, &["id"])?.to_string();
+    let name = json_string_path(value, &["name"])
+        .map(str::to_string)
+        .unwrap_or_else(|| id.clone());
+    Some(ProjectRobotConfig {
+        id,
+        name,
+        model: parse_project_robot_model_config(value)?,
+    })
+}
+
+fn parse_project_config(value: &serde_json::Value) -> Option<ProjectConfig> {
+    let format = json_string_path(value, &["format"])?;
+    if format != ROBOT_DREAMS_PROJECT_FORMAT {
+        return None;
+    }
+
+    let name = json_string_path(value, &["name"])
+        .unwrap_or("RobotDreams Project")
+        .to_string();
+    let robots = value
+        .get("robots")
+        .and_then(|robots| robots.as_array())
+        .map(|robots| {
+            robots
+                .iter()
+                .filter_map(parse_project_robot_config)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Some(ProjectConfig {
+        format: format.to_string(),
+        name,
+        robots,
+        hardware: parse_hardware_config(value),
+    })
+}
+
+fn project_config_from_manifest(path: &Path) -> Option<ProjectConfig> {
+    let json = read_json_file(path).ok()?;
+    parse_project_config(&json)
+}
+
+fn project_manifest_for_input_path(path: &Path) -> Option<PathBuf> {
+    if path.is_file()
+        && path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.eq_ignore_ascii_case("json"))
+            .unwrap_or(false)
+    {
+        let json = read_json_file(path).ok()?;
+        if json_string_path(&json, &["format"]) == Some(ROBOT_DREAMS_PROJECT_FORMAT) {
+            return Some(path.to_path_buf());
+        }
+    }
+
+    if path.is_dir() {
+        for candidate in [
+            path.join("project.json"),
+            path.join("robotdreams.json"),
+            path.join("robotdreams.example.json"),
+        ] {
+            if project_config_from_manifest(&candidate).is_some() {
+                return Some(candidate);
+            }
+        }
+    }
+
+    None
+}
+
 fn resolve_json_urdf_path(path: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let json = read_json_file(path)?;
     let base = path.parent().unwrap_or_else(|| Path::new("."));
@@ -386,8 +674,27 @@ fn resolve_json_urdf_path(path: &Path) -> Result<PathBuf, Box<dyn std::error::Er
             return resolve_robot_input_path(base.join(model_profile));
         }
 
+        if let Some(urdf_path) = json
+            .get("robots")
+            .and_then(|robots| robots.as_array())
+            .and_then(|robots| robots.first())
+            .and_then(|robot| robot.get("model"))
+            .and_then(|model| {
+                let model_type = model
+                    .get("type")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("urdf");
+                model_type
+                    .eq_ignore_ascii_case("urdf")
+                    .then(|| model.get("path").and_then(|value| value.as_str()))
+                    .flatten()
+            })
+        {
+            return Ok(base.join(urdf_path));
+        }
+
         return Err(format!(
-            "RobotDreams project '{}' is missing modelProfile",
+            "RobotDreams project '{}' is missing modelProfile or robots[].model.path",
             path.display()
         )
         .into());
@@ -472,6 +779,14 @@ fn resolve_urdf_path(path: Option<PathBuf>) -> Result<PathBuf, Box<dyn std::erro
     }
 
     Err("No URDF path provided and no .urdf file found in ./models, ./examples, or ./model".into())
+}
+
+fn project_config_for_input_path(path: Option<&Path>) -> Option<ProjectConfig> {
+    let manifest_path = match path {
+        Some(path) => project_manifest_for_input_path(path)?,
+        None => project_manifest_for_input_path(Path::new("."))?,
+    };
+    project_config_from_manifest(&manifest_path)
 }
 
 #[derive(Clone)]
@@ -989,7 +1304,7 @@ fn servo_ticks_to_slider_value(ticks: i16, min: i32, max: i32) -> i32 {
     (min as f32 + (max - min) as f32 * t).round() as i32
 }
 
-fn slider_value_to_servo_ticks(slider_value: i32, min: i32, max: i32) -> i16 {
+pub(crate) fn slider_value_to_servo_ticks(slider_value: i32, min: i32, max: i32) -> i16 {
     if max <= min {
         return 0;
     }
@@ -2279,10 +2594,16 @@ fn project_url(bind_addr: SocketAddr, project_launch: &ProjectLaunch) -> String 
     format!("{}{}", ui_url(bind_addr), project_route(project_launch))
 }
 
-fn add_workbench_page(wgui: &mut Wgui, route: &str, urdf_path: PathBuf) {
+fn add_workbench_page(
+    wgui: &mut Wgui,
+    route: &str,
+    urdf_path: PathBuf,
+    project_config: Option<ProjectConfig>,
+) {
     wgui.add_page_with(route, move || {
         let urdf_path = urdf_path.clone();
-        async move { AppController::new(Some(urdf_path)) }
+        let project_config = project_config.clone();
+        async move { AppController::new(Some(urdf_path), project_config) }
     });
 }
 
@@ -2290,10 +2611,11 @@ fn add_launched_project_page(
     wgui: &mut Wgui,
     project_launch: Option<ProjectLaunch>,
     urdf_path: PathBuf,
+    project_config: Option<ProjectConfig>,
 ) {
     if let Some(project_launch) = project_launch {
         let route = project_route(&project_launch);
-        add_workbench_page(wgui, &route, urdf_path);
+        add_workbench_page(wgui, &route, urdf_path, project_config);
     }
 }
 
@@ -2330,10 +2652,11 @@ async fn run_urdf_view(
     urdf_args: UrdfViewArgs,
     bind_addr: SocketAddr,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let project_launch = urdf_args
-        .path
-        .as_deref()
-        .and_then(project_launch_for_input_path);
+    let project_launch = match urdf_args.path.as_deref() {
+        Some(path) => project_launch_for_input_path(path),
+        None => project_launch_for_input_path(Path::new(".")),
+    };
+    let project_config = project_config_for_input_path(urdf_args.path.as_deref());
     let urdf_path = resolve_urdf_path(urdf_args.path)?;
     ensure_ui_bind_available(bind_addr)?;
 
@@ -2347,8 +2670,13 @@ async fn run_urdf_view(
     wgui.set_css(ROBOT_DREAMS_CSS);
     wgui.add_page_with("/", || async { ProjectsController::new() });
     wgui.add_page_with("/projects", || async { ProjectsController::new() });
-    add_workbench_page(&mut wgui, "/workbench", urdf_path.clone());
-    add_launched_project_page(&mut wgui, project_launch, urdf_path);
+    add_workbench_page(
+        &mut wgui,
+        "/workbench",
+        urdf_path.clone(),
+        project_config.clone(),
+    );
+    add_launched_project_page(&mut wgui, project_launch, urdf_path, project_config);
     wgui.run().await;
 
     Ok(())

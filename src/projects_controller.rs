@@ -95,8 +95,8 @@ fn recent_activity() -> Vec<ProjectActivityModel> {
         ),
         project_activity(
             "12:45",
-            "Virtual ServoBus attached",
-            "ST3215 profile connected to the workbench harness.",
+            "Hardware bus resolved",
+            "ST3215 devices mapped from the project hardware config.",
         ),
         project_activity(
             "12:44",

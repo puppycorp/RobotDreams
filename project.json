@@ -2,5 +2,86 @@
   "format": "robotdreams.project.v1",
   "name": "PuppyArm Demo",
   "modelProfile": "examples/puppyarm/model/robotdreams.json",
+  "robots": [
+    {
+      "id": "puppyarm",
+      "name": "PuppyArm",
+      "model": {
+        "type": "urdf",
+        "path": "examples/puppyarm/model/final/urdf/final.urdf"
+      }
+    }
+  ],
+  "hardware": {
+    "buses": [
+      {
+        "id": "main_bus",
+        "name": "Main Serial Bus",
+        "transport": {
+          "type": "virtual",
+          "baud": 1000000
+        },
+        "protocol": "feetech",
+        "devices": [
+          {
+            "type": "servo",
+            "id": 1,
+            "name": "Yaw Servo",
+            "profile": "ST3215",
+            "drives": {
+              "robot": "puppyarm",
+              "joint": "revolute_1"
+            },
+            "calibration": {
+              "zeroOffset": 2048,
+              "direction": 1
+            }
+          },
+          {
+            "type": "servo",
+            "id": 2,
+            "name": "Shoulder Servo",
+            "profile": "ST3215",
+            "drives": {
+              "robot": "puppyarm",
+              "joint": "revolute_1_1"
+            },
+            "calibration": {
+              "zeroOffset": 2048,
+              "direction": -1
+            }
+          },
+          {
+            "type": "servo",
+            "id": 3,
+            "name": "Elbow Servo",
+            "profile": "ST3215",
+            "drives": {
+              "robot": "puppyarm",
+              "joint": "revolute_1_2"
+            },
+            "calibration": {
+              "zeroOffset": 2048,
+              "direction": 1
+            }
+          },
+          {
+            "type": "servo",
+            "id": 4,
+            "name": "Wrist Servo",
+            "profile": "ST3215",
+            "drives": {
+              "robot": "puppyarm",
+              "joint": "revolute_1_3"
+            },
+            "calibration": {
+              "zeroOffset": 2048,
+              "direction": 1
+            }
+          }
+        ]
+      }
+    ]
+  },
   "notes": "Convenience project manifest for launching the demo from the RobotDreams crate root."
 }
