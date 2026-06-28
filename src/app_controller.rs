@@ -16,9 +16,10 @@ use wgui::{WguiModel, wgui_controller};
 use crate::{
     BusConfig, DeviceConfig, HardwareConfig, ProjectConfig, ROBOT_SCENE_CONTROLLER_ENTRY,
     ServoDeviceConfig, URDF_BASE_SLIDER_BASE_ID, URDF_JOINT_SLIDER_BASE_ID, UrdfViewerState,
-    apply_urdf_slider_change, reload_urdf_state, robot_scene_props_with_static_scene,
-    servo_ticks_to_slider_value, slider_value_to_servo_ticks, urdf_joint_slider_range,
-    urdf_joint_type_name, urdf_slider_value_to_units, urdf_value_to_joint_units,
+    WORKBENCH_REFRESH_CONTROLLER_ENTRY, apply_urdf_slider_change, reload_urdf_state,
+    robot_scene_props_with_static_scene, servo_ticks_to_slider_value, slider_value_to_servo_ticks,
+    urdf_joint_slider_range, urdf_joint_type_name, urdf_slider_value_to_units,
+    urdf_value_to_joint_units,
 };
 
 const SCENE_SECTION_ENVIRONMENT: u32 = 1;
@@ -108,6 +109,9 @@ pub(crate) struct WorkbenchModel {
     robot_scene_name: String,
     robot_scene_entry: String,
     robot_scene_props: WuiValue,
+    refresh_timer_name: String,
+    refresh_timer_entry: String,
+    refresh_timer_props: WuiValue,
     lidar_preview_name: String,
     lidar_preview_props: WuiValue,
     camera_preview_name: String,
@@ -1691,6 +1695,13 @@ fn selected_bus_index(selected_scene_row_id: u32) -> Option<usize> {
     Some((selected_scene_row_id - SCENE_ROW_BUS_BASE) as usize)
 }
 
+fn first_virtual_bus_index(hardware_runtime: &HardwareRuntime) -> Option<usize> {
+    hardware_runtime
+        .buses
+        .iter()
+        .position(|bus| bus.transport_type == "virtual")
+}
+
 fn selected_virtual_bus_index(
     hardware_runtime: &HardwareRuntime,
     selected_scene_row_id: u32,
@@ -1967,6 +1978,12 @@ impl AppController {
                 base_rotation,
                 self.robot_static_scene_dirty.replace(false),
             )),
+            refresh_timer_name: "workbench-refresh".to_string(),
+            refresh_timer_entry: WORKBENCH_REFRESH_CONTROLLER_ENTRY.to_string(),
+            refresh_timer_props: serde_json_to_wui_value(&serde_json::json!({
+                "enabled": self.virtual_bus.is_running(),
+                "intervalMs": 250,
+            })),
             lidar_preview_name: "lidar-preview".to_string(),
             lidar_preview_props: dashboard_preview_props("lidar"),
             camera_preview_name: "camera-preview".to_string(),
@@ -2097,6 +2114,7 @@ impl AppController {
     pub(crate) fn toggle_selected_virtual_bus(&mut self) {
         let Some(bus_index) =
             selected_virtual_bus_index(&self.hardware_runtime, self.selected_scene_row_id)
+                .or_else(|| first_virtual_bus_index(&self.hardware_runtime))
         else {
             return;
         };
@@ -2116,6 +2134,7 @@ impl AppController {
         if let Ok(path) = self.virtual_bus.start(servo_count)
             && let Some(bus) = self.hardware_runtime.buses.get_mut(bus_index)
         {
+            log::info!("virtual servo bus listening at {path}");
             bus.device_path = Some(path);
         }
     }
@@ -2160,5 +2179,16 @@ impl AppController {
                 .set_target_position(servo_id, value.clamp(0, 4095) as i16);
             self.refresh_from_virtual_bus();
         }
+    }
+
+    pub(crate) fn handle_event(&mut self, event: &wgui::ClientEvent) -> bool {
+        let wgui::ClientEvent::OnCustom(custom) = event else {
+            return false;
+        };
+        if custom.name != "refresh" {
+            return false;
+        }
+        self.refresh_from_virtual_bus();
+        true
     }
 }

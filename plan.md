@@ -1,390 +1,301 @@
-# RobotDreams Project Storage Plan
+# Hardware Bus Project Model Plan
 
 ## Goal
 
-Start with a git-friendly RobotDreams project manifest. A project folder should be openable with:
+Represent robot mechanics, hardware buses, simulated devices, and their mappings as separate concepts.
+
+The robot model owns links, joints, meshes, and limits. A bus owns transport, protocol, devices, commands, and telemetry. A mapping connects a hardware device to a simulation object when needed.
+
+This keeps the scene tree honest and prepares the app for both virtual devices and real hardware.
+
+## Scene Tree
+
+Use separate top-level groups:
 
 ```text
-cargo run -- ./project.json
+Robots
+  PuppyArm
+    Links
+    Joints
+
+Hardware
+  Main Serial Bus
+    Servo 1
+    Servo 2
+    Servo 3
+    IO Board 20
+    IMU 30
+
+Sensors
+  Joint States
+  Camera_1
+  Lidar_1
 ```
 
-SQLite/WDB should come after the project file format settles. WDB is useful as a local index, cache, and mutable workspace-state store, and later as the hosted database layer, but the portable project definition should remain JSON.
+Do not put the servo bus under the robot. The bus is hardware/control infrastructure, not robot geometry.
 
-## Storage Split
+Do not keep a second `Sensors > Servo Bus` row. The bus can expose telemetry, but the bus itself belongs under `Hardware`.
 
-JSON should store portable project definitions:
+## Ownership Rules
 
-- `project.json` project manifests
-- robot model descriptors
-- harness definitions
-- servo profiles such as `ST3215`
-- artifact references using relative paths
-- export snapshots for sharing or version control
+- `Robot > Joints` describes the mechanical simulation model.
+- `Hardware > Bus > Device` describes physical or virtual bus devices.
+- Device-to-robot relationships are references, not containment.
+- A servo can drive a robot joint.
+- An IMU can be mounted on a robot link.
+- An IO board may have no robot geometry mapping.
+- The same project format should work for virtual simulation and real serial hardware.
 
-WDB should store local or hosted application state:
+## Project File Shape
 
-- project registry
-- recent/opened projects
-- selected model and harness files
-- workspace layout
-- component instances in a scene
-- calibration revisions and active calibration selection
-- UI/editor metadata
-- timestamps and last-opened state
-- indexed artifact metadata and checksums
+Store bus/device definitions and mappings in the project file, not the URDF.
 
-Real files should live as artifacts:
+The URDF remains mechanical. The project file describes runtime hardware and simulation wiring.
 
-- local mode: files beside the manifest or under an `artifacts/` folder
-- hosted mode: object storage entries scoped by workspace/tenant
-
-## Project Manifest v1
-
-Preferred file name:
-
-```text
-project.json
-```
-
-Initial shape:
+Draft JSON:
 
 ```json
 {
   "format": "robotdreams.project.v1",
   "name": "PuppyArm",
-  "modelProfile": "model/robotdreams.json"
+  "robots": [
+    {
+      "id": "puppyarm",
+      "name": "PuppyArm",
+      "model": {
+        "type": "urdf",
+        "path": "model/final/urdf/final.urdf"
+      }
+    }
+  ],
+  "hardware": {
+    "buses": [
+      {
+        "id": "main_bus",
+        "name": "Main Serial Bus",
+        "transport": {
+          "type": "virtual",
+          "baud": 1000000
+        },
+        "protocol": "feetech",
+        "devices": [
+          {
+            "type": "servo",
+            "id": 1,
+            "name": "Base Servo",
+            "profile": "ST3215",
+            "drives": {
+              "robot": "puppyarm",
+              "joint": "revolute_1"
+            },
+            "calibration": {
+              "zeroOffset": 2048,
+              "direction": 1
+            }
+          },
+          {
+            "type": "servo",
+            "id": 2,
+            "name": "Shoulder Servo",
+            "profile": "ST3215",
+            "drives": {
+              "robot": "puppyarm",
+              "joint": "revolute_1_1"
+            },
+            "calibration": {
+              "zeroOffset": 2048,
+              "direction": -1
+            }
+          },
+          {
+            "type": "io_board",
+            "id": 20,
+            "name": "Tool IO",
+            "profile": "custom_gpio"
+          },
+          {
+            "type": "imu",
+            "id": 30,
+            "name": "Wrist IMU",
+            "profile": "custom_imu",
+            "mountedOn": {
+              "robot": "puppyarm",
+              "link": "wrist_link"
+            }
+          }
+        ]
+      }
+    ]
+  }
 }
 ```
 
-All relative paths are resolved relative to the JSON file containing them. A project manifest can point to a model profile, and the model profile can point to URDF, meshes, servo profiles, and other artifacts relative to itself.
+## Runtime Resolution
 
-Supported launch forms:
-
-```text
-cargo run -- examples/puppyarm/project.json
-cargo run -- examples/puppyarm/model/robotdreams.json
-cargo run -- examples/puppyarm/model/final/urdf/final.urdf
-```
-
-## WGUI WDB Workflow
-
-Follow the pattern from WGUI's `examples/puppychat` after the JSON project flow is stable:
+On project load:
 
 ```text
-schema.wdb
-wgui.toml
-migrations/
-src/db.rs
+project file
+  -> robots[] load URDF models
+  -> hardware.buses[] create bus drivers or simulators
+  -> devices[] create typed simulated or real device states
+  -> drives / mountedOn mappings connect devices to simulation targets
 ```
 
-`schema.wdb` is the human-authored schema. `src/db.rs` is generated by the WGUI CLI and contains:
+For servo-driven joints:
 
-- Rust structs for each model
-- `WguiModel`, `Serialize`, and `Deserialize` derives
-- `HasId` impls for `id: Int @id` models
-- a `RobotDreamsDb` struct with `DbTable<T>` fields
-- `RobotDreamsDb::new()` using `Db::<RobotDreamsDb>::new()`
+```text
+slider or controller command
+  -> target joint
+  -> mapping lookup
+  -> servo command
+  -> bus driver or simulator
+  -> servo telemetry snapshot
+  -> backend joint state
+  -> backend dynamic transforms
+  -> frontend cached Three.js objects
+```
 
-At runtime:
+The backend remains authoritative for joint state and transforms.
+
+## Device Model
+
+Every bus device should share a small base shape:
+
+```text
+type
+id
+name
+profile
+status
+telemetry
+mapping fields depending on type
+```
+
+Servo-specific fields:
+
+```text
+drives.robot
+drives.joint
+calibration.zeroOffset
+calibration.direction
+limits
+targetPosition
+presentPosition
+torque
+temperature
+voltage
+```
+
+IMU-specific fields:
+
+```text
+mountedOn.robot
+mountedOn.link
+orientation
+angularVelocity
+linearAcceleration
+```
+
+IO-board-specific fields:
+
+```text
+digitalInputs
+digitalOutputs
+analogInputs
+```
+
+## Backend Types
+
+Add project/runtime types roughly like:
 
 ```rust
-let db = RobotDreamsDb::new();
-let mut wgui = Wgui::new(bind_addr).with_db(db);
+struct ProjectConfig {
+    format: String,
+    name: String,
+    robots: Vec<ProjectRobotConfig>,
+    hardware: HardwareConfig,
+}
+
+struct HardwareConfig {
+    buses: Vec<BusConfig>,
+}
+
+struct BusConfig {
+    id: String,
+    name: String,
+    transport: BusTransportConfig,
+    protocol: String,
+    devices: Vec<DeviceConfig>,
+}
+
+enum DeviceConfig {
+    Servo(ServoDeviceConfig),
+    Imu(ImuDeviceConfig),
+    IoBoard(IoBoardDeviceConfig),
+}
 ```
 
-When the `sqlite` feature is enabled, WGUI uses SQLite under WDB and applies migrations from the configured migrations directory.
-
-## Cargo Feature Plan
-
-Add a RobotDreams feature that enables WDB persistence:
-
-```toml
-[features]
-default = []
-sqlite = ["wgui/sqlite"]
-```
-
-For normal development runs, use the feature:
+Runtime state should be separate from config:
 
 ```text
-cargo run --features sqlite -- --bind 127.0.0.1:12345 examples/puppyarm/project.json
+ProjectConfig: loaded from disk
+HardwareRuntime: bus drivers, simulators, snapshots
+SimulationState: robot joint state, physics state, transforms
 ```
 
-Without the feature, WDB can still behave as an in-memory table layer, which is useful for quick demos and tests.
+## UI Plan
 
-## Database Location
-
-Use WGUI's project config and environment behavior instead of manually opening SQLite:
+Scene rows:
 
 ```text
-wgui.toml
-.env
+SCENE_SECTION_ROBOTS
+SCENE_SECTION_HARDWARE
+SCENE_SECTION_SENSORS
+
+SCENE_ROW_ROBOT_BASE
+SCENE_ROW_LINK_BASE
+SCENE_ROW_JOINT_BASE
+SCENE_ROW_BUS_BASE
+SCENE_ROW_DEVICE_BASE
 ```
 
-Development default:
+Selected inspector behavior:
+
+- Selecting a robot shows URDF/model summary.
+- Selecting a joint shows mechanical joint data and mapped device, if any.
+- Selecting a bus shows protocol, transport, baud, device count, and connection status.
+- Selecting a servo shows id, profile, mapped joint, target, present position, and calibration.
+- Selecting an IMU shows mounted link and live telemetry.
+- Selecting an IO board shows channels and live values.
+
+## Implementation Steps
+
+1. Move `Virtual ServoBus` out of `Robots` into a new `Hardware` section.
+2. Remove `Sensors > Servo Bus`.
+3. Add bus child rows for devices.
+4. Start with inferred devices from movable URDF joints:
+   - servo id `1` maps to movable joint slot `0`
+   - servo id `2` maps to movable joint slot `1`
+   - continue by slot
+5. Add project-file parsing for explicit `hardware.buses[].devices[]`.
+6. Use explicit project mappings when available and inferred mappings only as fallback.
+7. Route joint slider commands through the mapping:
+   - joint -> servo device -> bus simulator/driver
+8. Feed servo telemetry back into backend joint state.
+9. Keep backend-generated dynamic transforms as the only source of rendered joint motion.
+10. Extend device types beyond servos after the bus/device abstraction is stable.
+
+## Migration Rule
+
+Existing URDF-only launches should still work.
+
+When no project hardware config exists:
 
 ```text
-DATABASE_URL=sqlite://workdir/robotdreams.db
+create one virtual Feetech bus
+create one ST3215 servo per movable URDF joint
+map servo ids by movable joint order
 ```
 
-If no `.env` exists but `wgui.toml` exists, WGUI's helper can default to a local `wgui.db`. RobotDreams should prefer an explicit `.env` or startup helper so the database path is obvious.
-
-## WGUI Config
-
-Add:
-
-```toml
-schema = "schema.wdb"
-out = "src/db.rs"
-db_name = "RobotDreamsDb"
-migrations_dir = "migrations"
-env_file = ".env"
-```
-
-## Initial WDB Schema
-
-Draft `schema.wdb`:
-
-```wdb
-model Project {
-  id: Int @id
-  slug: String
-  name: String
-  kind: String
-  manifest_path: String
-  status: String
-  badge: String
-  accent: String
-  created_at: String
-  updated_at: String
-  last_opened_at: String?
-  artifacts: Artifact[] @relation(project_id)
-  robot_models: RobotModel[] @relation(project_id)
-  components: Component[] @relation(project_id)
-  servo_bus_bindings: ServoBusBinding[] @relation(project_id)
-  workspace_state: WorkspaceState? @relation(project_id)
-}
-
-model Artifact {
-  id: Int @id
-  project_id: Int
-  project: Project? @relation(project_id)
-  kind: String
-  uri: String
-  filename: String?
-  content_type: String?
-  checksum: String?
-  size_bytes: Int?
-  format: String
-  metadata: Json
-  created_at: String
-  updated_at: String
-}
-
-model RobotModel {
-  id: Int @id
-  project_id: Int
-  project: Project? @relation(project_id)
-  name: String
-  source_artifact_id: Int?
-  source_artifact: Artifact? @relation(source_artifact_id)
-  root_link: String?
-  metadata: Json
-  created_at: String
-  updated_at: String
-}
-
-model Component {
-  id: Int @id
-  project_id: Int
-  project: Project? @relation(project_id)
-  parent_id: Int?
-  parent: Component? @relation(parent_id)
-  type: String
-  name: String
-  config: Json
-  created_at: String
-  updated_at: String
-}
-
-model ServoProfile {
-  id: Int @id
-  name: String
-  vendor: String?
-  model: String?
-  config: Json
-  created_at: String
-  updated_at: String
-  bindings: ServoBusBinding[] @relation(servo_profile_id)
-}
-
-model ServoBusBinding {
-  id: Int @id
-  project_id: Int
-  project: Project? @relation(project_id)
-  component_id: Int?
-  component: Component? @relation(component_id)
-  servo_profile_id: Int?
-  servo_profile: ServoProfile? @relation(servo_profile_id)
-  bus_name: String
-  servo_id: Int
-  joint_name: String?
-  calibration: Json
-  created_at: String
-  updated_at: String
-}
-
-model WorkspaceState {
-  id: Int @id
-  project_id: Int
-  project: Project? @relation(project_id)
-  active_model_id: Int?
-  active_model: RobotModel? @relation(active_model_id)
-  state: Json
-  updated_at: String
-}
-```
-
-Notes:
-
-- Use numeric `id: Int @id` because WGUI's generator maps that cleanly to `u32` and `HasId`.
-- Use `slug` for stable project URLs, e.g. `/project/smartfactory`.
-- Do not store `root_path`; derive local project roots from `manifest_path.parent()` and model real files as artifacts.
-- Use `Json` columns for flexible config payloads that are still stored inside WDB.
-- Add custom SQL indexes in migrations where needed, for example unique project slugs or servo profile names.
-
-## Generated Rust Shape
-
-After generation, expect roughly:
-
-```rust
-#[derive(Debug, Wdb)]
-pub struct RobotDreamsDb {
-    pub projects: DbTable<Project>,
-    pub artifacts: DbTable<Artifact>,
-    pub robot_models: DbTable<RobotModel>,
-    pub components: DbTable<Component>,
-    pub servo_profiles: DbTable<ServoProfile>,
-    pub servo_bus_bindings: DbTable<ServoBusBinding>,
-    pub workspace_states: DbTable<WorkspaceState>,
-}
-```
-
-Do not hand-maintain generated `src/db.rs` except for generated output review. Schema edits should happen in `schema.wdb`, followed by WGUI generation.
-
-## Migration Workflow
-
-Use WGUI CLI commands, matching the WGUI project conventions:
-
-```text
-wgui generate
-wgui migrate dev --name init
-```
-
-The generated migrations are SQL files in `migrations/`. Manual migration edits are acceptable for indexes and seed constraints that WDB does not express directly.
-
-Useful custom migration additions:
-
-```sql
-CREATE UNIQUE INDEX IF NOT EXISTS "project_slug_unique"
-ON "Project" ("slug");
-
-CREATE UNIQUE INDEX IF NOT EXISTS "servo_profile_name_unique"
-ON "ServoProfile" ("name");
-```
-
-## Runtime Wiring
-
-Add a DB module:
-
-```text
-schema.wdb
-wgui.toml
-src/db.rs
-src/project_store.rs
-```
-
-`src/db.rs` is generated. `src/project_store.rs` should be hand-written convenience logic around `RobotDreamsDb`.
-
-Suggested API:
-
-```rust
-pub struct ProjectStore {
-    db: RobotDreamsDb,
-}
-
-impl ProjectStore {
-    pub fn new(db: RobotDreamsDb) -> Self;
-    pub fn seed_demo_projects_if_empty(&self);
-    pub fn list_projects(&self) -> Vec<ProjectSummary>;
-    pub fn open_project_by_slug(&self, slug: &str) -> Option<ProjectDetails>;
-}
-```
-
-The app setup should follow the WGUI example pattern:
-
-```rust
-#[cfg(feature = "sqlite")]
-wgui::configure_sqlite_env_for_project(env!("CARGO_MANIFEST_DIR"));
-
-let db = RobotDreamsDb::new();
-let store = ProjectStore::new(db.clone());
-store.seed_demo_projects_if_empty();
-
-let mut wgui = Wgui::new(bind_addr).with_db(db);
-```
-
-If `RobotDreamsDb` is not cloneable, store access should go through WGUI context state or a shared wrapper chosen after inspecting the generated code.
-
-## Seed Data
-
-If the `Project` table is empty, seed one demo project:
-
-- slug: `smartfactory`
-- name: `SmartFactory`
-- kind: `Robot simulation`
-- project manifest: `examples/puppyarm/project.json`
-- URDF: `examples/puppyarm/model/final/urdf/final.urdf`
-- servo profile: `ST3215`
-
-The Projects page should read from WDB instead of hardcoded cards. The seeded demo gives the UI useful content on first run.
-
-## Route Plan
-
-Keep:
-
-- `/` opens Projects
-- `/projects` opens Projects as a compatibility alias
-- `/workbench` can keep loading the current puppyarm default temporarily
-
-Add:
-
-- `/project/<project_slug>` loads the selected project from WDB
-
-Project cards should link to:
-
-```text
-/project/<project_slug>
-```
-
-## Migration Plan
-
-1. Keep `project.json` as the portable project manifest.
-2. Enable WGUI SQLite feature in RobotDreams behind a `sqlite` feature.
-3. Add `schema.wdb` and `wgui.toml`.
-4. Generate `src/db.rs` with WGUI.
-5. Create and apply initial migrations with WGUI.
-6. Add `ProjectStore` as a small typed wrapper over generated WDB tables.
-7. Seed the puppyarm demo when `projects` is empty.
-8. Change `ProjectsController` to list projects from WDB.
-9. Change project card links to use `/project/<slug>`.
-10. Change `AppController` creation to load the selected project.
-11. Keep JSON model/harness files as artifacts referenced by WDB.
-
-## Open Decisions
-
-- Whether RobotDreams should run with `sqlite` enabled by default or keep persistence behind a feature during early development.
-- Whether `workdir/robotdreams.db` should remain the development default or move to a user data directory.
-- Whether project slugs are user-editable or generated once and kept stable.
-- How much workspace layout state belongs in structured WDB models versus `WorkspaceState.state: Json`.
-- Whether imported Onshape/CAD exports should be registered as immutable revisions.
+This gives the current demo behavior while making the project file the long-term source of truth.

@@ -5,6 +5,14 @@
   backgroundColor="#070b12"
   overflow="hidden"
 >
+  <CustomComponent
+    name={state.refresh_timer_name}
+    entry={state.refresh_timer_entry}
+    props={state.refresh_timer_props}
+    width=0
+    height=0
+  />
+
   <HStack
     height=48
     spacing=14
