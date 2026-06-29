@@ -1285,11 +1285,14 @@ name = "robotdreams"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
  "clap",
+ "futures-util",
  "libc",
  "serde",
  "serde_json",
  "tokio",
+ "tokio-tungstenite",
 ]
 
 [[package]]

@@ -1,11 +1,16 @@
 use anyhow::{Context, Result, bail};
+use base64::Engine;
 use clap::{Args, Parser, Subcommand};
+use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
+use std::io::{ErrorKind, Read, Write};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, Stdio};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio_tungstenite::tungstenite::Message;
 
 const DEFAULT_SOCKET: &str = "/tmp/robotdreams-daemon.sock";
 
@@ -24,6 +29,7 @@ enum Command {
     Open(OpenArgs),
     Status,
     Close,
+    RenderFrame(RenderFrameArgs),
     Headless(HeadlessArgs),
     Vbus(VbusArgs),
     #[command(subcommand)]
@@ -43,6 +49,29 @@ struct OpenArgs {
 
     #[arg(long)]
     no_browser: bool,
+}
+
+#[derive(Debug, Args)]
+struct RenderFrameArgs {
+    path: PathBuf,
+
+    #[arg(long, short)]
+    out: PathBuf,
+
+    #[arg(long, default_value = "127.0.0.1:8345")]
+    bind: String,
+
+    #[arg(long, default_value_t = 1800)]
+    width: u32,
+
+    #[arg(long, default_value_t = 1000)]
+    height: u32,
+
+    #[arg(long, default_value_t = 3500)]
+    wait_ms: u64,
+
+    #[arg(long)]
+    chrome: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -316,6 +345,301 @@ fn parse_payload(raw: Option<String>) -> Result<Option<serde_json::Value>> {
         .transpose()
 }
 
+fn find_chrome(explicit: Option<PathBuf>) -> Result<PathBuf> {
+    if let Some(path) = explicit {
+        return Ok(path);
+    }
+
+    if let Ok(path) = std::env::var("ROBOTDREAMS_CHROME")
+        && !path.trim().is_empty()
+    {
+        return Ok(PathBuf::from(path));
+    }
+
+    for candidate in ["google-chrome", "chromium", "chromium-browser"] {
+        let status = ProcessCommand::new(candidate)
+            .arg("--version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        if status.map(|status| status.success()).unwrap_or(false) {
+            return Ok(PathBuf::from(candidate));
+        }
+    }
+
+    bail!("could not find Chrome; pass --chrome or set ROBOTDREAMS_CHROME")
+}
+
+fn unused_local_port() -> Result<u16> {
+    let listener = TcpListener::bind("127.0.0.1:0").context("bind temporary local port")?;
+    Ok(listener.local_addr()?.port())
+}
+
+fn devtools_get_json(port: u16, path: &str) -> Result<serde_json::Value> {
+    let mut stream = TcpStream::connect(SocketAddr::from(([127, 0, 0, 1], port)))
+        .with_context(|| format!("connect Chrome DevTools on port {port}"))?;
+    stream.set_read_timeout(Some(std::time::Duration::from_millis(500)))?;
+    stream.set_write_timeout(Some(std::time::Duration::from_millis(500)))?;
+    let request =
+        format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n");
+    stream.write_all(request.as_bytes())?;
+    let mut raw = Vec::new();
+    let mut buffer = [0_u8; 8192];
+    loop {
+        match stream.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(count) => raw.extend_from_slice(&buffer[..count]),
+            Err(err)
+                if err.kind() == ErrorKind::WouldBlock || err.kind() == ErrorKind::TimedOut =>
+            {
+                if raw.is_empty() {
+                    return Err(err.into());
+                }
+                break;
+            }
+            Err(err) => return Err(err.into()),
+        }
+    }
+    let response = String::from_utf8(raw).context("decode DevTools HTTP response")?;
+    let Some((_, body)) = response.split_once("\r\n\r\n") else {
+        bail!("invalid DevTools HTTP response");
+    };
+    Ok(serde_json::from_str(body)?)
+}
+
+async fn wait_for_devtools_page(port: u16, url: &str, wait_ms: u64) -> Result<String> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(wait_ms.max(1));
+    loop {
+        if let Ok(serde_json::Value::Array(targets)) = devtools_get_json(port, "/json/list") {
+            for target in targets {
+                let target_url = target.get("url").and_then(|value| value.as_str());
+                let ws_url = target
+                    .get("webSocketDebuggerUrl")
+                    .and_then(|value| value.as_str());
+                if target_url == Some(url)
+                    && let Some(ws_url) = ws_url
+                {
+                    return Ok(ws_url.to_string());
+                }
+            }
+        }
+
+        if std::time::Instant::now() >= deadline {
+            bail!("timed out waiting for Chrome DevTools page");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
+struct CdpClient {
+    socket: tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    next_id: u64,
+}
+
+impl CdpClient {
+    async fn connect(url: &str) -> Result<Self> {
+        let (socket, _) = tokio_tungstenite::connect_async(url)
+            .await
+            .context("connect Chrome DevTools websocket")?;
+        Ok(Self { socket, next_id: 0 })
+    }
+
+    async fn call(&mut self, method: &str, params: serde_json::Value) -> Result<serde_json::Value> {
+        self.next_id += 1;
+        let id = self.next_id;
+        let request = serde_json::json!({
+            "id": id,
+            "method": method,
+            "params": params,
+        });
+        self.socket
+            .send(Message::Text(request.to_string()))
+            .await
+            .with_context(|| format!("send CDP {method}"))?;
+
+        while let Some(message) = self.socket.next().await {
+            let message = message?;
+            let Message::Text(raw) = message else {
+                continue;
+            };
+            let response: serde_json::Value = serde_json::from_str(&raw)?;
+            if response.get("id").and_then(|value| value.as_u64()) != Some(id) {
+                continue;
+            }
+            if let Some(error) = response.get("error") {
+                bail!("CDP {method} failed: {error}");
+            }
+            return Ok(response
+                .get("result")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null));
+        }
+
+        bail!("Chrome DevTools websocket closed while waiting for {method}")
+    }
+
+    async fn evaluate(&mut self, expression: &str) -> Result<serde_json::Value> {
+        let result = self
+            .call(
+                "Runtime.evaluate",
+                serde_json::json!({
+                    "expression": expression,
+                    "returnByValue": true,
+                    "awaitPromise": true,
+                }),
+            )
+            .await?;
+        Ok(result
+            .get("result")
+            .and_then(|result| result.get("value"))
+            .cloned()
+            .unwrap_or(serde_json::Value::Null))
+    }
+}
+
+async fn wait_for_rendered_scene(client: &mut CdpClient, wait_ms: u64) -> Result<()> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(wait_ms.max(1));
+    loop {
+        let state = client
+            .evaluate(
+                r#"(() => {
+                    const body = document.body?.innerText ?? "";
+                    const canvas = document.querySelector("canvas");
+                    const rect = canvas?.getBoundingClientRect();
+                    return {
+                        failed: body.includes("Failed to load component"),
+                        canvasCount: document.querySelectorAll("canvas").length,
+                        canvasWidth: rect?.width ?? 0,
+                        canvasHeight: rect?.height ?? 0
+                    };
+                })()"#,
+            )
+            .await?;
+
+        if state
+            .get("failed")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false)
+        {
+            bail!("robot scene component failed to load");
+        }
+
+        let canvas_count = state
+            .get("canvasCount")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0);
+        let canvas_width = state
+            .get("canvasWidth")
+            .and_then(|value| value.as_f64())
+            .unwrap_or(0.0);
+        let canvas_height = state
+            .get("canvasHeight")
+            .and_then(|value| value.as_f64())
+            .unwrap_or(0.0);
+        if canvas_count > 0 && canvas_width > 0.0 && canvas_height > 0.0 {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            return Ok(());
+        }
+
+        if std::time::Instant::now() >= deadline {
+            bail!("timed out waiting for rendered scene canvas");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+}
+
+async fn render_frame(socket: &Path, args: RenderFrameArgs) -> Result<()> {
+    let daemon_was_running = send_request(socket, &DaemonRequest::Status).await.is_ok();
+    let response = open_project(socket, &args.path, &args.bind).await?;
+    if !response.ok {
+        bail!(
+            "{}",
+            response
+                .message
+                .unwrap_or_else(|| "daemon command failed".to_string())
+        );
+    }
+
+    let Some(url) = response.url else {
+        bail!("daemon did not return a project URL");
+    };
+
+    let chrome = find_chrome(args.chrome)?;
+    if let Some(parent) = args.out.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create output directory {}", parent.display()))?;
+    }
+
+    let profile_dir =
+        std::env::temp_dir().join(format!("robotdreams-render-frame-{}", std::process::id()));
+    let window_size = format!("{},{}", args.width.max(1), args.height.max(1));
+    let devtools_port = unused_local_port()?;
+
+    let mut child = tokio::process::Command::new(chrome)
+        .arg("--headless")
+        .arg("--no-sandbox")
+        .arg("--disable-gpu=false")
+        .arg("--use-gl=swiftshader")
+        .arg("--enable-unsafe-swiftshader")
+        .arg(format!("--user-data-dir={}", profile_dir.display()))
+        .arg(format!("--remote-debugging-port={devtools_port}"))
+        .arg(format!("--window-size={window_size}"))
+        .arg(&url)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .context("start headless Chrome")?;
+
+    let capture_result = tokio::time::timeout(
+        std::time::Duration::from_millis(args.wait_ms + 10_000),
+        async {
+            let ws_url = wait_for_devtools_page(devtools_port, &url, args.wait_ms).await?;
+            let mut client = CdpClient::connect(&ws_url).await?;
+            client.call("Page.enable", serde_json::json!({})).await?;
+            client.call("Runtime.enable", serde_json::json!({})).await?;
+            client
+                .call("Page.bringToFront", serde_json::json!({}))
+                .await?;
+            wait_for_rendered_scene(&mut client, args.wait_ms).await?;
+            let screenshot = client
+                .call(
+                    "Page.captureScreenshot",
+                    serde_json::json!({
+                        "format": "png",
+                        "fromSurface": true
+                    }),
+                )
+                .await?;
+            let Some(data) = screenshot.get("data").and_then(|value| value.as_str()) else {
+                bail!("Chrome did not return screenshot data");
+            };
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(data)
+                .context("decode screenshot")?;
+            std::fs::write(&args.out, bytes)
+                .with_context(|| format!("write screenshot {}", args.out.display()))?;
+            Result::<()>::Ok(())
+        },
+    )
+    .await
+    .context("timed out capturing frame")?;
+
+    let _ = child.kill().await;
+    if !daemon_was_running {
+        let _ = send_request(socket, &DaemonRequest::Shutdown).await;
+    }
+    capture_result?;
+
+    println!("Rendered {url}");
+    println!("Wrote {}", args.out.display());
+    Ok(())
+}
+
 async fn delegate_to_daemon(args: impl IntoIterator<Item = String>) -> Result<()> {
     let status = tokio::process::Command::new(daemon_exe()?)
         .args(args)
@@ -340,6 +664,9 @@ async fn main() -> Result<()> {
         }
         Command::Close => {
             print_response(send_request(&cli.socket, &DaemonRequest::Close).await?)?;
+        }
+        Command::RenderFrame(args) => {
+            render_frame(&cli.socket, args).await?;
         }
         Command::Bus(BusCommand::Start) => {
             print_response(send_request(&cli.socket, &DaemonRequest::BusStart).await?)?;
