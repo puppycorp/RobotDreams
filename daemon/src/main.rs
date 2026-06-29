@@ -155,6 +155,7 @@ pub(crate) struct ProjectSceneObjectConfig {
     pub(crate) position: [f32; 3],
     pub(crate) rotation: [f32; 3],
     pub(crate) scale: Option<[f32; 3]>,
+    pub(crate) include_in_fit: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -352,6 +353,14 @@ fn json_f32_path(value: &serde_json::Value, path: &[&str]) -> Option<f32> {
     current.as_f64().map(|value| value as f32)
 }
 
+fn json_bool_path(value: &serde_json::Value, path: &[&str]) -> Option<bool> {
+    let mut current = value;
+    for key in path {
+        current = current.get(*key)?;
+    }
+    current.as_bool()
+}
+
 fn json_vec3_path(value: &serde_json::Value, path: &[&str]) -> Option<[f32; 3]> {
     let mut current = value;
     for key in path {
@@ -530,6 +539,9 @@ fn parse_project_scene_object_config(
             .unwrap_or([0.0, 0.0, 0.0]),
         scale: json_vec3_path(value, &["scale"])
             .or_else(|| json_vec3_path(value, &["transform", "scale"])),
+        include_in_fit: json_bool_path(value, &["includeInFit"])
+            .or_else(|| json_bool_path(value, &["fit"]))
+            .unwrap_or(true),
     })
 }
 
@@ -1848,6 +1860,12 @@ fn project_scene_object_node(
                     y: object.rotation[1],
                     z: object.rotation[2],
                 },
+            )
+            .prop(
+                "includeInFit",
+                ThreePropValue::Bool {
+                    value: object.include_in_fit,
+                },
             ),
     )
 }
@@ -2006,8 +2024,13 @@ fn project_scene_objects_key(
                 } => format!("cylinder:{radius_top}:{radius_bottom}:{height}"),
             };
             format!(
-                "{}:{}:{:?}:{:?}:{:?}",
-                object.id, geometry_key, object.position, object.rotation, object.scale
+                "{}:{}:{:?}:{:?}:{:?}:{}",
+                object.id,
+                geometry_key,
+                object.position,
+                object.rotation,
+                object.scale,
+                object.include_in_fit
             )
         })
         .collect::<Vec<_>>()

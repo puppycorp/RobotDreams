@@ -2125,6 +2125,7 @@ fn project_scene_object_info(object: &ProjectSceneObjectConfig) -> SelectedScene
         ),
         workbench_property("Position", format_vec3(object.position)),
         workbench_property("Rotation", format_vec3(object.rotation)),
+        workbench_property("Include in fit", object.include_in_fit.to_string()),
         workbench_property(
             "Color",
             format!(

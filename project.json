@@ -21,6 +21,17 @@
   "scene": {
     "objects": [
       {
+        "id": "floor_5m",
+        "name": "Floor 5m",
+        "type": "floor",
+        "icon": "PLN",
+        "shape": "box",
+        "size": [5.0, 0.02, 5.0],
+        "position": [0.0, -0.011, 0.0],
+        "color": "#162331",
+        "includeInFit": false
+      },
+      {
         "id": "trashbin",
         "name": "Trash Bin",
         "type": "container",

@@ -417,6 +417,11 @@ const applyObjectProps = (object, node) => {
   }
   if (props.get("scale")?.isVector3) object.scale.copy(props.get("scale"))
   if (typeof props.get("name") === "string") object.name = props.get("name")
+  if (typeof props.get("includeInFit") === "boolean") {
+    object.userData.excludeFromFit = !props.get("includeInFit")
+  } else {
+    delete object.userData.excludeFromFit
+  }
 }
 
 const updateObjectProps = (object, node) => {
@@ -442,6 +447,19 @@ const axisAngleFromArray = (value) => {
   if (axis.lengthSq() < 0.000001) axis.set(0, 0, 1)
   axis.normalize()
   return { axis, angle: finite(value[3]) }
+}
+
+const expandFitBox = (object, box) => {
+  if (!object || object.userData?.excludeFromFit) return false
+  let included = false
+  if (object.isMesh || object.isLine || object.isPoints || object.isSprite) {
+    box.expandByObject(object)
+    included = true
+  }
+  for (const child of object.children ?? []) {
+    included = expandFitBox(child, box) || included
+  }
+  return included
 }
 
 const applyTransformValue = (object, transform) => {
@@ -868,8 +886,8 @@ export default class RobotSceneController {
 
   fitRobotIfNeeded() {
     if (!this.fitAfterBuild) return
-    const box = new THREE.Box3().setFromObject(this.robotGroup)
-    if (box.isEmpty()) return
+    const box = new THREE.Box3()
+    if (!expandFitBox(this.robotGroup, box) || box.isEmpty()) return
     this.fitAfterBuild = false
     this.cameraRig.frameBox(box)
   }
