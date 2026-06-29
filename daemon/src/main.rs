@@ -150,10 +150,29 @@ pub(crate) struct ProjectSceneObjectConfig {
     pub(crate) name: String,
     pub(crate) type_name: String,
     pub(crate) icon: String,
-    pub(crate) asset: String,
+    pub(crate) geometry: ProjectSceneObjectGeometry,
+    pub(crate) color_rgb: [u8; 3],
     pub(crate) position: [f32; 3],
     pub(crate) rotation: [f32; 3],
     pub(crate) scale: Option<[f32; 3]>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum ProjectSceneObjectGeometry {
+    Mesh {
+        asset: String,
+    },
+    Box {
+        size: [f32; 3],
+    },
+    Sphere {
+        radius: f32,
+    },
+    Cylinder {
+        radius_top: f32,
+        radius_bottom: f32,
+        height: f32,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -325,6 +344,14 @@ fn json_i8_path(value: &serde_json::Value, path: &[&str]) -> Option<i8> {
     current.as_i64().and_then(|value| i8::try_from(value).ok())
 }
 
+fn json_f32_path(value: &serde_json::Value, path: &[&str]) -> Option<f32> {
+    let mut current = value;
+    for key in path {
+        current = current.get(*key)?;
+    }
+    current.as_f64().map(|value| value as f32)
+}
+
 fn json_vec3_path(value: &serde_json::Value, path: &[&str]) -> Option<[f32; 3]> {
     let mut current = value;
     for key in path {
@@ -338,6 +365,39 @@ fn json_vec3_path(value: &serde_json::Value, path: &[&str]) -> Option<[f32; 3]> 
         values[0].as_f64()? as f32,
         values[1].as_f64()? as f32,
         values[2].as_f64()? as f32,
+    ])
+}
+
+fn parse_hex_color(value: &str) -> Option<[u8; 3]> {
+    let value = value.trim().trim_start_matches('#');
+    if value.len() != 6 {
+        return None;
+    }
+    Some([
+        u8::from_str_radix(&value[0..2], 16).ok()?,
+        u8::from_str_radix(&value[2..4], 16).ok()?,
+        u8::from_str_radix(&value[4..6], 16).ok()?,
+    ])
+}
+
+fn json_color_path(value: &serde_json::Value, path: &[&str]) -> Option<[u8; 3]> {
+    let mut current = value;
+    for key in path {
+        current = current.get(*key)?;
+    }
+
+    if let Some(color) = current.as_str() {
+        return parse_hex_color(color);
+    }
+
+    let values = current.as_array()?;
+    if values.len() != 3 {
+        return None;
+    }
+    Some([
+        u8::try_from(values[0].as_u64()?).ok()?,
+        u8::try_from(values[1].as_u64()?).ok()?,
+        u8::try_from(values[2].as_u64()?).ok()?,
     ])
 }
 
@@ -451,17 +511,17 @@ fn parse_project_scene_object_config(
     let icon = json_string_path(value, &["icon"])
         .unwrap_or("OBJ")
         .to_string();
-    let asset = json_string_path(value, &["asset"])
-        .or_else(|| json_string_path(value, &["model"]))
-        .or_else(|| json_string_path(value, &["path"]))?
-        .to_string();
+    let geometry = parse_project_scene_object_geometry(value)?;
 
     Some(ProjectSceneObjectConfig {
         id,
         name,
         type_name,
         icon,
-        asset,
+        geometry,
+        color_rgb: json_color_path(value, &["color"])
+            .or_else(|| json_color_path(value, &["material", "color"]))
+            .unwrap_or([52, 118, 168]),
         position: json_vec3_path(value, &["position"])
             .or_else(|| json_vec3_path(value, &["transform", "position"]))
             .unwrap_or([0.0, 0.0, 0.0]),
@@ -471,6 +531,73 @@ fn parse_project_scene_object_config(
         scale: json_vec3_path(value, &["scale"])
             .or_else(|| json_vec3_path(value, &["transform", "scale"])),
     })
+}
+
+fn parse_project_scene_object_geometry(
+    value: &serde_json::Value,
+) -> Option<ProjectSceneObjectGeometry> {
+    if let Some(asset) = json_string_path(value, &["asset"])
+        .or_else(|| json_string_path(value, &["model"]))
+        .or_else(|| json_string_path(value, &["path"]))
+    {
+        return Some(ProjectSceneObjectGeometry::Mesh {
+            asset: asset.to_string(),
+        });
+    }
+
+    let shape = json_string_path(value, &["shape"])
+        .or_else(|| json_string_path(value, &["geometry", "shape"]))
+        .or_else(|| json_string_path(value, &["geometry", "type"]))
+        .or_else(|| json_string_path(value, &["type"]))?;
+
+    match shape {
+        "box" | "cube" | "cuboid" | "rectangle" | "rect" => {
+            let size = json_vec3_path(value, &["size"])
+                .or_else(|| json_vec3_path(value, &["dimensions"]))
+                .or_else(|| json_vec3_path(value, &["geometry", "size"]))
+                .or_else(|| json_vec3_path(value, &["geometry", "dimensions"]))
+                .unwrap_or_else(|| {
+                    let width = json_f32_path(value, &["width"])
+                        .or_else(|| json_f32_path(value, &["geometry", "width"]))
+                        .unwrap_or(1.0);
+                    let height = json_f32_path(value, &["height"])
+                        .or_else(|| json_f32_path(value, &["geometry", "height"]))
+                        .unwrap_or(width);
+                    let default_depth = if matches!(shape, "rectangle" | "rect") {
+                        0.02
+                    } else {
+                        width
+                    };
+                    let depth = json_f32_path(value, &["depth"])
+                        .or_else(|| json_f32_path(value, &["geometry", "depth"]))
+                        .unwrap_or(default_depth);
+                    [width, height, depth]
+                });
+            Some(ProjectSceneObjectGeometry::Box { size })
+        }
+        "sphere" => Some(ProjectSceneObjectGeometry::Sphere {
+            radius: json_f32_path(value, &["radius"])
+                .or_else(|| json_f32_path(value, &["geometry", "radius"]))
+                .unwrap_or(0.5),
+        }),
+        "cylinder" => {
+            let radius = json_f32_path(value, &["radius"])
+                .or_else(|| json_f32_path(value, &["geometry", "radius"]))
+                .unwrap_or(0.5);
+            Some(ProjectSceneObjectGeometry::Cylinder {
+                radius_top: json_f32_path(value, &["radiusTop"])
+                    .or_else(|| json_f32_path(value, &["geometry", "radiusTop"]))
+                    .unwrap_or(radius),
+                radius_bottom: json_f32_path(value, &["radiusBottom"])
+                    .or_else(|| json_f32_path(value, &["geometry", "radiusBottom"]))
+                    .unwrap_or(radius),
+                height: json_f32_path(value, &["height"])
+                    .or_else(|| json_f32_path(value, &["geometry", "height"]))
+                    .unwrap_or(1.0),
+            })
+        }
+        _ => None,
+    }
 }
 
 fn parse_project_scene_config(value: &serde_json::Value) -> ProjectSceneConfig {
@@ -1666,19 +1793,19 @@ fn project_scene_object_node(
     object: &ProjectSceneObjectConfig,
     index: usize,
 ) -> Option<ThreeNode> {
-    let src = project_asset_url(state, project_config, &object.asset)?;
     let base_id = PROJECT_SCENE_OBJECT_ID_BASE + index as u32 * PROJECT_SCENE_OBJECT_ID_STRIDE;
+    let geometry = project_scene_object_geometry_node(state, project_config, object, base_id + 2)?;
     let mut object_mesh = mesh(
         base_id + 1,
         [
-            stl_geometry(base_id + 2).prop("src", ThreePropValue::String { value: src }),
+            geometry,
             mesh_standard_material(base_id + 3)
                 .prop(
                     "color",
                     ThreePropValue::Color {
-                        r: 52,
-                        g: 118,
-                        b: 168,
+                        r: object.color_rgb[0],
+                        g: object.color_rgb[1],
+                        b: object.color_rgb[2],
                         a: None,
                     },
                 )
@@ -1723,6 +1850,44 @@ fn project_scene_object_node(
                 },
             ),
     )
+}
+
+fn project_scene_object_geometry_node(
+    state: &UrdfViewerState,
+    project_config: &ProjectConfig,
+    object: &ProjectSceneObjectConfig,
+    id: u32,
+) -> Option<ThreeNode> {
+    match &object.geometry {
+        ProjectSceneObjectGeometry::Mesh { asset } => {
+            let src = project_asset_url(state, project_config, asset)?;
+            Some(stl_geometry(id).prop("src", ThreePropValue::String { value: src }))
+        }
+        ProjectSceneObjectGeometry::Box { size } => Some(
+            box_geometry(id)
+                .prop("width", ThreePropValue::Number { value: size[0] })
+                .prop("height", ThreePropValue::Number { value: size[1] })
+                .prop("depth", ThreePropValue::Number { value: size[2] }),
+        ),
+        ProjectSceneObjectGeometry::Sphere { radius } => {
+            Some(sphere_geometry(id).prop("radius", ThreePropValue::Number { value: *radius }))
+        }
+        ProjectSceneObjectGeometry::Cylinder {
+            radius_top,
+            radius_bottom,
+            height,
+        } => Some(
+            cylinder_geometry(id)
+                .prop("radiusTop", ThreePropValue::Number { value: *radius_top })
+                .prop(
+                    "radiusBottom",
+                    ThreePropValue::Number {
+                        value: *radius_bottom,
+                    },
+                )
+                .prop("height", ThreePropValue::Number { value: *height }),
+        ),
+    }
 }
 
 fn project_scene_object_nodes(
@@ -1820,15 +1985,30 @@ fn project_scene_objects_key(
         .objects
         .iter()
         .map(|object| {
-            let modified = resolve_project_asset_path(project_config, &object.asset)
-                .metadata()
-                .ok()
-                .and_then(|metadata| metadata.modified().ok())
-                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|duration| duration.as_millis())
-                .unwrap_or_default();
-            let src = project_asset_url(state, project_config, &object.asset).unwrap_or_default();
-            format!("{}:{}:{modified}", object.id, src)
+            let geometry_key = match &object.geometry {
+                ProjectSceneObjectGeometry::Mesh { asset } => {
+                    let modified = resolve_project_asset_path(project_config, asset)
+                        .metadata()
+                        .ok()
+                        .and_then(|metadata| metadata.modified().ok())
+                        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|duration| duration.as_millis())
+                        .unwrap_or_default();
+                    let src = project_asset_url(state, project_config, asset).unwrap_or_default();
+                    format!("mesh:{src}:{modified}")
+                }
+                ProjectSceneObjectGeometry::Box { size } => format!("box:{size:?}"),
+                ProjectSceneObjectGeometry::Sphere { radius } => format!("sphere:{radius}"),
+                ProjectSceneObjectGeometry::Cylinder {
+                    radius_top,
+                    radius_bottom,
+                    height,
+                } => format!("cylinder:{radius_top}:{radius_bottom}:{height}"),
+            };
+            format!(
+                "{}:{}:{:?}:{:?}:{:?}",
+                object.id, geometry_key, object.position, object.rotation, object.scale
+            )
         })
         .collect::<Vec<_>>()
         .join(",")

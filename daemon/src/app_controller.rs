@@ -16,11 +16,11 @@ use wgui::{CustomComponentController, CustomComponentCtx, WguiModel, wgui_contro
 
 use crate::{
     BusConfig, DeviceConfig, HardwareConfig, ProjectConfig, ProjectSceneObjectConfig,
-    ServoDeviceConfig, URDF_BASE_SLIDER_BASE_ID, URDF_JOINT_SLIDER_BASE_ID, UrdfViewerState,
-    apply_urdf_slider_change, joint_display_label, project_joint_name, reload_urdf_state,
-    robot_scene_props_with_static_scene, servo_ticks_to_slider_value, slider_value_to_servo_ticks,
-    urdf_joint_slider_range, urdf_joint_type_name, urdf_slider_value_to_units,
-    urdf_value_to_joint_units,
+    ProjectSceneObjectGeometry, ServoDeviceConfig, URDF_BASE_SLIDER_BASE_ID,
+    URDF_JOINT_SLIDER_BASE_ID, UrdfViewerState, apply_urdf_slider_change, joint_display_label,
+    project_joint_name, reload_urdf_state, robot_scene_props_with_static_scene,
+    servo_ticks_to_slider_value, slider_value_to_servo_ticks, urdf_joint_slider_range,
+    urdf_joint_type_name, urdf_slider_value_to_units, urdf_value_to_joint_units,
 };
 
 const SCENE_SECTION_ENVIRONMENT: u32 = 1;
@@ -2119,9 +2119,19 @@ fn project_scene_object_info(object: &ProjectSceneObjectConfig) -> SelectedScene
     let mut transform_properties = vec![
         workbench_property("Id", object.id.clone()),
         workbench_property("Frame", "World"),
-        workbench_property("Asset", object.asset.clone()),
+        workbench_property(
+            "Geometry",
+            project_scene_object_geometry_label(&object.geometry),
+        ),
         workbench_property("Position", format_vec3(object.position)),
         workbench_property("Rotation", format_vec3(object.rotation)),
+        workbench_property(
+            "Color",
+            format!(
+                "#{:02x}{:02x}{:02x}",
+                object.color_rgb[0], object.color_rgb[1], object.color_rgb[2]
+            ),
+        ),
     ];
 
     if let Some(scale) = object.scale {
@@ -2135,6 +2145,21 @@ fn project_scene_object_info(object: &ProjectSceneObjectConfig) -> SelectedScene
         "#5e6c7c",
         transform_properties,
     )
+}
+
+fn project_scene_object_geometry_label(geometry: &ProjectSceneObjectGeometry) -> String {
+    match geometry {
+        ProjectSceneObjectGeometry::Mesh { asset } => format!("mesh {asset}"),
+        ProjectSceneObjectGeometry::Box { size } => {
+            format!("box {:.3} x {:.3} x {:.3}", size[0], size[1], size[2])
+        }
+        ProjectSceneObjectGeometry::Sphere { radius } => format!("sphere r={radius:.3}"),
+        ProjectSceneObjectGeometry::Cylinder {
+            radius_top,
+            radius_bottom,
+            height,
+        } => format!("cylinder rt={radius_top:.3} rb={radius_bottom:.3} h={height:.3}"),
+    }
 }
 
 fn selected_static_scene_info(
