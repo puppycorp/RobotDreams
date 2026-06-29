@@ -32,27 +32,12 @@
     backgroundColor="#0d1420"
     border="1px solid #172030"
   >
-    <Button text="New" backgroundColor="#111c2b" border="1px solid #26364d" color="#dce7f3" height=36 />
-    <Button text="Open" backgroundColor="#111c2b" border="1px solid #26364d" color="#dce7f3" height=36 />
-    <Button text="Save" backgroundColor="#111c2b" border="1px solid #26364d" color="#dce7f3" height=36 />
-    <Button text="Import" backgroundColor="#111c2b" border="1px solid #26364d" color="#dce7f3" height=36 />
-    <Button text="Export" backgroundColor="#111c2b" border="1px solid #26364d" color="#dce7f3" height=36 />
     <Text value="" grow=1 />
     <Button text="Play" onClick="PlaySimulation" backgroundColor="#1267c8" border="1px solid #2a8dff" color="#f4f8ff" height=36 />
     <Button text="Pause" onClick="PauseSimulation" backgroundColor="#111c2b" border="1px solid #26364d" color="#dce7f3" height=36 />
     <Button text="Stop" onClick="StopSimulation" backgroundColor="#111c2b" border="1px solid #26364d" color="#dce7f3" height=36 />
     <Button text="Reset" onClick="ResetSimulation" backgroundColor="#111c2b" border="1px solid #26364d" color="#dce7f3" height=36 />
     <Text value="" grow=1 />
-    <Button text="Camera" backgroundColor="#111c2b" border="1px solid #26364d" color="#dce7f3" height=36 />
-    <Button text="Select" backgroundColor="#111c2b" border="1px solid #26364d" color="#dce7f3" height=36 />
-    <Button text="Move" backgroundColor="#111c2b" border="1px solid #26364d" color="#dce7f3" height=36 />
-    <Button text="Rotate" backgroundColor="#111c2b" border="1px solid #26364d" color="#dce7f3" height=36 />
-    <Button text="Scale" backgroundColor="#111c2b" border="1px solid #26364d" color="#dce7f3" height=36 />
-    <Button text="Focus" backgroundColor="#111c2b" border="1px solid #26364d" color="#dce7f3" height=36 />
-    <Text value="" grow=1 />
-    <Button text="Build" backgroundColor="#111c2b" border="1px solid #26364d" color="#dce7f3" height=36 />
-    <Button text="Run" backgroundColor="#111c2b" border="1px solid #26364d" color="#dce7f3" height=36 />
-    <Button text="Deploy" backgroundColor="#111c2b" border="1px solid #26364d" color="#dce7f3" height=36 />
   </HStack>
 
   <HStack grow=1 minHeight=0 spacing=6 backgroundColor="#07101a" padding=6>
@@ -191,7 +176,7 @@
 
     </VStack>
 
-    <VStack grow=1 minHeight=0 spacing=6>
+    <VStack grow=1 minHeight=0 spacing=6 overflow="hidden">
       <HStack
         height=34
         spacing=6
@@ -204,8 +189,8 @@
         <Button text="+" backgroundColor="#111c2b" border="1px solid #26364d" color="#dce7f3" />
       </HStack>
 
-      <HStack height=640 minHeight=360 maxHeight=640 spacing=6>
-        <VStack minWidth=520 hresize=true grow=1 minHeight=0 spacing=6>
+      <VStack grow=1 minHeight=0 spacing=6 overflow="hidden">
+        <VStack minWidth=520 grow=1 minHeight=0 spacing=6 overflow="hidden">
           <HStack
             height=38
             spacing=8
@@ -219,13 +204,13 @@
             id=39002
             src="/project/robot-dreams/robot-scene"
             props={state.robot_scene_props}
-            height=596
             grow=1
+            minHeight=0
             border="1px solid #245c95"
           />
         </VStack>
 
-      </HStack>
+      </VStack>
 
     </VStack>
 
