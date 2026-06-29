@@ -142,6 +142,7 @@ pub(crate) struct ProjectConfig {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ProjectSceneConfig {
     pub(crate) objects: Vec<ProjectSceneObjectConfig>,
+    pub(crate) cameras: Vec<ProjectCameraConfig>,
 }
 
 #[derive(Clone, Debug)]
@@ -156,6 +157,21 @@ pub(crate) struct ProjectSceneObjectConfig {
     pub(crate) rotation: [f32; 3],
     pub(crate) scale: Option<[f32; 3]>,
     pub(crate) include_in_fit: bool,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ProjectCameraConfig {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) type_name: String,
+    pub(crate) icon: String,
+    pub(crate) mounted_robot: String,
+    pub(crate) mounted_link: String,
+    pub(crate) position: [f32; 3],
+    pub(crate) rotation: [f32; 3],
+    pub(crate) fov_deg: f32,
+    pub(crate) rate: String,
+    pub(crate) resolution: Option<[u32; 2]>,
 }
 
 #[derive(Clone, Debug)]
@@ -361,6 +377,21 @@ fn json_bool_path(value: &serde_json::Value, path: &[&str]) -> Option<bool> {
         current = current.get(*key)?;
     }
     current.as_bool()
+}
+
+fn json_vec2_u32_path(value: &serde_json::Value, path: &[&str]) -> Option<[u32; 2]> {
+    let mut current = value;
+    for key in path {
+        current = current.get(*key)?;
+    }
+    let values = current.as_array()?;
+    if values.len() != 2 {
+        return None;
+    }
+    Some([
+        u32::try_from(values[0].as_u64()?).ok()?,
+        u32::try_from(values[1].as_u64()?).ok()?,
+    ])
 }
 
 fn json_vec3_path(value: &serde_json::Value, path: &[&str]) -> Option<[f32; 3]> {
@@ -614,6 +645,50 @@ fn parse_project_scene_object_geometry(
     }
 }
 
+fn parse_project_camera_config(value: &serde_json::Value) -> Option<ProjectCameraConfig> {
+    let id = json_string_path(value, &["id"])?.to_string();
+    let name = json_string_path(value, &["name"])
+        .map(str::to_string)
+        .unwrap_or_else(|| id.clone());
+    let type_name = json_string_path(value, &["type"])
+        .unwrap_or("camera")
+        .to_string();
+    let icon = json_string_path(value, &["icon"])
+        .unwrap_or("CAM")
+        .to_string();
+    let mounted_link = json_string_path(value, &["mountedOn", "link"])
+        .or_else(|| json_string_path(value, &["link"]))
+        .or_else(|| json_string_path(value, &["frame"]))?
+        .to_string();
+
+    Some(ProjectCameraConfig {
+        id,
+        name,
+        type_name,
+        icon,
+        mounted_robot: json_string_path(value, &["mountedOn", "robot"])
+            .or_else(|| json_string_path(value, &["robot"]))
+            .unwrap_or("puppyarm")
+            .to_string(),
+        mounted_link,
+        position: json_vec3_path(value, &["position"])
+            .or_else(|| json_vec3_path(value, &["transform", "position"]))
+            .unwrap_or([0.0, 0.0, 0.0]),
+        rotation: json_vec3_path(value, &["rotation"])
+            .or_else(|| json_vec3_path(value, &["transform", "rotation"]))
+            .unwrap_or([0.0, 0.0, 0.0]),
+        fov_deg: json_f32_path(value, &["fov"])
+            .or_else(|| json_f32_path(value, &["fovDeg"]))
+            .or_else(|| json_f32_path(value, &["camera", "fov"]))
+            .unwrap_or(58.0),
+        rate: json_string_path(value, &["rate"])
+            .unwrap_or("30 Hz")
+            .to_string(),
+        resolution: json_vec2_u32_path(value, &["resolution"])
+            .or_else(|| json_vec2_u32_path(value, &["camera", "resolution"])),
+    })
+}
+
 fn parse_project_scene_config(value: &serde_json::Value) -> ProjectSceneConfig {
     let objects = value
         .get("scene")
@@ -626,7 +701,18 @@ fn parse_project_scene_config(value: &serde_json::Value) -> ProjectSceneConfig {
                 .collect()
         })
         .unwrap_or_default();
-    ProjectSceneConfig { objects }
+    let cameras = value
+        .get("scene")
+        .and_then(|scene| scene.get("cameras"))
+        .and_then(|cameras| cameras.as_array())
+        .map(|cameras| {
+            cameras
+                .iter()
+                .filter_map(parse_project_camera_config)
+                .collect()
+        })
+        .unwrap_or_default();
+    ProjectSceneConfig { objects, cameras }
 }
 
 fn parse_project_robot_model_config(value: &serde_json::Value) -> Option<ProjectRobotModelConfig> {
@@ -1587,16 +1673,147 @@ fn push_link_visuals(link: &LinkDef, id_gen: &mut u32, children: &mut Vec<ThreeN
     }
 }
 
+fn next_three_id(id_gen: &mut u32) -> u32 {
+    *id_gen += 1;
+    *id_gen
+}
+
+fn push_link_cameras(
+    project_config: Option<&ProjectConfig>,
+    link_name: &str,
+    id_gen: &mut u32,
+    children: &mut Vec<ThreeNode>,
+) {
+    let Some(project_config) = project_config else {
+        return;
+    };
+
+    for camera in project_config
+        .scene
+        .cameras
+        .iter()
+        .filter(|camera| camera.mounted_link == link_name)
+    {
+        let group_id = next_three_id(id_gen);
+        let body_id = next_three_id(id_gen);
+        let body_geom_id = next_three_id(id_gen);
+        let body_mat_id = next_three_id(id_gen);
+        let lens_id = next_three_id(id_gen);
+        let lens_geom_id = next_three_id(id_gen);
+        let lens_mat_id = next_three_id(id_gen);
+
+        let body = mesh(
+            body_id,
+            [
+                box_geometry(body_geom_id)
+                    .prop("width", ThreePropValue::Number { value: 0.032 })
+                    .prop("height", ThreePropValue::Number { value: 0.022 })
+                    .prop("depth", ThreePropValue::Number { value: 0.018 }),
+                mesh_standard_material(body_mat_id)
+                    .prop(
+                        "color",
+                        ThreePropValue::Color {
+                            r: 43,
+                            g: 167,
+                            b: 255,
+                            a: None,
+                        },
+                    )
+                    .prop("metalness", ThreePropValue::Number { value: 0.18 })
+                    .prop("roughness", ThreePropValue::Number { value: 0.45 }),
+            ],
+        );
+        let lens = mesh(
+            lens_id,
+            [
+                cylinder_geometry(lens_geom_id)
+                    .prop("radiusTop", ThreePropValue::Number { value: 0.006 })
+                    .prop("radiusBottom", ThreePropValue::Number { value: 0.008 })
+                    .prop("height", ThreePropValue::Number { value: 0.018 }),
+                mesh_standard_material(lens_mat_id)
+                    .prop(
+                        "color",
+                        ThreePropValue::Color {
+                            r: 8,
+                            g: 17,
+                            b: 29,
+                            a: None,
+                        },
+                    )
+                    .prop("metalness", ThreePropValue::Number { value: 0.4 })
+                    .prop("roughness", ThreePropValue::Number { value: 0.32 }),
+            ],
+        )
+        .prop(
+            "position",
+            ThreePropValue::Vec3 {
+                x: 0.0,
+                y: 0.0,
+                z: -0.018,
+            },
+        )
+        .prop(
+            "rotation",
+            ThreePropValue::Vec3 {
+                x: std::f32::consts::FRAC_PI_2,
+                y: 0.0,
+                z: 0.0,
+            },
+        );
+
+        children.push(
+            group(group_id, [body, lens])
+                .prop(
+                    "name",
+                    ThreePropValue::String {
+                        value: camera.name.clone(),
+                    },
+                )
+                .prop(
+                    "cameraId",
+                    ThreePropValue::String {
+                        value: camera.id.clone(),
+                    },
+                )
+                .prop("includeInFit", ThreePropValue::Bool { value: false })
+                .prop(
+                    "position",
+                    ThreePropValue::Vec3 {
+                        x: camera.position[0],
+                        y: camera.position[1],
+                        z: camera.position[2],
+                    },
+                )
+                .prop(
+                    "rotation",
+                    ThreePropValue::Vec3 {
+                        x: camera.rotation[0],
+                        y: camera.rotation[1],
+                        z: camera.rotation[2],
+                    },
+                )
+                .prop(
+                    "rotationOrder",
+                    ThreePropValue::String {
+                        value: URDF_ROTATION_ORDER.to_string(),
+                    },
+                ),
+        );
+    }
+}
+
 fn build_static_link_subtree(
     robot: &RobotModel,
     link_name: &str,
     id_gen: &mut u32,
+    project_config: Option<&ProjectConfig>,
 ) -> Option<ThreeNode> {
     let link = robot.links.get(link_name)?;
     *id_gen += 1;
     let link_group_id = *id_gen;
     let mut children = Vec::new();
     push_link_visuals(link, id_gen, &mut children);
+    push_link_cameras(project_config, link_name, id_gen, &mut children);
 
     if let Some(child_joint_indices) = robot.children_by_parent.get(link_name) {
         for joint_index in child_joint_indices {
@@ -1608,7 +1825,9 @@ fn build_static_link_subtree(
 
             let mut motion_group = group(motion_group_id, []);
 
-            if let Some(child_tree) = build_static_link_subtree(robot, &joint.child, id_gen) {
+            if let Some(child_tree) =
+                build_static_link_subtree(robot, &joint.child, id_gen, project_config)
+            {
                 motion_group = motion_group.child(child_tree);
             }
 
@@ -1705,10 +1924,22 @@ fn collect_dynamic_link_transforms(
     joint_values: &[i32],
     id_gen: &mut u32,
     transforms: &mut serde_json::Map<String, serde_json::Value>,
+    project_config: Option<&ProjectConfig>,
 ) -> Option<()> {
     let link = robot.links.get(link_name)?;
     *id_gen += 1;
     *id_gen += (link.visuals.len() as u32) * 4;
+    *id_gen += project_config
+        .map(|project_config| {
+            project_config
+                .scene
+                .cameras
+                .iter()
+                .filter(|camera| camera.mounted_link == link_name)
+                .count() as u32
+                * 7
+        })
+        .unwrap_or_default();
 
     if let Some(child_joint_indices) = robot.children_by_parent.get(link_name) {
         for joint_index in child_joint_indices {
@@ -1750,6 +1981,7 @@ fn collect_dynamic_link_transforms(
                 joint_values,
                 id_gen,
                 transforms,
+                project_config,
             );
         }
     }
@@ -1941,7 +2173,8 @@ fn robot_static_scene(
     let mut id_gen = 100;
     let mut model_children: Vec<ThreeNode> = Vec::new();
     for root in &robot.roots {
-        if let Some(root_tree) = build_static_link_subtree(robot, root, &mut id_gen) {
+        if let Some(root_tree) = build_static_link_subtree(robot, root, &mut id_gen, project_config)
+        {
             model_children.push(root_tree);
         }
     }
@@ -1967,6 +2200,7 @@ fn robot_dynamic_state(
     state: &UrdfViewerState,
     base_translation: [f32; 3],
     base_rotation: [f32; 3],
+    project_config: Option<&ProjectConfig>,
 ) -> serde_json::Value {
     let mut transforms = serde_json::Map::new();
     insert_transform(
@@ -1986,6 +2220,7 @@ fn robot_dynamic_state(
                 &state.joint_values,
                 &mut id_gen,
                 &mut transforms,
+                project_config,
             );
         }
     }
@@ -2043,6 +2278,32 @@ fn project_scene_objects_key(
         .join(",")
 }
 
+fn project_scene_cameras_key(project_config: Option<&ProjectConfig>) -> String {
+    let Some(project_config) = project_config else {
+        return String::new();
+    };
+
+    project_config
+        .scene
+        .cameras
+        .iter()
+        .map(|camera| {
+            format!(
+                "{}:{}:{}:{:?}:{:?}:{}:{}:{:?}",
+                camera.id,
+                camera.mounted_robot,
+                camera.mounted_link,
+                camera.position,
+                camera.rotation,
+                camera.fov_deg,
+                camera.rate,
+                camera.resolution
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 fn robot_static_scene_key(
     state: &UrdfViewerState,
     project_config: Option<&ProjectConfig>,
@@ -2062,13 +2323,14 @@ fn robot_static_scene_key(
         .map(|duration| duration.as_millis())
         .unwrap_or_default();
     let scene_objects_key = project_scene_objects_key(state, project_config);
+    let scene_cameras_key = project_scene_cameras_key(project_config);
     let visual_count = robot
         .links
         .values()
         .map(|link| link.visuals.len())
         .sum::<usize>();
     Some(format!(
-        "{path}|{modified}|scene:{scene_objects_key}|{}|{}|{visual_count}",
+        "{path}|{modified}|scene:{scene_objects_key}|cameras:{scene_cameras_key}|{}|{}|{visual_count}",
         robot.links.len(),
         robot.joints.len()
     ))
@@ -2147,7 +2409,7 @@ pub(crate) fn robot_scene_props_with_static_scene(
         },
         "robot": robot_summary,
         "staticSceneKey": robot_static_scene_key(state, project_config),
-        "dynamicState": robot_dynamic_state(state, base_translation, base_rotation)
+        "dynamicState": robot_dynamic_state(state, base_translation, base_rotation, project_config)
     });
 
     if include_static_scene && let Some(props) = props.as_object_mut() {

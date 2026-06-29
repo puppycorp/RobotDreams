@@ -210,6 +210,41 @@
           />
         </VStack>
 
+        <If test={state.has_sensor_previews}>
+          <HStack
+            height=178
+            minHeight=160
+            spacing=8
+            padding=8
+            backgroundColor="#0d1420"
+            border="1px solid #1d2a3b"
+            overflow="auto"
+          >
+            <For each={state.sensor_previews} itemAs="preview" key={preview.id}>
+              <VStack
+                width=230
+                minWidth=210
+                spacing=6
+                backgroundColor="#101a28"
+                border="1px solid #26364d"
+              >
+                <HStack spacing=6 paddingLeft=8 paddingRight=8 paddingTop=6>
+                  <Text value={preview.name} color="#f4f8ff" grow=1 />
+                  <Text value={preview.detail} color="#8996aa" />
+                </HStack>
+                <CustomComponent
+                  id={preview.component_id}
+                  src="/project/robot-dreams/robot-scene"
+                  props={preview.props}
+                  grow=1
+                  minHeight=0
+                  border="1px solid #223149"
+                />
+              </VStack>
+            </For>
+          </HStack>
+        </If>
+
       </VStack>
 
     </VStack>

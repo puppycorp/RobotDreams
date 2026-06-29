@@ -31,6 +31,12 @@ const css = `
     border: 1px solid rgba(85, 167, 255, 0.24);
     pointer-events: none;
   }
+  .robot-scene--preview .robot-scene__panel {
+    display: none;
+  }
+  .robot-scene--preview {
+    background: #050a11;
+  }
   .robot-scene__title {
     color: #43d17a;
     font-size: 11px;
@@ -422,6 +428,11 @@ const applyObjectProps = (object, node) => {
   } else {
     delete object.userData.excludeFromFit
   }
+  if (typeof props.get("cameraId") === "string") {
+    object.userData.cameraId = props.get("cameraId")
+  } else {
+    delete object.userData.cameraId
+  }
 }
 
 const updateObjectProps = (object, node) => {
@@ -640,6 +651,7 @@ export default class RobotSceneController {
     this.fitAfterBuild = true
     this.modelKey = null
     this.nodeObjects = new Map()
+    this.cameraMounts = new Map()
     this.pendingMeshLoads = 0
     this.robotGeneration = 0
     this.sceneStructureKey = null
@@ -672,6 +684,7 @@ export default class RobotSceneController {
       this.nodeObjects.size > 0
 
     this.props = nextProps
+    this.root.classList.toggle("robot-scene--preview", Boolean(nextProps.preview))
     this.fitAfterBuild = nextModelKey !== this.modelKey
     this.modelKey = nextModelKey
     this.sceneStructureKey = nextSceneStructureKey
@@ -756,6 +769,7 @@ export default class RobotSceneController {
     this.robotGeneration += 1
     const generation = this.robotGeneration
     this.nodeObjects.clear()
+    this.cameraMounts.clear()
     this.pendingMeshLoads = 0
     disposeObject(this.robotGroup)
     this.robotGroup.clear()
@@ -781,6 +795,9 @@ export default class RobotSceneController {
         const group = new THREE.Group()
         applyObjectProps(group, node)
         this.nodeObjects.set(node.id, group)
+        if (typeof group.userData.cameraId === "string") {
+          this.cameraMounts.set(group.userData.cameraId, group)
+        }
         for (const child of node.children ?? []) {
           const childObject = this.buildThreeNode(child, generation)
           if (childObject) group.add(childObject)
@@ -822,6 +839,9 @@ export default class RobotSceneController {
       const group = new THREE.Group()
       applyObjectProps(group, node)
       this.nodeObjects.set(node.id, group)
+      if (typeof group.userData.cameraId === "string") {
+        this.cameraMounts.set(group.userData.cameraId, group)
+      }
       this.pendingMeshLoads += 1
       loadGltfScene(src, meshMaterial)
         .then((object) => {
@@ -885,6 +905,7 @@ export default class RobotSceneController {
   }
 
   fitRobotIfNeeded() {
+    if (this.props?.preview) return
     if (!this.fitAfterBuild) return
     const box = new THREE.Box3()
     if (!expandFitBox(this.robotGroup, box) || box.isEmpty()) return
@@ -893,6 +914,10 @@ export default class RobotSceneController {
   }
 
   renderPanel() {
+    if (this.props?.preview) {
+      this.panel.replaceChildren()
+      return
+    }
     const robot = this.props?.robot
     const hasMeshes = isObject(this.props?.staticScene) || isObject(this.props?.scene)
     const rows = [
@@ -931,8 +956,29 @@ export default class RobotSceneController {
     this.render()
   }
 
+  applyPreviewCamera() {
+    const cameraId = typeof this.props?.previewCameraId === "string" ? this.props.previewCameraId : ""
+    if (!this.props?.preview || !cameraId) return null
+    const mount = this.cameraMounts.get(cameraId)
+    if (!mount) return null
+    const rect = this.canvas.getBoundingClientRect()
+    const aspect = rect.height > 0 ? rect.width / rect.height : 1
+    this.robotGroup.updateWorldMatrix(true, true)
+    mount.getWorldPosition(this.camera.position)
+    mount.getWorldQuaternion(this.camera.quaternion)
+    this.camera.aspect = aspect
+    this.camera.fov = finite(this.props?.previewFov, 58)
+    this.camera.near = 0.01
+    this.camera.far = 20
+    this.camera.updateProjectionMatrix()
+    return mount
+  }
+
   render() {
     if (!this.renderer || !this.scene || !this.camera) return
+    const hiddenMount = this.applyPreviewCamera()
+    if (hiddenMount) hiddenMount.visible = false
     this.renderer.render(this.scene, this.camera)
+    if (hiddenMount) hiddenMount.visible = true
   }
 }

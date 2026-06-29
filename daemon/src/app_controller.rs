@@ -15,12 +15,13 @@ use wgui::wui::runtime::WuiValue;
 use wgui::{CustomComponentController, CustomComponentCtx, WguiModel, wgui_controller};
 
 use crate::{
-    BusConfig, DeviceConfig, HardwareConfig, ProjectConfig, ProjectSceneObjectConfig,
-    ProjectSceneObjectGeometry, ServoDeviceConfig, URDF_BASE_SLIDER_BASE_ID,
-    URDF_JOINT_SLIDER_BASE_ID, UrdfViewerState, apply_urdf_slider_change, joint_display_label,
-    project_joint_name, reload_urdf_state, robot_scene_props_with_static_scene,
-    servo_ticks_to_slider_value, slider_value_to_servo_ticks, urdf_joint_slider_range,
-    urdf_joint_type_name, urdf_slider_value_to_units, urdf_value_to_joint_units,
+    BusConfig, DeviceConfig, HardwareConfig, ProjectCameraConfig, ProjectConfig,
+    ProjectSceneObjectConfig, ProjectSceneObjectGeometry, ServoDeviceConfig,
+    URDF_BASE_SLIDER_BASE_ID, URDF_JOINT_SLIDER_BASE_ID, UrdfViewerState, apply_urdf_slider_change,
+    joint_display_label, project_joint_name, reload_urdf_state,
+    robot_scene_props_with_static_scene, servo_ticks_to_slider_value, slider_value_to_servo_ticks,
+    urdf_joint_slider_range, urdf_joint_type_name, urdf_slider_value_to_units,
+    urdf_value_to_joint_units,
 };
 
 const SCENE_SECTION_ENVIRONMENT: u32 = 1;
@@ -47,6 +48,8 @@ const SCENE_ROW_BUS_BASE: u32 = 30_000;
 const SCENE_ROW_DEVICE_BASE: u32 = 40_000;
 const SCENE_ROW_DEVICE_BUS_STRIDE: u32 = 1_000;
 const SCENE_ROW_PROJECT_OBJECT_BASE: u32 = 60_000;
+const SCENE_ROW_PROJECT_CAMERA_BASE: u32 = 70_000;
+const SENSOR_PREVIEW_COMPONENT_BASE: u32 = 80_000;
 
 #[derive(Debug, Clone, WguiModel)]
 pub(crate) struct WorkbenchSectionModel {
@@ -103,6 +106,15 @@ pub(crate) struct WorkbenchSensorModel {
 }
 
 #[derive(Debug, Clone, WguiModel)]
+pub(crate) struct WorkbenchSensorPreviewModel {
+    id: String,
+    component_id: u32,
+    name: String,
+    detail: String,
+    props: WuiValue,
+}
+
+#[derive(Debug, Clone, WguiModel)]
 pub(crate) struct WorkbenchModel {
     project_name: String,
     simulation_label: String,
@@ -115,6 +127,8 @@ pub(crate) struct WorkbenchModel {
     lidar_preview_props: WuiValue,
     camera_preview_name: String,
     camera_preview_props: WuiValue,
+    has_sensor_previews: bool,
+    sensor_previews: Vec<WorkbenchSensorPreviewModel>,
     viewport_title: String,
     file_label: String,
     status: String,
@@ -1309,6 +1323,10 @@ fn project_object_row_id(index: usize) -> u32 {
     SCENE_ROW_PROJECT_OBJECT_BASE + index as u32
 }
 
+fn project_camera_row_id(index: usize) -> u32 {
+    SCENE_ROW_PROJECT_CAMERA_BASE + index as u32
+}
+
 fn selected_row(selected_scene_row_id: u32, row_id: u32) -> bool {
     selected_scene_row_id == row_id
 }
@@ -1570,6 +1588,36 @@ fn project_scene_object_rows(
         .unwrap_or_default()
 }
 
+fn project_camera_rows(
+    project_config: Option<&ProjectConfig>,
+    selected_scene_row_id: u32,
+) -> Vec<WorkbenchRowModel> {
+    project_config
+        .map(|project_config| {
+            project_config
+                .scene
+                .cameras
+                .iter()
+                .enumerate()
+                .map(|(index, camera)| {
+                    let row_id = project_camera_row_id(index);
+                    select_static_row(
+                        workbench_row(
+                            row_id,
+                            &camera.icon,
+                            &camera.name,
+                            &format!("{} on {}", camera.rate, camera.mounted_link),
+                            "ok",
+                            selected_row(selected_scene_row_id, row_id),
+                        ),
+                        row_id,
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn scene_sections(
     state: &UrdfViewerState,
     hardware_runtime: &HardwareRuntime,
@@ -1696,44 +1744,36 @@ fn scene_sections(
         collapsed_scene_section_ids,
     ));
 
+    let mut sensor_rows = vec![
+        select_static_row(
+            workbench_row(
+                SCENE_ROW_SENSOR_JOINT_STATES,
+                "JS",
+                "Joint States",
+                "100 Hz",
+                "ok",
+                selected_row(selected_scene_row_id, SCENE_ROW_SENSOR_JOINT_STATES),
+            ),
+            SCENE_ROW_SENSOR_JOINT_STATES,
+        ),
+        select_static_row(
+            workbench_row(
+                SCENE_ROW_SENSOR_LIDAR,
+                "LDR",
+                "Lidar_1",
+                "10 Hz",
+                "ok",
+                selected_row(selected_scene_row_id, SCENE_ROW_SENSOR_LIDAR),
+            ),
+            SCENE_ROW_SENSOR_LIDAR,
+        ),
+    ];
+    sensor_rows.extend(project_camera_rows(project_config, selected_scene_row_id));
+
     sections.push(workbench_section(
         SCENE_SECTION_SENSORS,
         "Sensors",
-        vec![
-            select_static_row(
-                workbench_row(
-                    SCENE_ROW_SENSOR_JOINT_STATES,
-                    "JS",
-                    "Joint States",
-                    "100 Hz",
-                    "ok",
-                    selected_row(selected_scene_row_id, SCENE_ROW_SENSOR_JOINT_STATES),
-                ),
-                SCENE_ROW_SENSOR_JOINT_STATES,
-            ),
-            select_static_row(
-                workbench_row(
-                    SCENE_ROW_SENSOR_LIDAR,
-                    "LDR",
-                    "Lidar_1",
-                    "10 Hz",
-                    "ok",
-                    selected_row(selected_scene_row_id, SCENE_ROW_SENSOR_LIDAR),
-                ),
-                SCENE_ROW_SENSOR_LIDAR,
-            ),
-            select_static_row(
-                workbench_row(
-                    SCENE_ROW_SENSOR_CAMERA,
-                    "CAM",
-                    "Camera_1",
-                    "30 Hz",
-                    "--",
-                    selected_row(selected_scene_row_id, SCENE_ROW_SENSOR_CAMERA),
-                ),
-                SCENE_ROW_SENSOR_CAMERA,
-            ),
-        ],
+        sensor_rows,
         collapsed_scene_section_ids,
     ));
 
@@ -2164,13 +2204,28 @@ fn selected_project_scene_object_info(
     project_config: Option<&ProjectConfig>,
     selected_scene_row_id: u32,
 ) -> Option<SelectedSceneInfo> {
-    if selected_scene_row_id < SCENE_ROW_PROJECT_OBJECT_BASE {
+    if !(SCENE_ROW_PROJECT_OBJECT_BASE..SCENE_ROW_PROJECT_CAMERA_BASE)
+        .contains(&selected_scene_row_id)
+    {
         return None;
     }
 
     let index = (selected_scene_row_id - SCENE_ROW_PROJECT_OBJECT_BASE) as usize;
     let object = project_config?.scene.objects.get(index)?;
     Some(project_scene_object_info(object))
+}
+
+fn selected_project_camera_info(
+    project_config: Option<&ProjectConfig>,
+    selected_scene_row_id: u32,
+) -> Option<SelectedSceneInfo> {
+    if selected_scene_row_id < SCENE_ROW_PROJECT_CAMERA_BASE {
+        return None;
+    }
+
+    let index = (selected_scene_row_id - SCENE_ROW_PROJECT_CAMERA_BASE) as usize;
+    let camera = project_config?.scene.cameras.get(index)?;
+    Some(project_camera_info(camera))
 }
 
 fn project_scene_object_info(object: &ProjectSceneObjectConfig) -> SelectedSceneInfo {
@@ -2204,6 +2259,34 @@ fn project_scene_object_info(object: &ProjectSceneObjectConfig) -> SelectedScene
         "#5e6c7c",
         transform_properties,
     )
+}
+
+fn project_camera_info(camera: &ProjectCameraConfig) -> SelectedSceneInfo {
+    selected_sensor_info(
+        &camera.name,
+        &camera.type_name,
+        &camera.icon,
+        vec![
+            workbench_property("Id", camera.id.clone()),
+            workbench_property("Mounted robot", camera.mounted_robot.clone()),
+            workbench_property("Mounted link", camera.mounted_link.clone()),
+            workbench_property("Position", format_vec3(camera.position)),
+            workbench_property("Rotation", format_vec3(camera.rotation)),
+        ],
+        vec![
+            workbench_property("FOV", format!("{:.1} deg", camera.fov_deg)),
+            workbench_property("Rate", camera.rate.clone()),
+            workbench_property("Resolution", project_camera_resolution_label(camera)),
+            workbench_property("Preview", "enabled"),
+        ],
+    )
+}
+
+fn project_camera_resolution_label(camera: &ProjectCameraConfig) -> String {
+    camera
+        .resolution
+        .map(|resolution| format!("{} x {}", resolution[0], resolution[1]))
+        .unwrap_or_else(|| "-".to_string())
 }
 
 fn project_scene_object_geometry_label(geometry: &ProjectSceneObjectGeometry) -> String {
@@ -2364,6 +2447,10 @@ fn selected_scene_info(
     }
 
     if let Some(info) = selected_project_scene_object_info(project_config, selected_scene_row_id) {
+        return info;
+    }
+
+    if let Some(info) = selected_project_camera_info(project_config, selected_scene_row_id) {
         return info;
     }
 
@@ -2591,6 +2678,52 @@ fn dashboard_preview_props(mode: &str) -> WuiValue {
     serde_json_to_wui_value(&value)
 }
 
+fn camera_preview_props(
+    base_scene_props: &serde_json::Value,
+    camera: &ProjectCameraConfig,
+) -> WuiValue {
+    let mut value = base_scene_props.clone();
+    if let Some(object) = value.as_object_mut() {
+        object.insert("preview".to_string(), serde_json::Value::Bool(true));
+        object.insert(
+            "previewCameraId".to_string(),
+            serde_json::Value::String(camera.id.clone()),
+        );
+        object.insert(
+            "previewCameraName".to_string(),
+            serde_json::Value::String(camera.name.clone()),
+        );
+        object.insert(
+            "previewFov".to_string(),
+            serde_json::Value::from(camera.fov_deg),
+        );
+    }
+    serde_json_to_wui_value(&value)
+}
+
+fn sensor_preview_models(
+    project_config: Option<&ProjectConfig>,
+    base_scene_props: &serde_json::Value,
+) -> Vec<WorkbenchSensorPreviewModel> {
+    project_config
+        .map(|project_config| {
+            project_config
+                .scene
+                .cameras
+                .iter()
+                .enumerate()
+                .map(|(index, camera)| WorkbenchSensorPreviewModel {
+                    id: camera.id.clone(),
+                    component_id: SENSOR_PREVIEW_COMPONENT_BASE + index as u32,
+                    name: camera.name.clone(),
+                    detail: format!("{} on {}", camera.rate, camera.mounted_link),
+                    props: camera_preview_props(base_scene_props, camera),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn project_name(project_config: Option<&ProjectConfig>) -> String {
     project_config
         .map(|config| config.name.clone())
@@ -2687,6 +2820,15 @@ impl AppController {
             self.project_config.as_ref(),
             self.selected_scene_row_id,
         );
+        let include_static_scene = self.robot_static_scene_dirty.replace(false);
+        let robot_scene_props = robot_scene_props_with_static_scene(
+            &live_urdf_state,
+            project_config,
+            base_translation,
+            base_rotation,
+            include_static_scene,
+        );
+        let sensor_previews = sensor_preview_models(project_config, &robot_scene_props);
 
         WorkbenchModel {
             project_name: project_name(self.project_config.as_ref()),
@@ -2699,17 +2841,13 @@ impl AppController {
             gpu_label: system_gpu_label(&self.gpu_metric),
             cpu_label: system_cpu_label(&self.cpu_sample),
             memory_label: system_memory_label(),
-            robot_scene_props: serde_json_to_wui_value(&robot_scene_props_with_static_scene(
-                &live_urdf_state,
-                project_config,
-                base_translation,
-                base_rotation,
-                self.robot_static_scene_dirty.replace(false),
-            )),
+            robot_scene_props: serde_json_to_wui_value(&robot_scene_props),
             lidar_preview_name: "lidar-preview".to_string(),
             lidar_preview_props: dashboard_preview_props("lidar"),
             camera_preview_name: "camera-preview".to_string(),
             camera_preview_props: dashboard_preview_props("camera"),
+            has_sensor_previews: !sensor_previews.is_empty(),
+            sensor_previews,
             viewport_title: "Viewport 1".to_string(),
             file_label: file_label(&live_urdf_state),
             status: live_urdf_state.status.clone(),
