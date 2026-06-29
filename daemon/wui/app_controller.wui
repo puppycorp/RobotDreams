@@ -399,9 +399,8 @@
     border="1px solid #172030"
   >
     <Text value="" grow=1 />
-    <Text value="ROS 2 Humble" color="#43d17a" />
-    <Text value="DDS" color="#43d17a" />
-    <Text value="Connected" color="#43d17a" />
+    <Text value={state.cpu_label} color="#aeb8c4" />
+    <Text value={state.gpu_label} color="#aeb8c4" />
     <Text value={state.memory_label} color="#aeb8c4" />
   </HStack>
 </VStack>

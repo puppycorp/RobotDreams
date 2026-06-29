@@ -1,5 +1,6 @@
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -106,6 +107,7 @@ pub(crate) struct WorkbenchModel {
     simulation_label: String,
     simulation_time: String,
     gpu_label: String,
+    cpu_label: String,
     memory_label: String,
     robot_scene_props: WuiValue,
     lidar_preview_name: String,
@@ -145,6 +147,20 @@ pub(crate) struct AppController {
     simulation_running: bool,
     selected_scene_row_id: u32,
     collapsed_scene_section_ids: Vec<u32>,
+    cpu_sample: Cell<Option<CpuSample>>,
+    gpu_metric: RefCell<Option<GpuMetricCache>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CpuSample {
+    idle: u64,
+    total: u64,
+}
+
+#[derive(Debug, Clone)]
+struct GpuMetricCache {
+    sampled_at: Instant,
+    label: String,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -1073,6 +1089,120 @@ fn file_label(state: &UrdfViewerState) -> String {
         .unwrap_or_else(|| {
             "(auto-discovery failed: place a .urdf in ./models, ./examples, or ./model)".to_string()
         })
+}
+
+fn system_memory_label() -> String {
+    system_memory_bytes()
+        .map(|(used, available)| {
+            format!(
+                "Memory {} used / {} free",
+                format_memory_bytes(used),
+                format_memory_bytes(available)
+            )
+        })
+        .unwrap_or_else(|| "Memory --".to_string())
+}
+
+fn system_memory_bytes() -> Option<(u64, u64)> {
+    let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let total = meminfo_value_bytes(&meminfo, "MemTotal:")?;
+    let available = meminfo_value_bytes(&meminfo, "MemAvailable:")?;
+    Some((total.saturating_sub(available), available))
+}
+
+fn meminfo_value_bytes(meminfo: &str, key: &str) -> Option<u64> {
+    meminfo.lines().find_map(|line| {
+        let value = line.strip_prefix(key)?;
+        let kb = value.split_whitespace().next()?.parse::<u64>().ok()?;
+        Some(kb.saturating_mul(1024))
+    })
+}
+
+fn format_memory_bytes(bytes: u64) -> String {
+    const MIB: f64 = 1024.0 * 1024.0;
+    const GIB: f64 = 1024.0 * MIB;
+    let bytes = bytes as f64;
+
+    if bytes >= GIB {
+        format!("{:.1} GB", bytes / GIB)
+    } else {
+        format!("{:.0} MB", bytes / MIB)
+    }
+}
+
+fn system_cpu_label(cpu_sample: &Cell<Option<CpuSample>>) -> String {
+    let Some(current) = read_cpu_sample() else {
+        return "CPU --".to_string();
+    };
+    let previous = cpu_sample.replace(Some(current));
+    let Some(previous) = previous else {
+        return "CPU --".to_string();
+    };
+
+    let total_delta = current.total.saturating_sub(previous.total);
+    if total_delta == 0 {
+        return "CPU --".to_string();
+    }
+
+    let idle_delta = current.idle.saturating_sub(previous.idle);
+    let used_delta = total_delta.saturating_sub(idle_delta);
+    let usage = 100.0 * used_delta as f64 / total_delta as f64;
+    format!("CPU {:.0}%", usage)
+}
+
+fn read_cpu_sample() -> Option<CpuSample> {
+    let stat = std::fs::read_to_string("/proc/stat").ok()?;
+    let cpu_line = stat.lines().next()?.strip_prefix("cpu ")?;
+    let values = cpu_line
+        .split_whitespace()
+        .map(str::parse::<u64>)
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+    if values.len() < 4 {
+        return None;
+    }
+
+    let idle = values
+        .get(3)
+        .copied()
+        .unwrap_or(0)
+        .saturating_add(values.get(4).copied().unwrap_or(0));
+    let total = values.iter().copied().sum();
+    Some(CpuSample { idle, total })
+}
+
+fn system_gpu_label(cache: &RefCell<Option<GpuMetricCache>>) -> String {
+    let now = Instant::now();
+    if let Some(cached) = cache.borrow().as_ref()
+        && now.duration_since(cached.sampled_at) < Duration::from_secs(2)
+    {
+        return cached.label.clone();
+    }
+
+    let label = read_gpu_usage_percent()
+        .map(|usage| format!("GPU {usage}%"))
+        .unwrap_or_else(|| "GPU --".to_string());
+    *cache.borrow_mut() = Some(GpuMetricCache {
+        sampled_at: now,
+        label: label.clone(),
+    });
+    label
+}
+
+fn read_gpu_usage_percent() -> Option<u32> {
+    let output = Command::new("nvidia-smi")
+        .args([
+            "--query-gpu=utilization.gpu",
+            "--format=csv,noheader,nounits",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8(output.stdout).ok()?;
+    stdout.lines().next()?.trim().parse::<u32>().ok()
 }
 
 fn base_controls(state: &UrdfViewerState) -> Vec<WorkbenchSliderModel> {
@@ -2337,6 +2467,8 @@ impl AppController {
             simulation_running: true,
             selected_scene_row_id: SCENE_ROW_ROBOT,
             collapsed_scene_section_ids: vec![SCENE_SECTION_LINKS, SCENE_SECTION_JOINTS],
+            cpu_sample: Cell::new(read_cpu_sample()),
+            gpu_metric: RefCell::new(None),
         }
     }
 
@@ -2390,8 +2522,9 @@ impl AppController {
                 "Paused".to_string()
             },
             simulation_time: "00:12:48".to_string(),
-            gpu_label: "GPU 72%".to_string(),
-            memory_label: "Memory 4.2 GB".to_string(),
+            gpu_label: system_gpu_label(&self.gpu_metric),
+            cpu_label: system_cpu_label(&self.cpu_sample),
+            memory_label: system_memory_label(),
             robot_scene_props: serde_json_to_wui_value(&robot_scene_props_with_static_scene(
                 &live_urdf_state,
                 self.project_config.as_ref(),
