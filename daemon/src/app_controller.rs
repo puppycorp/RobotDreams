@@ -713,20 +713,29 @@ impl RobotSceneComponent {
         let mut live_urdf_state = self.urdf_state.clone();
         apply_servo_snapshots_to_urdf(&mut live_urdf_state, &live_hardware_runtime, snapshots);
 
-        let base_translation = [
+        let live_base_translation = [
             urdf_slider_value_to_units(live_urdf_state.base_translation_values[0]),
             urdf_slider_value_to_units(live_urdf_state.base_translation_values[1]),
             urdf_slider_value_to_units(live_urdf_state.base_translation_values[2]),
         ];
-        let base_rotation = [
+        let live_base_rotation = [
             urdf_slider_value_to_units(live_urdf_state.base_rotation_values[0]),
             urdf_slider_value_to_units(live_urdf_state.base_rotation_values[1]),
             urdf_slider_value_to_units(live_urdf_state.base_rotation_values[2]),
         ];
+        let project_config = self.project_config.as_ref();
+        let base_translation = add_vec3(
+            project_robot_base_translation(project_config),
+            live_base_translation,
+        );
+        let base_rotation = add_vec3(
+            project_robot_base_rotation(project_config),
+            live_base_rotation,
+        );
 
         robot_scene_props_with_static_scene(
             &live_urdf_state,
-            self.project_config.as_ref(),
+            project_config,
             base_translation,
             base_rotation,
             false,
@@ -1773,6 +1782,24 @@ fn format_vec3(value: [f32; 3]) -> String {
     format!("{:.3}, {:.3}, {:.3}", value[0], value[1], value[2])
 }
 
+fn add_vec3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
+}
+
+fn project_robot_base_translation(project_config: Option<&ProjectConfig>) -> [f32; 3] {
+    project_config
+        .and_then(|config| config.robots.first())
+        .map(|robot| robot.base_translation)
+        .unwrap_or([0.0, 0.0, 0.0])
+}
+
+fn project_robot_base_rotation(project_config: Option<&ProjectConfig>) -> [f32; 3] {
+    project_config
+        .and_then(|config| config.robots.first())
+        .map(|robot| robot.base_rotation)
+        .unwrap_or([0.0, 0.0, 0.0])
+}
+
 fn static_scene_info(
     name: &str,
     selected_type: &str,
@@ -1791,7 +1818,38 @@ fn static_scene_info(
     }
 }
 
-fn robot_scene_info(state: &UrdfViewerState) -> SelectedSceneInfo {
+fn robot_transform_properties(
+    project_config: Option<&ProjectConfig>,
+) -> Vec<WorkbenchPropertyModel> {
+    let translation = project_robot_base_translation(project_config);
+    let rotation = project_robot_base_rotation(project_config);
+    [
+        ("Frame".to_string(), "World".to_string()),
+        ("Position X".to_string(), format!("{:.3} m", translation[0])),
+        ("Position Y".to_string(), format!("{:.3} m", translation[1])),
+        ("Position Z".to_string(), format!("{:.3} m", translation[2])),
+        (
+            "Roll".to_string(),
+            format!("{:.1} deg", rotation[0].to_degrees()),
+        ),
+        (
+            "Pitch".to_string(),
+            format!("{:.1} deg", rotation[1].to_degrees()),
+        ),
+        (
+            "Yaw".to_string(),
+            format!("{:.1} deg", rotation[2].to_degrees()),
+        ),
+    ]
+    .into_iter()
+    .map(|(name, value)| workbench_property(&name, value))
+    .collect()
+}
+
+fn robot_scene_info(
+    state: &UrdfViewerState,
+    project_config: Option<&ProjectConfig>,
+) -> SelectedSceneInfo {
     let status = if state.robot.is_some() {
         "OK".to_string()
     } else {
@@ -1804,7 +1862,7 @@ fn robot_scene_info(state: &UrdfViewerState) -> SelectedSceneInfo {
         status,
         badge: "ARM".to_string(),
         accent: "#1c6ea4".to_string(),
-        transform_properties: transform_properties(),
+        transform_properties: robot_transform_properties(project_config),
         physics_properties: physics_properties(),
     }
 }
@@ -2165,6 +2223,7 @@ fn project_scene_object_geometry_label(geometry: &ProjectSceneObjectGeometry) ->
 
 fn selected_static_scene_info(
     state: &UrdfViewerState,
+    project_config: Option<&ProjectConfig>,
     selected_scene_row_id: u32,
 ) -> SelectedSceneInfo {
     match selected_scene_row_id {
@@ -2268,7 +2327,7 @@ fn selected_static_scene_info(
                 workbench_property("Status", "simulated"),
             ],
         ),
-        _ => robot_scene_info(state),
+        _ => robot_scene_info(state, project_config),
     }
 }
 
@@ -2308,7 +2367,7 @@ fn selected_scene_info(
         return info;
     }
 
-    selected_static_scene_info(state, selected_scene_row_id)
+    selected_static_scene_info(state, project_config, selected_scene_row_id)
 }
 
 fn show_robot_controls(selected_scene_row_id: u32) -> bool {
@@ -2586,16 +2645,25 @@ impl AppController {
         let mut live_urdf_state = self.urdf_state.clone();
         apply_servo_snapshots_to_urdf(&mut live_urdf_state, &live_hardware_runtime, &snapshots);
 
-        let base_translation = [
+        let live_base_translation = [
             urdf_slider_value_to_units(live_urdf_state.base_translation_values[0]),
             urdf_slider_value_to_units(live_urdf_state.base_translation_values[1]),
             urdf_slider_value_to_units(live_urdf_state.base_translation_values[2]),
         ];
-        let base_rotation = [
+        let live_base_rotation = [
             urdf_slider_value_to_units(live_urdf_state.base_rotation_values[0]),
             urdf_slider_value_to_units(live_urdf_state.base_rotation_values[1]),
             urdf_slider_value_to_units(live_urdf_state.base_rotation_values[2]),
         ];
+        let project_config = self.project_config.as_ref();
+        let base_translation = add_vec3(
+            project_robot_base_translation(project_config),
+            live_base_translation,
+        );
+        let base_rotation = add_vec3(
+            project_robot_base_rotation(project_config),
+            live_base_rotation,
+        );
 
         let loaded_summary = live_urdf_state
             .robot
@@ -2633,7 +2701,7 @@ impl AppController {
             memory_label: system_memory_label(),
             robot_scene_props: serde_json_to_wui_value(&robot_scene_props_with_static_scene(
                 &live_urdf_state,
-                self.project_config.as_ref(),
+                project_config,
                 base_translation,
                 base_rotation,
                 self.robot_static_scene_dirty.replace(false),

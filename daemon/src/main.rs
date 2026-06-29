@@ -182,6 +182,8 @@ pub(crate) struct ProjectRobotConfig {
     pub(crate) name: String,
     pub(crate) model: ProjectRobotModelConfig,
     pub(crate) joint_names: HashMap<String, String>,
+    pub(crate) base_translation: [f32; 3],
+    pub(crate) base_rotation: [f32; 3],
 }
 
 #[derive(Clone, Debug)]
@@ -677,6 +679,10 @@ fn parse_project_robot_config(value: &serde_json::Value) -> Option<ProjectRobotC
         name,
         model: parse_project_robot_model_config(value)?,
         joint_names: parse_project_joint_names(value),
+        base_translation: json_vec3_path(value, &["base", "translation"])
+            .or_else(|| json_vec3_path(value, &["base", "position"]))
+            .unwrap_or([0.0, 0.0, 0.0]),
+        base_rotation: json_vec3_path(value, &["base", "rotation"]).unwrap_or([0.0, 0.0, 0.0]),
     })
 }
 

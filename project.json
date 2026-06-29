@@ -10,6 +10,9 @@
         "type": "urdf",
         "path": "examples/puppyarm/model/final/urdf/final.urdf"
       },
+      "base": {
+        "translation": [0.0, 0.154023, 0.0]
+      },
       "jointNames": {
         "revolute_2_1": "yaw",
         "revolute_1_1": "wrist",
