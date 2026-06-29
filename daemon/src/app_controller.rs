@@ -1093,11 +1093,11 @@ fn file_label(state: &UrdfViewerState) -> String {
 
 fn system_memory_label() -> String {
     system_memory_bytes()
-        .map(|(used, available)| {
+        .map(|(used, total)| {
             format!(
-                "Memory {} used / {} free",
+                "Memory {} used / {} total",
                 format_memory_bytes(used),
-                format_memory_bytes(available)
+                format_memory_bytes(total)
             )
         })
         .unwrap_or_else(|| "Memory --".to_string())
@@ -1107,7 +1107,7 @@ fn system_memory_bytes() -> Option<(u64, u64)> {
     let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
     let total = meminfo_value_bytes(&meminfo, "MemTotal:")?;
     let available = meminfo_value_bytes(&meminfo, "MemAvailable:")?;
-    Some((total.saturating_sub(available), available))
+    Some((total.saturating_sub(available), total))
 }
 
 fn meminfo_value_bytes(meminfo: &str, key: &str) -> Option<u64> {
