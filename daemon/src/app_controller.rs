@@ -2583,6 +2583,13 @@ impl AppController {
         "RobotDreams Workbench".to_string()
     }
 
+    pub(crate) async fn process(ctx: wgui::wui::runtime::ControllerProcessCtx) {
+        loop {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            ctx.refresh();
+        }
+    }
+
     pub(crate) fn play_simulation(&mut self) {
         self.simulation_running = true;
     }
