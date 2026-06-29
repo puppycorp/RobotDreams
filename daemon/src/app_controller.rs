@@ -15,9 +15,9 @@ use wgui::wui::runtime::WuiValue;
 use wgui::{CustomComponentController, CustomComponentCtx, WguiModel, wgui_controller};
 
 use crate::{
-    BusConfig, DeviceConfig, HardwareConfig, ProjectConfig, ServoDeviceConfig,
-    URDF_BASE_SLIDER_BASE_ID, URDF_JOINT_SLIDER_BASE_ID, UrdfViewerState, apply_urdf_slider_change,
-    joint_display_label, project_joint_name, reload_urdf_state,
+    BusConfig, DeviceConfig, HardwareConfig, ProjectConfig, ProjectSceneObjectConfig,
+    ServoDeviceConfig, URDF_BASE_SLIDER_BASE_ID, URDF_JOINT_SLIDER_BASE_ID, UrdfViewerState,
+    apply_urdf_slider_change, joint_display_label, project_joint_name, reload_urdf_state,
     robot_scene_props_with_static_scene, servo_ticks_to_slider_value, slider_value_to_servo_ticks,
     urdf_joint_slider_range, urdf_joint_type_name, urdf_slider_value_to_units,
     urdf_value_to_joint_units,
@@ -46,6 +46,7 @@ const SCENE_ROW_JOINT_BASE: u32 = 20_000;
 const SCENE_ROW_BUS_BASE: u32 = 30_000;
 const SCENE_ROW_DEVICE_BASE: u32 = 40_000;
 const SCENE_ROW_DEVICE_BUS_STRIDE: u32 = 1_000;
+const SCENE_ROW_PROJECT_OBJECT_BASE: u32 = 60_000;
 
 #[derive(Debug, Clone, WguiModel)]
 pub(crate) struct WorkbenchSectionModel {
@@ -1295,6 +1296,10 @@ fn device_row_id(bus_index: usize, device_index: usize) -> u32 {
     SCENE_ROW_DEVICE_BASE + bus_index as u32 * SCENE_ROW_DEVICE_BUS_STRIDE + device_index as u32
 }
 
+fn project_object_row_id(index: usize) -> u32 {
+    SCENE_ROW_PROJECT_OBJECT_BASE + index as u32
+}
+
 fn selected_row(selected_scene_row_id: u32, row_id: u32) -> bool {
     selected_scene_row_id == row_id
 }
@@ -1526,6 +1531,36 @@ fn hardware_rows(
     rows
 }
 
+fn project_scene_object_rows(
+    project_config: Option<&ProjectConfig>,
+    selected_scene_row_id: u32,
+) -> Vec<WorkbenchRowModel> {
+    project_config
+        .map(|project_config| {
+            project_config
+                .scene
+                .objects
+                .iter()
+                .enumerate()
+                .map(|(index, object)| {
+                    let row_id = project_object_row_id(index);
+                    select_static_row(
+                        workbench_row(
+                            row_id,
+                            &object.icon,
+                            &object.name,
+                            &object.type_name,
+                            "ok",
+                            selected_row(selected_scene_row_id, row_id),
+                        ),
+                        row_id,
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn scene_sections(
     state: &UrdfViewerState,
     hardware_runtime: &HardwareRuntime,
@@ -1594,55 +1629,61 @@ fn scene_sections(
         collapsed_scene_section_ids,
     ));
 
+    let mut object_rows = vec![
+        select_static_row(
+            workbench_row(
+                SCENE_ROW_OBJECT_WORKTABLE,
+                "TBL",
+                "Worktable",
+                "fixture",
+                "ok",
+                selected_row(selected_scene_row_id, SCENE_ROW_OBJECT_WORKTABLE),
+            ),
+            SCENE_ROW_OBJECT_WORKTABLE,
+        ),
+        select_static_row(
+            workbench_row(
+                SCENE_ROW_OBJECT_BIN,
+                "BIN",
+                "Bin Blue",
+                "container",
+                "ok",
+                selected_row(selected_scene_row_id, SCENE_ROW_OBJECT_BIN),
+            ),
+            SCENE_ROW_OBJECT_BIN,
+        ),
+        select_static_row(
+            workbench_row(
+                SCENE_ROW_OBJECT_FIXTURE,
+                "FIX",
+                "Fixture Plate",
+                "tooling",
+                "ok",
+                selected_row(selected_scene_row_id, SCENE_ROW_OBJECT_FIXTURE),
+            ),
+            SCENE_ROW_OBJECT_FIXTURE,
+        ),
+        select_static_row(
+            workbench_row(
+                SCENE_ROW_OBJECT_TAG,
+                "TAG",
+                "Calibration Tag",
+                "marker",
+                "--",
+                selected_row(selected_scene_row_id, SCENE_ROW_OBJECT_TAG),
+            ),
+            SCENE_ROW_OBJECT_TAG,
+        ),
+    ];
+    object_rows.extend(project_scene_object_rows(
+        project_config,
+        selected_scene_row_id,
+    ));
+
     sections.push(workbench_section(
         SCENE_SECTION_OBJECTS,
         "Objects",
-        vec![
-            select_static_row(
-                workbench_row(
-                    SCENE_ROW_OBJECT_WORKTABLE,
-                    "TBL",
-                    "Worktable",
-                    "fixture",
-                    "ok",
-                    selected_row(selected_scene_row_id, SCENE_ROW_OBJECT_WORKTABLE),
-                ),
-                SCENE_ROW_OBJECT_WORKTABLE,
-            ),
-            select_static_row(
-                workbench_row(
-                    SCENE_ROW_OBJECT_BIN,
-                    "BIN",
-                    "Bin Blue",
-                    "container",
-                    "ok",
-                    selected_row(selected_scene_row_id, SCENE_ROW_OBJECT_BIN),
-                ),
-                SCENE_ROW_OBJECT_BIN,
-            ),
-            select_static_row(
-                workbench_row(
-                    SCENE_ROW_OBJECT_FIXTURE,
-                    "FIX",
-                    "Fixture Plate",
-                    "tooling",
-                    "ok",
-                    selected_row(selected_scene_row_id, SCENE_ROW_OBJECT_FIXTURE),
-                ),
-                SCENE_ROW_OBJECT_FIXTURE,
-            ),
-            select_static_row(
-                workbench_row(
-                    SCENE_ROW_OBJECT_TAG,
-                    "TAG",
-                    "Calibration Tag",
-                    "marker",
-                    "--",
-                    selected_row(selected_scene_row_id, SCENE_ROW_OBJECT_TAG),
-                ),
-                SCENE_ROW_OBJECT_TAG,
-            ),
-        ],
+        object_rows,
         collapsed_scene_section_ids,
     ));
 
@@ -2061,6 +2102,41 @@ fn selected_device_info(
     })
 }
 
+fn selected_project_scene_object_info(
+    project_config: Option<&ProjectConfig>,
+    selected_scene_row_id: u32,
+) -> Option<SelectedSceneInfo> {
+    if selected_scene_row_id < SCENE_ROW_PROJECT_OBJECT_BASE {
+        return None;
+    }
+
+    let index = (selected_scene_row_id - SCENE_ROW_PROJECT_OBJECT_BASE) as usize;
+    let object = project_config?.scene.objects.get(index)?;
+    Some(project_scene_object_info(object))
+}
+
+fn project_scene_object_info(object: &ProjectSceneObjectConfig) -> SelectedSceneInfo {
+    let mut transform_properties = vec![
+        workbench_property("Id", object.id.clone()),
+        workbench_property("Frame", "World"),
+        workbench_property("Asset", object.asset.clone()),
+        workbench_property("Position", format_vec3(object.position)),
+        workbench_property("Rotation", format_vec3(object.rotation)),
+    ];
+
+    if let Some(scale) = object.scale {
+        transform_properties.push(workbench_property("Scale", format_vec3(scale)));
+    }
+
+    static_scene_info(
+        &object.name,
+        &object.type_name,
+        &object.icon,
+        "#5e6c7c",
+        transform_properties,
+    )
+}
+
 fn selected_static_scene_info(
     state: &UrdfViewerState,
     selected_scene_row_id: u32,
@@ -2199,6 +2275,10 @@ fn selected_scene_info(
         project_config,
         selected_scene_row_id,
     ) {
+        return info;
+    }
+
+    if let Some(info) = selected_project_scene_object_info(project_config, selected_scene_row_id) {
         return info;
     }
 

@@ -33,6 +33,10 @@ const URDF_BASE_ROTATION_MIN: i32 = (-std::f32::consts::PI * URDF_VALUE_SCALE) a
 const URDF_BASE_ROTATION_MAX: i32 = (std::f32::consts::PI * URDF_VALUE_SCALE) as i32;
 const URDF_ROTATION_ORDER: &str = "ZYX";
 const URDF_TO_VIEW_ROT_X: f32 = -std::f32::consts::FRAC_PI_2;
+const STATIC_SCENE_ROOT_ID: u32 = 89;
+const ROBOT_BASE_GROUP_ID: u32 = 90;
+const PROJECT_SCENE_OBJECT_ID_BASE: u32 = 50_000;
+const PROJECT_SCENE_OBJECT_ID_STRIDE: u32 = 10;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -129,8 +133,27 @@ impl UrdfViewerState {
 pub(crate) struct ProjectConfig {
     pub(crate) format: String,
     pub(crate) name: String,
+    pub(crate) base_dir: PathBuf,
+    pub(crate) scene: ProjectSceneConfig,
     pub(crate) robots: Vec<ProjectRobotConfig>,
     pub(crate) hardware: HardwareConfig,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ProjectSceneConfig {
+    pub(crate) objects: Vec<ProjectSceneObjectConfig>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ProjectSceneObjectConfig {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) type_name: String,
+    pub(crate) icon: String,
+    pub(crate) asset: String,
+    pub(crate) position: [f32; 3],
+    pub(crate) rotation: [f32; 3],
+    pub(crate) scale: Option<[f32; 3]>,
 }
 
 #[derive(Clone, Debug)]
@@ -302,6 +325,22 @@ fn json_i8_path(value: &serde_json::Value, path: &[&str]) -> Option<i8> {
     current.as_i64().and_then(|value| i8::try_from(value).ok())
 }
 
+fn json_vec3_path(value: &serde_json::Value, path: &[&str]) -> Option<[f32; 3]> {
+    let mut current = value;
+    for key in path {
+        current = current.get(*key)?;
+    }
+    let values = current.as_array()?;
+    if values.len() != 3 {
+        return None;
+    }
+    Some([
+        values[0].as_f64()? as f32,
+        values[1].as_f64()? as f32,
+        values[2].as_f64()? as f32,
+    ])
+}
+
 fn parse_device_mapping(
     value: &serde_json::Value,
     field: &str,
@@ -399,6 +438,56 @@ fn parse_hardware_config(value: &serde_json::Value) -> HardwareConfig {
     HardwareConfig { buses }
 }
 
+fn parse_project_scene_object_config(
+    value: &serde_json::Value,
+) -> Option<ProjectSceneObjectConfig> {
+    let id = json_string_path(value, &["id"])?.to_string();
+    let name = json_string_path(value, &["name"])
+        .map(str::to_string)
+        .unwrap_or_else(|| id.clone());
+    let type_name = json_string_path(value, &["type"])
+        .unwrap_or("object")
+        .to_string();
+    let icon = json_string_path(value, &["icon"])
+        .unwrap_or("OBJ")
+        .to_string();
+    let asset = json_string_path(value, &["asset"])
+        .or_else(|| json_string_path(value, &["model"]))
+        .or_else(|| json_string_path(value, &["path"]))?
+        .to_string();
+
+    Some(ProjectSceneObjectConfig {
+        id,
+        name,
+        type_name,
+        icon,
+        asset,
+        position: json_vec3_path(value, &["position"])
+            .or_else(|| json_vec3_path(value, &["transform", "position"]))
+            .unwrap_or([0.0, 0.0, 0.0]),
+        rotation: json_vec3_path(value, &["rotation"])
+            .or_else(|| json_vec3_path(value, &["transform", "rotation"]))
+            .unwrap_or([0.0, 0.0, 0.0]),
+        scale: json_vec3_path(value, &["scale"])
+            .or_else(|| json_vec3_path(value, &["transform", "scale"])),
+    })
+}
+
+fn parse_project_scene_config(value: &serde_json::Value) -> ProjectSceneConfig {
+    let objects = value
+        .get("scene")
+        .and_then(|scene| scene.get("objects"))
+        .and_then(|objects| objects.as_array())
+        .map(|objects| {
+            objects
+                .iter()
+                .filter_map(parse_project_scene_object_config)
+                .collect()
+        })
+        .unwrap_or_default();
+    ProjectSceneConfig { objects }
+}
+
 fn parse_project_robot_model_config(value: &serde_json::Value) -> Option<ProjectRobotModelConfig> {
     let model = value.get("model")?;
     Some(ProjectRobotModelConfig {
@@ -452,7 +541,7 @@ fn parse_project_robot_config(value: &serde_json::Value) -> Option<ProjectRobotC
     })
 }
 
-fn parse_project_config(value: &serde_json::Value) -> Option<ProjectConfig> {
+fn parse_project_config(value: &serde_json::Value, base_dir: PathBuf) -> Option<ProjectConfig> {
     let format = json_string_path(value, &["format"])?;
     if format != ROBOT_DREAMS_PROJECT_FORMAT {
         return None;
@@ -475,6 +564,8 @@ fn parse_project_config(value: &serde_json::Value) -> Option<ProjectConfig> {
     Some(ProjectConfig {
         format: format.to_string(),
         name,
+        base_dir,
+        scene: parse_project_scene_config(value),
         robots,
         hardware: parse_hardware_config(value),
     })
@@ -482,7 +573,11 @@ fn parse_project_config(value: &serde_json::Value) -> Option<ProjectConfig> {
 
 fn project_config_from_manifest(path: &Path) -> Option<ProjectConfig> {
     let json = read_json_file(path).ok()?;
-    parse_project_config(&json)
+    let base_dir = path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
+    parse_project_config(&json, base_dir)
 }
 
 fn project_manifest_for_input_path(path: &Path) -> Option<PathBuf> {
@@ -1544,7 +1639,115 @@ fn apply_urdf_slider_change(state: &mut UrdfViewerState, slider_id: u32, value: 
     false
 }
 
-fn robot_static_scene(state: &UrdfViewerState) -> Option<ThreeNode> {
+fn resolve_project_asset_path(project_config: &ProjectConfig, asset: &str) -> PathBuf {
+    let path = Path::new(asset);
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        project_config.base_dir.join(path)
+    }
+}
+
+fn project_asset_url(
+    state: &UrdfViewerState,
+    project_config: &ProjectConfig,
+    asset: &str,
+) -> Option<String> {
+    let path = resolve_project_asset_path(project_config, asset);
+    std::fs::canonicalize(&path)
+        .ok()
+        .and_then(|canonical| path_to_workspace_url(&canonical, &state.workspace_root))
+        .or_else(|| path_to_workspace_url(&path, &state.workspace_root))
+}
+
+fn project_scene_object_node(
+    state: &UrdfViewerState,
+    project_config: &ProjectConfig,
+    object: &ProjectSceneObjectConfig,
+    index: usize,
+) -> Option<ThreeNode> {
+    let src = project_asset_url(state, project_config, &object.asset)?;
+    let base_id = PROJECT_SCENE_OBJECT_ID_BASE + index as u32 * PROJECT_SCENE_OBJECT_ID_STRIDE;
+    let mut object_mesh = mesh(
+        base_id + 1,
+        [
+            stl_geometry(base_id + 2).prop("src", ThreePropValue::String { value: src }),
+            mesh_standard_material(base_id + 3)
+                .prop(
+                    "color",
+                    ThreePropValue::Color {
+                        r: 52,
+                        g: 118,
+                        b: 168,
+                        a: None,
+                    },
+                )
+                .prop("metalness", ThreePropValue::Number { value: 0.1 })
+                .prop("roughness", ThreePropValue::Number { value: 0.75 }),
+        ],
+    );
+
+    if let Some(scale) = object.scale {
+        object_mesh = object_mesh.prop(
+            "scale",
+            ThreePropValue::Vec3 {
+                x: scale[0],
+                y: scale[1],
+                z: scale[2],
+            },
+        );
+    }
+
+    Some(
+        group(base_id, [object_mesh])
+            .prop(
+                "name",
+                ThreePropValue::String {
+                    value: object.name.clone(),
+                },
+            )
+            .prop(
+                "position",
+                ThreePropValue::Vec3 {
+                    x: object.position[0],
+                    y: object.position[1],
+                    z: object.position[2],
+                },
+            )
+            .prop(
+                "rotation",
+                ThreePropValue::Vec3 {
+                    x: object.rotation[0],
+                    y: object.rotation[1],
+                    z: object.rotation[2],
+                },
+            ),
+    )
+}
+
+fn project_scene_object_nodes(
+    state: &UrdfViewerState,
+    project_config: Option<&ProjectConfig>,
+) -> Vec<ThreeNode> {
+    project_config
+        .map(|project_config| {
+            project_config
+                .scene
+                .objects
+                .iter()
+                .enumerate()
+                .filter_map(|(index, object)| {
+                    project_scene_object_node(state, project_config, object, index)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn robot_static_scene(
+    state: &UrdfViewerState,
+    project_config: Option<&ProjectConfig>,
+) -> Option<ThreeNode> {
     let robot = state.robot.as_ref()?;
     let mut id_gen = 100;
     let mut model_children: Vec<ThreeNode> = Vec::new();
@@ -1565,7 +1768,10 @@ fn robot_static_scene(state: &UrdfViewerState) -> Option<ThreeNode> {
             },
         )],
     );
-    Some(group(90, [urdf_frame_group]))
+    let mut scene_children = vec![group(ROBOT_BASE_GROUP_ID, [urdf_frame_group])];
+    scene_children.extend(project_scene_object_nodes(state, project_config));
+
+    Some(group(STATIC_SCENE_ROOT_ID, scene_children))
 }
 
 fn robot_dynamic_state(
@@ -1576,7 +1782,7 @@ fn robot_dynamic_state(
     let mut transforms = serde_json::Map::new();
     insert_transform(
         &mut transforms,
-        90,
+        ROBOT_BASE_GROUP_ID,
         Some(base_translation),
         Some(base_rotation),
         Some(URDF_ROTATION_ORDER),
@@ -1601,7 +1807,37 @@ fn robot_dynamic_state(
     })
 }
 
-fn robot_static_scene_key(state: &UrdfViewerState) -> Option<String> {
+fn project_scene_objects_key(
+    state: &UrdfViewerState,
+    project_config: Option<&ProjectConfig>,
+) -> String {
+    let Some(project_config) = project_config else {
+        return String::new();
+    };
+
+    project_config
+        .scene
+        .objects
+        .iter()
+        .map(|object| {
+            let modified = resolve_project_asset_path(project_config, &object.asset)
+                .metadata()
+                .ok()
+                .and_then(|metadata| metadata.modified().ok())
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|duration| duration.as_millis())
+                .unwrap_or_default();
+            let src = project_asset_url(state, project_config, &object.asset).unwrap_or_default();
+            format!("{}:{}:{modified}", object.id, src)
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn robot_static_scene_key(
+    state: &UrdfViewerState,
+    project_config: Option<&ProjectConfig>,
+) -> Option<String> {
     let robot = state.robot.as_ref()?;
     let path = state
         .urdf_path
@@ -1616,13 +1852,14 @@ fn robot_static_scene_key(state: &UrdfViewerState) -> Option<String> {
         .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|duration| duration.as_millis())
         .unwrap_or_default();
+    let scene_objects_key = project_scene_objects_key(state, project_config);
     let visual_count = robot
         .links
         .values()
         .map(|link| link.visuals.len())
         .sum::<usize>();
     Some(format!(
-        "{path}|{modified}|{}|{}|{visual_count}",
+        "{path}|{modified}|scene:{scene_objects_key}|{}|{}|{visual_count}",
         robot.links.len(),
         robot.joints.len()
     ))
@@ -1700,14 +1937,14 @@ pub(crate) fn robot_scene_props_with_static_scene(
             "rotation": base_rotation
         },
         "robot": robot_summary,
-        "staticSceneKey": robot_static_scene_key(state),
+        "staticSceneKey": robot_static_scene_key(state, project_config),
         "dynamicState": robot_dynamic_state(state, base_translation, base_rotation)
     });
 
     if include_static_scene && let Some(props) = props.as_object_mut() {
         props.insert(
             "staticScene".to_string(),
-            serde_json::json!(robot_static_scene(state)),
+            serde_json::json!(robot_static_scene(state, project_config)),
         );
     }
 

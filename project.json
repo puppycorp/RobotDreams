@@ -18,6 +18,19 @@
       }
     }
   ],
+  "scene": {
+    "objects": [
+      {
+        "id": "trashbin",
+        "name": "Trash Bin",
+        "type": "container",
+        "icon": "BIN",
+        "asset": "examples/trashbin.gltf",
+        "position": [0.38, 0.0, -0.28],
+        "rotation": [-1.5707964, 0.0, 0.0]
+      }
+    ]
+  },
   "hardware": {
     "buses": [
       {
