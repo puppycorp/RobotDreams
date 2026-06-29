@@ -1915,7 +1915,7 @@ checksum = "ccf3ec651a847eb01de73ccad15eb7d99f80485de043efb2f370cd654f4ea44b"
 [[package]]
 name = "wgui"
 version = "0.1.0"
-source = "git+https://github.com/J45k4/wgui.git?rev=5aab79a6c279286f80ea0d45ce7756bcae4b54ee#5aab79a6c279286f80ea0d45ce7756bcae4b54ee"
+source = "git+https://github.com/J45k4/wgui.git?rev=1919862a942e6ef9d6a2e98986981ef68b76728e#1919862a942e6ef9d6a2e98986981ef68b76728e"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2103,12 +2103,12 @@ checksum = "9edde0db4769d2dc68579893f2306b26c6ecfbe0ef499b013d731b7b9247e0b9"
 [[package]]
 name = "wui-core"
 version = "0.1.0"
-source = "git+https://github.com/J45k4/wgui.git?rev=5aab79a6c279286f80ea0d45ce7756bcae4b54ee#5aab79a6c279286f80ea0d45ce7756bcae4b54ee"
+source = "git+https://github.com/J45k4/wgui.git?rev=1919862a942e6ef9d6a2e98986981ef68b76728e#1919862a942e6ef9d6a2e98986981ef68b76728e"
 
 [[package]]
 name = "wui-derive"
 version = "0.1.0"
-source = "git+https://github.com/J45k4/wgui.git?rev=5aab79a6c279286f80ea0d45ce7756bcae4b54ee#5aab79a6c279286f80ea0d45ce7756bcae4b54ee"
+source = "git+https://github.com/J45k4/wgui.git?rev=1919862a942e6ef9d6a2e98986981ef68b76728e#1919862a942e6ef9d6a2e98986981ef68b76728e"
 dependencies = [
  "proc-macro2",
  "quote",

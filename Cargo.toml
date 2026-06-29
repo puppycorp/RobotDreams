@@ -8,4 +8,4 @@ members = [
 resolver = "3"
 
 [workspace.dependencies]
-wgui = { git = "https://github.com/J45k4/wgui.git", rev = "5aab79a6c279286f80ea0d45ce7756bcae4b54ee" }
+wgui = { git = "https://github.com/J45k4/wgui.git", rev = "1919862a942e6ef9d6a2e98986981ef68b76728e" }
