@@ -473,6 +473,13 @@ const jointValues = (props) => {
   return joints.map((joint) => finite(joint.value, 0))
 }
 
+const servoTicksToJointValue = (ticks, joint) => {
+  const lower = finite(joint?.lower, -Math.PI)
+  const upper = finite(joint?.upper, Math.PI)
+  const t = clamp(finite(ticks, 0), 0, 4095) / 4095
+  return lower + (upper - lower) * t
+}
+
 class CameraRig {
   constructor(element, camera, render) {
     this.element = element
@@ -649,6 +656,47 @@ export default class RobotSceneController {
 
     this.buildRobot()
     this.render()
+  }
+
+  onData(name, payload) {
+    if (name !== "servoSnapshots") {
+      return
+    }
+
+    const liveProps = isObject(payload?.robotSceneProps) ? payload.robotSceneProps : null
+    if (liveProps) {
+      this.setProps({
+        ...this.props,
+        ...liveProps,
+      })
+      return
+    }
+
+    const snapshots = Array.isArray(payload?.snapshots) ? payload.snapshots : []
+    const robot = this.props?.robot
+    const joints = Array.isArray(robot?.movableJoints) ? robot.movableJoints : []
+    if (!snapshots.length || !joints.length) {
+      return
+    }
+
+    const movableJoints = joints.map((joint, index) => {
+      const snapshot = snapshots[index]
+      if (!snapshot) {
+        return joint
+      }
+      return {
+        ...joint,
+        value: servoTicksToJointValue(snapshot.presentPosition, joint),
+      }
+    })
+
+    this.setProps({
+      ...this.props,
+      robot: {
+        ...robot,
+        movableJoints,
+      },
+    })
   }
 
   dispose() {

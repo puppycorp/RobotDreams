@@ -1,28 +1,11 @@
-[package]
-name = "RobotDreams"
-version = "0.1.0"
-edition = "2024"
-
 [workspace]
-members = [".", "crates/feetech-servo"]
+members = [
+    "core",
+    "daemon",
+    "cli",
+    "crates/feetech-servo",
+]
+resolver = "3"
 
 [workspace.dependencies]
-wgui = { git = "https://github.com/J45k4/wgui.git", rev = "3d8fbbb2abacf73e29bee43b47bdfc977837c21d" }
-
-[[bin]]
-name = "robot_dreams"
-path = "src/main.rs"
-
-[dependencies]
-clap = { version = "4", features = ["derive"] }
-libc = "0.2"
-log = "0.4"
-rapier3d = { version = "0.23", default-features = false, features = ["dim3", "f32"] }
-feetech-servo = { path = "crates/feetech-servo" }
-roxmltree = "0.20"
-serialport = "4"
-serde_json = "1"
-simple_logger = "5"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
-urdf-rs = "0.7"
-wgui = { workspace = true }
+wgui = { git = "https://github.com/J45k4/wgui.git", rev = "53e8997eba7798207304e4d3bb371e4de0e48c05" }

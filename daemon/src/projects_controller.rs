@@ -74,15 +74,6 @@ fn projects() -> Vec<ProjectCardModel> {
             "ARM",
             "#3e7f65",
         ),
-        project_card(
-            "Servo Bus Lab",
-            "Virtual firmware bridge",
-            "servo-bus-ui",
-            "Draft",
-            "Prototype",
-            "BUS",
-            "#6052a8",
-        ),
     ]
 }
 

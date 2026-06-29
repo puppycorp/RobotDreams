@@ -11,15 +11,14 @@ use feetech_servo::servo::protocol::port_handler::PortHandler;
 use feetech_servo::servo::protocol::virtual_uart::VirtualUartPort;
 use feetech_servo::servo::sim::{FeetechBusSim, FeetechServoSnapshot};
 use wgui::wui::runtime::WuiValue;
-use wgui::{WguiModel, wgui_controller};
+use wgui::{CustomComponentController, CustomComponentCtx, WguiModel, wgui_controller};
 
 use crate::{
-    BusConfig, DeviceConfig, HardwareConfig, ProjectConfig, ROBOT_SCENE_CONTROLLER_ENTRY,
-    ServoDeviceConfig, URDF_BASE_SLIDER_BASE_ID, URDF_JOINT_SLIDER_BASE_ID, UrdfViewerState,
-    WORKBENCH_REFRESH_CONTROLLER_ENTRY, apply_urdf_slider_change, reload_urdf_state,
-    robot_scene_props_with_static_scene, servo_ticks_to_slider_value, slider_value_to_servo_ticks,
-    urdf_joint_slider_range, urdf_joint_type_name, urdf_slider_value_to_units,
-    urdf_value_to_joint_units,
+    BusConfig, DeviceConfig, HardwareConfig, ProjectConfig, ServoDeviceConfig,
+    URDF_BASE_SLIDER_BASE_ID, URDF_JOINT_SLIDER_BASE_ID, UrdfViewerState, apply_urdf_slider_change,
+    reload_urdf_state, robot_scene_props_with_static_scene, servo_ticks_to_slider_value,
+    slider_value_to_servo_ticks, urdf_joint_slider_range, urdf_joint_type_name,
+    urdf_slider_value_to_units, urdf_value_to_joint_units,
 };
 
 const SCENE_SECTION_ENVIRONMENT: u32 = 1;
@@ -106,12 +105,7 @@ pub(crate) struct WorkbenchModel {
     simulation_time: String,
     gpu_label: String,
     memory_label: String,
-    robot_scene_name: String,
-    robot_scene_entry: String,
     robot_scene_props: WuiValue,
-    refresh_timer_name: String,
-    refresh_timer_entry: String,
-    refresh_timer_props: WuiValue,
     lidar_preview_name: String,
     lidar_preview_props: WuiValue,
     camera_preview_name: String,
@@ -144,11 +138,23 @@ pub(crate) struct AppController {
     urdf_state: UrdfViewerState,
     project_config: Option<ProjectConfig>,
     hardware_runtime: HardwareRuntime,
-    virtual_bus: WorkbenchVirtualBus,
+    virtual_bus: WorkbenchVirtualBusHandle,
     robot_static_scene_dirty: Cell<bool>,
     simulation_running: bool,
     selected_scene_row_id: u32,
     collapsed_scene_section_ids: Vec<u32>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct HeadlessSummary {
+    pub(crate) project_name: String,
+    pub(crate) status: String,
+    pub(crate) loaded_summary: String,
+    pub(crate) virtual_bus_running: bool,
+    pub(crate) virtual_bus_path: Option<String>,
+    pub(crate) servo_count: usize,
+    pub(crate) snapshots: serde_json::Value,
 }
 
 fn serde_json_to_wui_value(value: &serde_json::Value) -> WuiValue {
@@ -404,6 +410,9 @@ impl WorkbenchVirtualBus {
     }
 
     fn configure_from_hardware(&self, hardware_runtime: &HardwareRuntime) {
+        if self.is_running() {
+            return;
+        }
         if let Ok(mut sim) = self.sim.lock() {
             sim.set_servo_count(max_servo_count(hardware_runtime));
             for bus in &hardware_runtime.buses {
@@ -571,6 +580,157 @@ impl WorkbenchVirtualBus {
     }
 
     fn stop(&mut self) {}
+}
+
+#[derive(Clone)]
+pub(crate) struct WorkbenchVirtualBusHandle {
+    inner: Arc<Mutex<WorkbenchVirtualBus>>,
+}
+
+impl WorkbenchVirtualBusHandle {
+    pub(crate) fn new() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(WorkbenchVirtualBus::new())),
+        }
+    }
+
+    fn with_bus<T>(&self, fallback: T, f: impl FnOnce(&mut WorkbenchVirtualBus) -> T) -> T {
+        self.inner
+            .lock()
+            .map(|mut bus| f(&mut bus))
+            .unwrap_or(fallback)
+    }
+
+    pub(crate) fn is_running(&self) -> bool {
+        self.with_bus(false, |bus| bus.is_running())
+    }
+
+    pub(crate) fn path(&self) -> Option<String> {
+        self.with_bus(None, |bus| bus.path().map(str::to_string))
+    }
+
+    fn set_servo_count(&self, servo_count: u8) {
+        self.with_bus((), |bus| bus.set_servo_count(servo_count));
+    }
+
+    fn configure_from_hardware(&self, hardware_runtime: &HardwareRuntime) {
+        self.with_bus((), |bus| bus.configure_from_hardware(hardware_runtime));
+    }
+
+    fn set_target_position(&self, id: u8, target: i16) {
+        self.with_bus((), |bus| bus.set_target_position(id, target));
+    }
+
+    pub(crate) fn snapshots(&self) -> Vec<FeetechServoSnapshot> {
+        self.with_bus(Vec::new(), |bus| bus.snapshots())
+    }
+
+    fn start(&self, servo_count: u8) -> Result<String, String> {
+        self.with_bus(Err("Virtual bus lock is unavailable".to_string()), |bus| {
+            bus.start(servo_count)
+        })
+    }
+
+    pub(crate) fn stop(&self) {
+        self.with_bus((), |bus| bus.stop());
+    }
+}
+
+pub(crate) struct RobotSceneComponent {
+    virtual_bus: WorkbenchVirtualBusHandle,
+    urdf_state: UrdfViewerState,
+    hardware_runtime: HardwareRuntime,
+}
+
+impl RobotSceneComponent {
+    pub(crate) fn new(
+        virtual_bus: WorkbenchVirtualBusHandle,
+        urdf_path: Option<PathBuf>,
+        project_config: Option<ProjectConfig>,
+    ) -> Self {
+        let mut urdf_state = UrdfViewerState::new(urdf_path);
+        reload_urdf_state(&mut urdf_state);
+        let hardware_runtime = hardware_runtime_from_project(project_config.as_ref(), &urdf_state);
+        virtual_bus.configure_from_hardware(&hardware_runtime);
+        Self {
+            virtual_bus,
+            urdf_state,
+            hardware_runtime,
+        }
+    }
+
+    fn robot_scene_props_for_snapshots(
+        &self,
+        snapshots: &[FeetechServoSnapshot],
+    ) -> serde_json::Value {
+        let mut live_hardware_runtime = self.hardware_runtime.clone();
+        apply_servo_snapshots_to_hardware(&mut live_hardware_runtime, snapshots);
+
+        let mut live_urdf_state = self.urdf_state.clone();
+        apply_servo_snapshots_to_urdf(&mut live_urdf_state, &live_hardware_runtime, snapshots);
+
+        let base_translation = [
+            urdf_slider_value_to_units(live_urdf_state.base_translation_values[0]),
+            urdf_slider_value_to_units(live_urdf_state.base_translation_values[1]),
+            urdf_slider_value_to_units(live_urdf_state.base_translation_values[2]),
+        ];
+        let base_rotation = [
+            urdf_slider_value_to_units(live_urdf_state.base_rotation_values[0]),
+            urdf_slider_value_to_units(live_urdf_state.base_rotation_values[1]),
+            urdf_slider_value_to_units(live_urdf_state.base_rotation_values[2]),
+        ];
+
+        robot_scene_props_with_static_scene(
+            &live_urdf_state,
+            base_translation,
+            base_rotation,
+            false,
+        )
+    }
+}
+
+pub(crate) fn servo_snapshots_json(snapshots: &[FeetechServoSnapshot]) -> serde_json::Value {
+    serde_json::Value::Array(
+        snapshots
+            .iter()
+            .map(|snapshot| {
+                serde_json::json!({
+                    "id": snapshot.id,
+                    "mode": snapshot.mode,
+                    "torqueEnabled": snapshot.torque_enabled,
+                    "moving": snapshot.moving,
+                    "targetPosition": snapshot.target_position,
+                    "presentPosition": snapshot.present_position,
+                    "presentSpeed": snapshot.present_speed,
+                    "presentLoad": snapshot.present_load,
+                    "currentRaw": snapshot.current_raw,
+                    "temperatureC": snapshot.temperature_c,
+                    "voltageTenths": snapshot.voltage_tenths,
+                })
+            })
+            .collect(),
+    )
+}
+
+#[async_trait::async_trait]
+impl CustomComponentController for RobotSceneComponent {
+    async fn process(&mut self, ctx: CustomComponentCtx) -> anyhow::Result<()> {
+        loop {
+            if self.virtual_bus.is_running() {
+                let snapshots = self.virtual_bus.snapshots();
+                ctx.send_data(
+                    "servoSnapshots",
+                    serde_json::json!({
+                        "snapshots": servo_snapshots_json(&snapshots),
+                        "robotSceneProps": self.robot_scene_props_for_snapshots(&snapshots),
+                    }),
+                )
+                .await?;
+            }
+
+            tokio::time::sleep(Duration::from_millis(33)).await;
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -764,6 +924,105 @@ fn hardware_runtime_from_project(
     }
 
     inferred_hardware_runtime(state)
+}
+
+fn hardware_device_id(device: &HardwareDeviceRuntime) -> u32 {
+    match device {
+        HardwareDeviceRuntime::Servo(device) => device.id,
+        HardwareDeviceRuntime::Imu(device) => device.id,
+        HardwareDeviceRuntime::IoBoard(device) => device.id,
+    }
+}
+
+fn hardware_device_kind(device: &HardwareDeviceRuntime) -> &'static str {
+    match device {
+        HardwareDeviceRuntime::Servo(_) => "servo",
+        HardwareDeviceRuntime::Imu(_) => "imu",
+        HardwareDeviceRuntime::IoBoard(_) => "io_board",
+    }
+}
+
+fn hardware_device_json(device: &HardwareDeviceRuntime) -> serde_json::Value {
+    match device {
+        HardwareDeviceRuntime::Servo(device) => serde_json::json!({
+            "type": "servo",
+            "id": device.id,
+            "name": device.name,
+            "profile": device.profile,
+            "drives": {
+                "robot": device.drives_robot,
+                "joint": device.drives_joint,
+            },
+            "calibration": {
+                "zeroOffset": device.zero_offset,
+                "direction": device.direction,
+            },
+            "state": {
+                "targetPosition": device.target_position,
+                "presentPosition": device.present_position,
+                "torqueEnabled": device.torque_enabled,
+                "temperatureC": device.temperature_c,
+                "voltageV": device.voltage_v,
+            },
+        }),
+        HardwareDeviceRuntime::Imu(device) => serde_json::json!({
+            "type": "imu",
+            "id": device.id,
+            "name": device.name,
+            "profile": device.profile,
+            "mountedOn": {
+                "robot": device.mounted_robot,
+                "link": device.mounted_link,
+            },
+            "state": {
+                "orientation": [0.0, 0.0, 0.0],
+                "angularVelocity": [0.0, 0.0, 0.0],
+                "linearAcceleration": [0.0, 0.0, 0.0],
+            },
+        }),
+        HardwareDeviceRuntime::IoBoard(device) => serde_json::json!({
+            "type": "io_board",
+            "id": device.id,
+            "name": device.name,
+            "profile": device.profile,
+            "state": {
+                "digitalInputs": device.digital_inputs,
+                "digitalOutputs": device.digital_outputs,
+                "analogInputs": device.analog_inputs,
+            },
+        }),
+    }
+}
+
+fn hardware_runtime_json(hardware_runtime: &HardwareRuntime) -> serde_json::Value {
+    serde_json::json!({
+        "buses": hardware_runtime.buses.iter().map(|bus| {
+            serde_json::json!({
+                "id": bus.id,
+                "name": bus.name,
+                "transport": {
+                    "type": bus.transport_type,
+                    "path": bus.device_path,
+                    "baud": bus.baud,
+                },
+                "protocol": bus.protocol,
+                "devices": bus.devices.iter().map(hardware_device_json).collect::<Vec<_>>(),
+            })
+        }).collect::<Vec<_>>(),
+    })
+}
+
+fn slider_json(slider: WorkbenchSliderModel) -> serde_json::Value {
+    serde_json::json!({
+        "index": slider.index,
+        "label": slider.label,
+        "min": slider.min,
+        "max": slider.max,
+        "value": slider.value,
+        "displayValue": slider.display_value,
+        "velocityDisplay": slider.velocity_display,
+        "torqueDisplay": slider.torque_display,
+    })
 }
 
 fn file_label(state: &UrdfViewerState) -> String {
@@ -1753,6 +2012,27 @@ fn selected_servo_target_controls(
     }]
 }
 
+fn servo_target_controls(hardware_runtime: &HardwareRuntime) -> Vec<WorkbenchSliderModel> {
+    hardware_runtime
+        .buses
+        .iter()
+        .flat_map(|bus| bus.devices.iter())
+        .filter_map(|device| match device {
+            HardwareDeviceRuntime::Servo(servo) => Some(WorkbenchSliderModel {
+                index: servo.id,
+                label: servo.name.clone(),
+                min: 0,
+                max: 4095,
+                value: i32::from(servo.target_position.clamp(0, 4095)),
+                display_value: servo.target_position.to_string(),
+                velocity_display: format!("present {}", servo.present_position),
+                torque_display: if servo.torque_enabled { "on" } else { "off" }.to_string(),
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
 fn bus_servo_count(bus: &HardwareBusRuntime) -> u8 {
     bus.devices
         .iter()
@@ -1901,11 +2181,14 @@ fn joint_slider_servo_target(
 
 #[wgui_controller(template = "app_controller")]
 impl AppController {
-    pub(crate) fn new(urdf_path: Option<PathBuf>, project_config: Option<ProjectConfig>) -> Self {
+    pub(crate) fn new(
+        urdf_path: Option<PathBuf>,
+        project_config: Option<ProjectConfig>,
+        virtual_bus: WorkbenchVirtualBusHandle,
+    ) -> Self {
         let mut urdf_state = UrdfViewerState::new(urdf_path);
         reload_urdf_state(&mut urdf_state);
         let hardware_runtime = hardware_runtime_from_project(project_config.as_ref(), &urdf_state);
-        let virtual_bus = WorkbenchVirtualBus::new();
         virtual_bus.configure_from_hardware(&hardware_runtime);
         Self {
             urdf_state,
@@ -1970,20 +2253,12 @@ impl AppController {
             simulation_time: "00:12:48".to_string(),
             gpu_label: "GPU 72%".to_string(),
             memory_label: "Memory 4.2 GB".to_string(),
-            robot_scene_name: "robot-scene".to_string(),
-            robot_scene_entry: ROBOT_SCENE_CONTROLLER_ENTRY.to_string(),
             robot_scene_props: serde_json_to_wui_value(&robot_scene_props_with_static_scene(
                 &live_urdf_state,
                 base_translation,
                 base_rotation,
                 self.robot_static_scene_dirty.replace(false),
             )),
-            refresh_timer_name: "workbench-refresh".to_string(),
-            refresh_timer_entry: WORKBENCH_REFRESH_CONTROLLER_ENTRY.to_string(),
-            refresh_timer_props: serde_json_to_wui_value(&serde_json::json!({
-                "enabled": self.virtual_bus.is_running(),
-                "intervalMs": 250,
-            })),
             lidar_preview_name: "lidar-preview".to_string(),
             lidar_preview_props: dashboard_preview_props("lidar"),
             camera_preview_name: "camera-preview".to_string(),
@@ -2180,15 +2455,228 @@ impl AppController {
             self.refresh_from_virtual_bus();
         }
     }
+}
 
-    pub(crate) fn handle_event(&mut self, event: &wgui::ClientEvent) -> bool {
-        let wgui::ClientEvent::OnCustom(custom) = event else {
-            return false;
+impl AppController {
+    pub(crate) fn start_virtual_bus(&mut self) -> Result<Option<String>, String> {
+        let Some(bus_index) = first_virtual_bus_index(&self.hardware_runtime) else {
+            return Ok(None);
         };
-        if custom.name != "refresh" {
-            return false;
+        self.start_virtual_bus_at_index(bus_index)
+    }
+
+    fn start_virtual_bus_at_index(&mut self, bus_index: usize) -> Result<Option<String>, String> {
+        let Some(bus) = self.hardware_runtime.buses.get(bus_index) else {
+            return Ok(None);
+        };
+        if bus.transport_type != "virtual" {
+            return Err(format!("bus {} is not virtual", bus.id));
         }
+        let path = self.virtual_bus.start(bus_servo_count(bus))?;
+        if let Some(bus) = self.hardware_runtime.buses.get_mut(bus_index) {
+            bus.device_path = Some(path.clone());
+        }
+        Ok(Some(path))
+    }
+
+    pub(crate) fn start_virtual_bus_by_id(
+        &mut self,
+        bus_id: &str,
+    ) -> Result<Option<String>, String> {
+        let Some(bus_index) = self
+            .hardware_runtime
+            .buses
+            .iter()
+            .position(|bus| bus.id == bus_id)
+        else {
+            return Err(format!("unknown bus {bus_id}"));
+        };
+        self.start_virtual_bus_at_index(bus_index)
+    }
+
+    pub(crate) fn stop_virtual_bus(&mut self) {
+        self.virtual_bus.stop();
+        for bus in &mut self.hardware_runtime.buses {
+            if bus.transport_type == "virtual" {
+                bus.device_path = None;
+            }
+        }
+    }
+
+    pub(crate) fn tick_headless(&mut self) {
         self.refresh_from_virtual_bus();
-        true
+    }
+
+    pub(crate) fn headless_summary(&self) -> HeadlessSummary {
+        let snapshots = self.virtual_bus.snapshots();
+        let mut live_hardware_runtime = self.hardware_runtime.clone();
+        apply_servo_snapshots_to_hardware(&mut live_hardware_runtime, &snapshots);
+
+        let loaded_summary = self
+            .urdf_state
+            .robot
+            .as_ref()
+            .map(|robot| {
+                format!(
+                    "{} links / {} joints",
+                    robot.links.len(),
+                    robot.joints.len()
+                )
+            })
+            .unwrap_or_else(|| "No robot loaded".to_string());
+
+        HeadlessSummary {
+            project_name: project_name(self.project_config.as_ref()),
+            status: self.urdf_state.status.clone(),
+            loaded_summary,
+            virtual_bus_running: self.virtual_bus.is_running(),
+            virtual_bus_path: self.virtual_bus.path(),
+            servo_count: snapshots.len(),
+            snapshots: servo_snapshots_json(&snapshots),
+        }
+    }
+
+    pub(crate) fn project_state_json(&mut self) -> serde_json::Value {
+        self.refresh_from_virtual_bus();
+        let snapshots = self.virtual_bus.snapshots();
+        let mut live_hardware_runtime = self.hardware_runtime.clone();
+        apply_servo_snapshots_to_hardware(&mut live_hardware_runtime, &snapshots);
+
+        let robots = self
+            .project_config
+            .as_ref()
+            .map(|project| {
+                project
+                    .robots
+                    .iter()
+                    .map(|robot| {
+                        serde_json::json!({
+                            "id": robot.id,
+                            "name": robot.name,
+                            "model": {
+                                "type": robot.model.type_name,
+                                "path": robot.model.path,
+                            },
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_else(|| {
+                self.urdf_state
+                    .robot
+                    .as_ref()
+                    .map(|_| {
+                        vec![serde_json::json!({
+                            "id": "robot",
+                            "name": project_name(self.project_config.as_ref()),
+                            "model": {
+                                "type": "urdf",
+                                "path": self.urdf_state.urdf_path.as_ref().map(|path| path.display().to_string()),
+                            },
+                        })]
+                    })
+                    .unwrap_or_default()
+            });
+
+        let (links, joints, movable_joints) = self
+            .urdf_state
+            .robot
+            .as_ref()
+            .map(|robot| {
+                let mut links: Vec<_> = robot.links.keys().cloned().collect();
+                links.sort();
+                let joints = robot
+                    .joints
+                    .iter()
+                    .map(|joint| {
+                        serde_json::json!({
+                            "name": joint.name,
+                            "type": urdf_joint_type_name(joint.joint_type),
+                            "parent": joint.parent,
+                            "child": joint.child,
+                            "axis": joint.axis,
+                            "originXyz": joint.origin_xyz,
+                            "originRpy": joint.origin_rpy,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                let movable_joints = robot
+                    .movable_joint_indices
+                    .iter()
+                    .filter_map(|joint_index| robot.joints.get(*joint_index))
+                    .map(|joint| joint.name.clone())
+                    .collect::<Vec<_>>();
+                (links, joints, movable_joints)
+            })
+            .unwrap_or_default();
+
+        serde_json::json!({
+            "project": {
+                "name": project_name(self.project_config.as_ref()),
+                "format": self.project_config.as_ref().map(|project| project.format.clone()),
+                "status": self.urdf_state.status,
+            },
+            "urdf": {
+                "path": self.urdf_state.urdf_path.as_ref().map(|path| path.display().to_string()),
+                "links": links,
+                "joints": joints,
+                "movableJoints": movable_joints,
+            },
+            "robots": robots,
+            "hardware": hardware_runtime_json(&live_hardware_runtime),
+            "controls": {
+                "base": base_controls(&self.urdf_state).into_iter().map(slider_json).collect::<Vec<_>>(),
+                "joints": joint_controls(&self.urdf_state).into_iter().map(slider_json).collect::<Vec<_>>(),
+                "servos": servo_target_controls(&live_hardware_runtime).into_iter().map(slider_json).collect::<Vec<_>>(),
+            },
+            "virtualBus": {
+                "running": self.virtual_bus.is_running(),
+                "path": self.virtual_bus.path(),
+                "snapshots": servo_snapshots_json(&snapshots),
+            },
+        })
+    }
+
+    pub(crate) fn project_items_json(&mut self) -> serde_json::Value {
+        self.refresh_from_virtual_bus();
+        let mut items = vec![
+            serde_json::json!({"id": "project", "type": "project", "name": project_name(self.project_config.as_ref())}),
+            serde_json::json!({"id": "urdf", "type": "urdf", "name": self.urdf_state.urdf_path.as_ref().map(|path| path.display().to_string()).unwrap_or_else(|| "URDF".to_string())}),
+            serde_json::json!({"id": "hardware", "type": "hardware", "name": "Hardware"}),
+            serde_json::json!({"id": "virtual-bus", "type": "virtualBus", "name": "Virtual Bus"}),
+            serde_json::json!({"id": "snapshots", "type": "snapshots", "name": "Servo Snapshots"}),
+        ];
+
+        for robot in self.project_state_json()["robots"]
+            .as_array()
+            .into_iter()
+            .flatten()
+        {
+            if let Some(id) = robot.get("id").and_then(|id| id.as_str()) {
+                items.push(serde_json::json!({
+                    "id": format!("robot:{id}"),
+                    "type": "robot",
+                    "name": robot.get("name").and_then(|name| name.as_str()).unwrap_or(id),
+                }));
+            }
+        }
+
+        for bus in &self.hardware_runtime.buses {
+            items.push(serde_json::json!({
+                "id": format!("bus:{}", bus.id),
+                "type": "bus",
+                "name": bus.name,
+            }));
+            for device in &bus.devices {
+                let device_id = hardware_device_id(device);
+                items.push(serde_json::json!({
+                    "id": format!("device:{}:{device_id}", bus.id),
+                    "type": hardware_device_kind(device),
+                    "name": device_row_label(device),
+                }));
+            }
+        }
+
+        serde_json::Value::Array(items)
     }
 }

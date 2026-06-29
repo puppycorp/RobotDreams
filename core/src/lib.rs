@@ -10,6 +10,9 @@ use std::thread;
 use crate::physics::PhysicsWorld;
 use crate::urdf::{UrdfModel, load_urdf};
 
+pub mod physics;
+pub mod urdf;
+
 pub struct RobotDreams {
     physics: PhysicsWorld,
     models: Vec<UrdfModel>,
