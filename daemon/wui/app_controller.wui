@@ -17,10 +17,6 @@
     <Link href="/" text="Projects" />
     <Text value="/" color="#7f8b9b" />
     <Text value={state.project_name} color="#f4f8ff" grow=1 />
-    <Text value={state.simulation_label} color="#43d17a" />
-    <Text value={state.simulation_time} color="#aeb8c4" />
-    <Text value={state.gpu_label} color="#aeb8c4" />
-    <Text value="A. Engineer" color="#f4f8ff" />
   </HStack>
 
   <HStack

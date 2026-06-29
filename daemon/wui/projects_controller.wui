@@ -14,9 +14,6 @@
   >
     <Text value="RobotDreams" color="#f4f8ff" minWidth=170 />
     <Text value="Projects" color="#f4f8ff" grow=1 />
-    <Text value="Simulation" color="#43d17a" />
-    <Text value="00:12:48" color="#aeb8c4" />
-    <Text value="A. Engineer" color="#f4f8ff" />
   </HStack>
 
   <HStack

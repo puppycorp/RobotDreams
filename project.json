@@ -83,14 +83,14 @@
       },
       {
         "id": "wrist_camera",
-        "name": "Wrist Camera",
+        "name": "TCP Camera",
         "type": "camera",
         "icon": "CAM",
         "mountedOn": {
           "robot": "puppyarm",
-          "link": "part_1_10"
+          "link": "part_1_1"
         },
-        "position": [0.0, 0.0, 0.035],
+        "position": [0.0, 0.0, 0.0],
         "rotation": [0.0, 0.0, 0.0],
         "fov": 70.0,
         "rate": "30 Hz",

@@ -117,8 +117,6 @@ pub(crate) struct WorkbenchSensorPreviewModel {
 #[derive(Debug, Clone, WguiModel)]
 pub(crate) struct WorkbenchModel {
     project_name: String,
-    simulation_label: String,
-    simulation_time: String,
     gpu_label: String,
     cpu_label: String,
     memory_label: String,
@@ -159,7 +157,6 @@ pub(crate) struct AppController {
     hardware_runtime: HardwareRuntime,
     virtual_bus: WorkbenchVirtualBusHandle,
     robot_static_scene_dirty: Cell<bool>,
-    simulation_running: bool,
     selected_scene_row_id: u32,
     collapsed_scene_section_ids: Vec<u32>,
     cpu_sample: Cell<Option<CpuSample>>,
@@ -2762,7 +2759,6 @@ impl AppController {
             hardware_runtime,
             virtual_bus,
             robot_static_scene_dirty: Cell::new(true),
-            simulation_running: true,
             selected_scene_row_id: SCENE_ROW_ROBOT,
             collapsed_scene_section_ids: vec![SCENE_SECTION_LINKS, SCENE_SECTION_JOINTS],
             cpu_sample: Cell::new(read_cpu_sample()),
@@ -2832,12 +2828,6 @@ impl AppController {
 
         WorkbenchModel {
             project_name: project_name(self.project_config.as_ref()),
-            simulation_label: if self.simulation_running {
-                "Simulation".to_string()
-            } else {
-                "Paused".to_string()
-            },
-            simulation_time: "00:12:48".to_string(),
             gpu_label: system_gpu_label(&self.gpu_metric),
             cpu_label: system_cpu_label(&self.cpu_sample),
             memory_label: system_memory_label(),
@@ -2902,20 +2892,13 @@ impl AppController {
         }
     }
 
-    pub(crate) fn play_simulation(&mut self) {
-        self.simulation_running = true;
-    }
+    pub(crate) fn play_simulation(&mut self) {}
 
-    pub(crate) fn pause_simulation(&mut self) {
-        self.simulation_running = false;
-    }
+    pub(crate) fn pause_simulation(&mut self) {}
 
-    pub(crate) fn stop_simulation(&mut self) {
-        self.simulation_running = false;
-    }
+    pub(crate) fn stop_simulation(&mut self) {}
 
     pub(crate) fn reset_simulation(&mut self) {
-        self.simulation_running = false;
         self.virtual_bus.stop();
         reload_urdf_state(&mut self.urdf_state);
         self.hardware_runtime =
