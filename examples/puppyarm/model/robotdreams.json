@@ -30,19 +30,19 @@
     "servos": [
       {
         "id": 1,
-        "joint": "revolute_1"
+        "joint": "revolute_2_1"
       },
       {
         "id": 2,
-        "joint": "revolute_1_1"
-      },
-      {
-        "id": 3,
         "joint": "revolute_1_2"
       },
       {
-        "id": 4,
+        "id": 3,
         "joint": "revolute_1_3"
+      },
+      {
+        "id": 4,
+        "joint": "revolute_1_1"
       }
     ]
   },

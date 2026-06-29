@@ -436,14 +436,27 @@ const vectorFromArray = (value) => {
   return new THREE.Vector3(finite(value[0]), finite(value[1]), finite(value[2]))
 }
 
+const axisAngleFromArray = (value) => {
+  if (!Array.isArray(value) || value.length < 4) return null
+  const axis = new THREE.Vector3(finite(value[0]), finite(value[1]), finite(value[2]))
+  if (axis.lengthSq() < 0.000001) axis.set(0, 0, 1)
+  axis.normalize()
+  return { axis, angle: finite(value[3]) }
+}
+
 const applyTransformValue = (object, transform) => {
   if (!object || !isObject(transform)) return
   const position = vectorFromArray(transform.position)
   const rotation = vectorFromArray(transform.rotation)
   const scale = vectorFromArray(transform.scale)
+  const axisAngle = axisAngleFromArray(transform.axisAngle)
 
   if (position) object.position.copy(position)
-  if (rotation) object.rotation.set(rotation.x, rotation.y, rotation.z)
+  if (axisAngle) {
+    object.quaternion.setFromAxisAngle(axisAngle.axis, axisAngle.angle)
+  } else if (rotation) {
+    object.rotation.set(rotation.x, rotation.y, rotation.z)
+  }
   if (typeof transform.rotationOrder === "string" && object.rotation) {
     object.rotation.order = transform.rotationOrder
   }

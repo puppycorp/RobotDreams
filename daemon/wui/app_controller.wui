@@ -323,7 +323,7 @@
                 value={servo.value}
                 step=1
                 onSliderChange="SetSelectedServoTarget"
-                arg={servo.index}
+                arg={servo.action_arg}
               />
             </VStack>
           </For>
@@ -343,7 +343,16 @@
           <For each={state.joint_controls} itemAs="joint" key={joint.index}>
             <VStack spacing=2>
               <HStack spacing=5>
-                <Text value={joint.label} color="#dce7f3" grow=1 breakWords=true />
+                <Button
+                  text={joint.label}
+                  onClick="SelectJoint"
+                  arg={joint.action_arg}
+                  height=24
+                  backgroundColor="#0e1622"
+                  border="1px solid transparent"
+                  color="#dce7f3"
+                />
+                <Text value="" grow=1 />
                 <Text value={joint.display_value} color="#55a7ff" minWidth=56 textAlign="right" />
                 <Text value={joint.velocity_display} color="#dce7f3" minWidth=52 textAlign="right" />
                 <Text value={joint.torque_display} color="#dce7f3" minWidth=48 textAlign="right" />

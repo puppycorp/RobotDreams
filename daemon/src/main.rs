@@ -138,6 +138,7 @@ pub(crate) struct ProjectRobotConfig {
     pub(crate) id: String,
     pub(crate) name: String,
     pub(crate) model: ProjectRobotModelConfig,
+    pub(crate) joint_names: HashMap<String, String>,
 }
 
 #[derive(Clone, Debug)]
@@ -408,6 +409,36 @@ fn parse_project_robot_model_config(value: &serde_json::Value) -> Option<Project
     })
 }
 
+fn parse_project_joint_names(value: &serde_json::Value) -> HashMap<String, String> {
+    let mut joint_names = HashMap::new();
+
+    if let Some(names) = value.get("jointNames").and_then(|names| names.as_object()) {
+        for (urdf_name, semantic_name) in names {
+            if let Some(semantic_name) = semantic_name.as_str() {
+                joint_names.insert(urdf_name.clone(), semantic_name.to_string());
+            }
+        }
+    }
+
+    if let Some(joints) = value.get("joints").and_then(|joints| joints.as_array()) {
+        for joint in joints {
+            let Some(urdf_name) =
+                json_string_path(joint, &["urdf"]).or_else(|| json_string_path(joint, &["joint"]))
+            else {
+                continue;
+            };
+            let Some(semantic_name) =
+                json_string_path(joint, &["name"]).or_else(|| json_string_path(joint, &["label"]))
+            else {
+                continue;
+            };
+            joint_names.insert(urdf_name.to_string(), semantic_name.to_string());
+        }
+    }
+
+    joint_names
+}
+
 fn parse_project_robot_config(value: &serde_json::Value) -> Option<ProjectRobotConfig> {
     let id = json_string_path(value, &["id"])?.to_string();
     let name = json_string_path(value, &["name"])
@@ -417,6 +448,7 @@ fn parse_project_robot_config(value: &serde_json::Value) -> Option<ProjectRobotC
         id,
         name,
         model: parse_project_robot_model_config(value)?,
+        joint_names: parse_project_joint_names(value),
     })
 }
 
@@ -1047,6 +1079,26 @@ fn reload_urdf_state(state: &mut UrdfViewerState) {
     }
 }
 
+pub(crate) fn project_joint_name<'a>(
+    project_config: Option<&'a ProjectConfig>,
+    urdf_joint_name: &str,
+) -> Option<&'a str> {
+    project_config?
+        .robots
+        .iter()
+        .find_map(|robot| robot.joint_names.get(urdf_joint_name).map(String::as_str))
+}
+
+pub(crate) fn joint_display_label(
+    project_config: Option<&ProjectConfig>,
+    urdf_joint_name: &str,
+) -> String {
+    match project_joint_name(project_config, urdf_joint_name) {
+        Some(name) if name != urdf_joint_name => format!("{name} ({urdf_joint_name})"),
+        _ => urdf_joint_name.to_string(),
+    }
+}
+
 fn axis_to_euler(axis: [f32; 3], value: f32) -> [f32; 3] {
     let eps = 0.2;
     if axis[0].abs() > 1.0 - eps && axis[1].abs() < eps && axis[2].abs() < eps {
@@ -1360,6 +1412,16 @@ fn transform_vec3_json(value: [f32; 3]) -> serde_json::Value {
     serde_json::json!([value[0], value[1], value[2]])
 }
 
+fn transform_axis_angle_json(axis: [f32; 3], angle: f32) -> serde_json::Value {
+    let length = (axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]).sqrt();
+    let axis = if length > 0.0001 {
+        [axis[0] / length, axis[1] / length, axis[2] / length]
+    } else {
+        [0.0, 0.0, 1.0]
+    };
+    serde_json::json!([axis[0], axis[1], axis[2], angle])
+}
+
 fn insert_transform(
     transforms: &mut serde_json::Map<String, serde_json::Value>,
     id: u32,
@@ -1380,6 +1442,20 @@ fn insert_transform(
             serde_json::Value::String(rotation_order.to_string()),
         );
     }
+    transforms.insert(id.to_string(), serde_json::Value::Object(transform));
+}
+
+fn insert_axis_angle_transform(
+    transforms: &mut serde_json::Map<String, serde_json::Value>,
+    id: u32,
+    axis: [f32; 3],
+    angle: f32,
+) {
+    let mut transform = serde_json::Map::new();
+    transform.insert(
+        "axisAngle".to_string(),
+        transform_axis_angle_json(axis, angle),
+    );
     transforms.insert(id.to_string(), serde_json::Value::Object(transform));
 }
 
@@ -1405,12 +1481,11 @@ fn collect_dynamic_link_transforms(
             let unit_value = urdf_value_to_joint_units(joint, joint_value);
             match joint.joint_type {
                 UrdfJointType::Revolute | UrdfJointType::Continuous => {
-                    insert_transform(
+                    insert_axis_angle_transform(
                         transforms,
                         motion_group_id,
-                        None,
-                        Some(axis_to_euler(joint.axis, unit_value)),
-                        Some(URDF_ROTATION_ORDER),
+                        joint.axis,
+                        unit_value,
                     );
                 }
                 UrdfJointType::Prismatic => {
@@ -1555,6 +1630,7 @@ fn robot_static_scene_key(state: &UrdfViewerState) -> Option<String> {
 
 pub(crate) fn robot_scene_props_with_static_scene(
     state: &UrdfViewerState,
+    project_config: Option<&ProjectConfig>,
     base_translation: [f32; 3],
     base_rotation: [f32; 3],
     include_static_scene: bool,
@@ -1590,6 +1666,8 @@ pub(crate) fn robot_scene_props_with_static_scene(
                 let slider_value = state.joint_values.get(*joint_index).copied().unwrap_or(0);
                 Some(serde_json::json!({
                     "name": joint.name,
+                    "displayName": joint_display_label(project_config, &joint.name),
+                    "semanticName": project_joint_name(project_config, &joint.name),
                     "type": urdf_joint_type_name(joint.joint_type),
                     "value": urdf_value_to_joint_units(joint, slider_value),
                     "axis": joint.axis,

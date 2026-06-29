@@ -9,6 +9,12 @@
       "model": {
         "type": "urdf",
         "path": "model/final/urdf/final.urdf"
+      },
+      "jointNames": {
+        "revolute_2_1": "yaw",
+        "revolute_1_1": "wrist",
+        "revolute_1_2": "shoulder",
+        "revolute_1_3": "elbow"
       }
     }
   ],
@@ -30,7 +36,7 @@
             "profile": "ST3215",
             "drives": {
               "robot": "puppyarm",
-              "joint": "revolute_1"
+              "joint": "revolute_2_1"
             },
             "calibration": {
               "zeroOffset": 2048,
@@ -44,7 +50,7 @@
             "profile": "ST3215",
             "drives": {
               "robot": "puppyarm",
-              "joint": "revolute_1_1"
+              "joint": "revolute_1_2"
             },
             "calibration": {
               "zeroOffset": 2048,
@@ -58,7 +64,7 @@
             "profile": "ST3215",
             "drives": {
               "robot": "puppyarm",
-              "joint": "revolute_1_2"
+              "joint": "revolute_1_3"
             },
             "calibration": {
               "zeroOffset": 2048,
@@ -72,7 +78,7 @@
             "profile": "ST3215",
             "drives": {
               "robot": "puppyarm",
-              "joint": "revolute_1_3"
+              "joint": "revolute_1_1"
             },
             "calibration": {
               "zeroOffset": 2048,

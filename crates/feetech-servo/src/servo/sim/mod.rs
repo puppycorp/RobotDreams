@@ -390,6 +390,7 @@ impl FeetechBusSim {
             return false;
         };
         let target = target.clamp(0, 4095) as u16;
+        servo.registers[REG_MODE] = 0;
         write_u16_word(&mut servo.registers, REG_TARGET_POS, target);
         true
     }
