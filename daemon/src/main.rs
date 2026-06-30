@@ -1931,17 +1931,25 @@ fn collect_dynamic_link_transforms(
     let link = robot.links.get(link_name)?;
     *id_gen += 1;
     *id_gen += (link.visuals.len() as u32) * 4;
-    *id_gen += project_config
-        .map(|project_config| {
-            project_config
-                .scene
-                .cameras
-                .iter()
-                .filter(|camera| camera.mounted_link == link_name)
-                .count() as u32
-                * 7
-        })
-        .unwrap_or_default();
+    if let Some(project_config) = project_config {
+        for camera in project_config
+            .scene
+            .cameras
+            .iter()
+            .filter(|camera| camera.mounted_link == link_name)
+        {
+            *id_gen += 1;
+            let camera_group_id = *id_gen;
+            insert_transform(
+                transforms,
+                camera_group_id,
+                Some(camera.position),
+                Some(camera.rotation),
+                Some(URDF_ROTATION_ORDER),
+            );
+            *id_gen += 6;
+        }
+    }
 
     if let Some(child_joint_indices) = robot.children_by_parent.get(link_name) {
         for joint_index in child_joint_indices {
@@ -2291,12 +2299,10 @@ fn project_scene_cameras_key(project_config: Option<&ProjectConfig>) -> String {
         .iter()
         .map(|camera| {
             format!(
-                "{}:{}:{}:{:?}:{:?}:{}:{}:{:?}",
+                "{}:{}:{}:{}:{}:{:?}",
                 camera.id,
                 camera.mounted_robot,
                 camera.mounted_link,
-                camera.position,
-                camera.rotation,
                 camera.fov_deg,
                 camera.rate,
                 camera.resolution

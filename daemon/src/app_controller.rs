@@ -3271,7 +3271,6 @@ impl AppController {
             }
         }
         self.project_config_dirty.set(true);
-        self.robot_static_scene_dirty.set(true);
     }
 
     pub(crate) fn save_project(&mut self) {
