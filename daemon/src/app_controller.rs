@@ -157,6 +157,7 @@ pub(crate) struct AppController {
     urdf_state: UrdfViewerState,
     project_config: RefCell<Option<ProjectConfig>>,
     project_config_modified: Cell<Option<SystemTime>>,
+    project_config_pending_save_at: Cell<Option<Instant>>,
     hardware_runtime: HardwareRuntime,
     virtual_bus: WorkbenchVirtualBusHandle,
     robot_static_scene_dirty: Cell<bool>,
@@ -2888,6 +2889,7 @@ impl AppController {
             urdf_state,
             project_config: RefCell::new(project_config),
             project_config_modified: Cell::new(project_config_modified),
+            project_config_pending_save_at: Cell::new(None),
             hardware_runtime,
             virtual_bus,
             robot_static_scene_dirty: Cell::new(true),
@@ -2899,6 +2901,9 @@ impl AppController {
     }
 
     fn reload_project_config_if_changed(&self) {
+        if self.project_config_pending_save_at.get().is_some() {
+            return;
+        }
         let manifest_path = self
             .project_config
             .borrow()
@@ -2922,7 +2927,45 @@ impl AppController {
         self.robot_static_scene_dirty.set(true);
     }
 
+    fn flush_project_config_if_due(&self) {
+        let Some(pending_at) = self.project_config_pending_save_at.get() else {
+            return;
+        };
+        if pending_at.elapsed() < Duration::from_millis(350) {
+            return;
+        }
+
+        let Some((manifest_path, cameras)) = self
+            .project_config
+            .borrow()
+            .as_ref()
+            .map(|project| (project.manifest_path.clone(), project.scene.cameras.clone()))
+        else {
+            self.project_config_pending_save_at.set(None);
+            return;
+        };
+
+        if let Err(err) = update_project_manifest_json(&manifest_path, |json| {
+            for (index, camera) in cameras.iter().enumerate() {
+                set_project_camera_transform_json(json, index, camera)?;
+            }
+            Ok(())
+        }) {
+            log::warn!("failed to persist project manifest: {err}");
+            return;
+        }
+
+        self.project_config_modified.set(
+            manifest_path
+                .metadata()
+                .ok()
+                .and_then(|metadata| metadata.modified().ok()),
+        );
+        self.project_config_pending_save_at.set(None);
+    }
+
     pub(crate) fn state(&self) -> WorkbenchModel {
+        self.flush_project_config_if_due();
         self.reload_project_config_if_changed();
         let project_config_borrow = self.project_config.borrow();
         let project_config = project_config_borrow.as_ref();
@@ -3215,7 +3258,7 @@ impl AppController {
         let camera_index = (arg / 6) as usize;
         let axis = (arg % 6) as usize;
         let scalar = value as f32 / crate::URDF_VALUE_SCALE;
-        let (manifest_path, camera) = {
+        {
             let mut project_config = self.project_config.borrow_mut();
             let Some(project_config) = project_config.as_mut() else {
                 return;
@@ -3228,20 +3271,9 @@ impl AppController {
             } else {
                 camera.rotation[axis - 3] = scalar;
             }
-            (project_config.manifest_path.clone(), camera.clone())
-        };
-
-        if let Err(err) = update_project_manifest_json(&manifest_path, |json| {
-            set_project_camera_transform_json(json, camera_index, &camera)
-        }) {
-            log::warn!("failed to persist camera transform: {err}");
         }
-        self.project_config_modified.set(
-            manifest_path
-                .metadata()
-                .ok()
-                .and_then(|metadata| metadata.modified().ok()),
-        );
+        self.project_config_pending_save_at
+            .set(Some(Instant::now()));
         self.robot_static_scene_dirty.set(true);
     }
 }
