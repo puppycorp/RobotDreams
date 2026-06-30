@@ -1,152 +1,194 @@
 {
   "format": "robotdreams.project.v1",
-  "name": "PuppyArm",
-  "modelProfile": "model/robotdreams.json",
-  "robots": [
-    {
-      "id": "puppyarm",
-      "name": "PuppyArm",
-      "model": {
-        "type": "urdf",
-        "path": "model/final/urdf/final.urdf"
-      },
-      "base": {
-        "translation": [0.0, 0.154023, 0.0]
-      },
-      "jointNames": {
-        "revolute_2_1": "yaw",
-        "revolute_1_1": "wrist",
-        "revolute_1_2": "shoulder",
-        "revolute_1_3": "elbow"
-      }
-    }
-  ],
-  "scene": {
-    "objects": [
-      {
-        "id": "floor_5m",
-        "name": "Floor 5m",
-        "type": "floor",
-        "icon": "PLN",
-        "shape": "box",
-        "size": [5.0, 0.02, 5.0],
-        "position": [0.0, -0.011, 0.0],
-        "color": "#162331",
-        "includeInFit": false
-      },
-      {
-        "id": "trashbin",
-        "name": "Trash Bin",
-        "type": "container",
-        "icon": "BIN",
-        "asset": "../trashbin.gltf",
-        "position": [0.38, 0.0, -0.28],
-        "rotation": [-1.5707964, 0.0, 0.0]
-      }
-    ],
-    "cameras": [
-      {
-        "id": "overhead_camera",
-        "name": "Overhead Camera",
-        "type": "camera",
-        "icon": "CAM",
-        "mountedOn": {
-          "robot": "puppyarm",
-          "link": "root"
-        },
-        "position": [0.0, 0.0, 0.65],
-        "rotation": [0.0, 0.0, 0.0],
-        "fov": 62.0,
-        "rate": "30 Hz",
-        "resolution": [640, 480]
-      },
-      {
-        "id": "wrist_camera",
-        "name": "TCP Camera",
-        "type": "camera",
-        "icon": "CAM",
-        "mountedOn": {
-          "robot": "puppyarm",
-          "link": "part_1_1"
-        },
-        "position": [-0.05, 0.0, 0.02],
-        "rotation": [0.0, 3.1415927, 3.1415927],
-        "fov": 70.0,
-        "rate": "30 Hz",
-        "resolution": [640, 480]
-      }
-    ]
-  },
   "hardware": {
     "buses": [
       {
-        "id": "main_bus",
-        "name": "Main Serial Bus",
-        "transport": {
-          "type": "virtual",
-          "baud": 1000000
-        },
-        "protocol": "feetech",
         "devices": [
           {
-            "type": "servo",
+            "calibration": {
+              "direction": 1,
+              "zeroOffset": 2048
+            },
+            "drives": {
+              "joint": "revolute_2_1",
+              "robot": "puppyarm"
+            },
             "id": 1,
             "name": "Yaw Servo",
             "profile": "ST3215",
-            "drives": {
-              "robot": "puppyarm",
-              "joint": "revolute_2_1"
-            },
-            "calibration": {
-              "zeroOffset": 2048,
-              "direction": 1
-            }
+            "type": "servo"
           },
           {
-            "type": "servo",
+            "calibration": {
+              "direction": -1,
+              "zeroOffset": 2048
+            },
+            "drives": {
+              "joint": "revolute_1_2",
+              "robot": "puppyarm"
+            },
             "id": 2,
             "name": "Shoulder Servo",
             "profile": "ST3215",
-            "drives": {
-              "robot": "puppyarm",
-              "joint": "revolute_1_2"
-            },
-            "calibration": {
-              "zeroOffset": 2048,
-              "direction": -1
-            }
+            "type": "servo"
           },
           {
-            "type": "servo",
+            "calibration": {
+              "direction": 1,
+              "zeroOffset": 2048
+            },
+            "drives": {
+              "joint": "revolute_1_3",
+              "robot": "puppyarm"
+            },
             "id": 3,
             "name": "Elbow Servo",
             "profile": "ST3215",
-            "drives": {
-              "robot": "puppyarm",
-              "joint": "revolute_1_3"
-            },
-            "calibration": {
-              "zeroOffset": 2048,
-              "direction": 1
-            }
+            "type": "servo"
           },
           {
-            "type": "servo",
+            "calibration": {
+              "direction": 1,
+              "zeroOffset": 2048
+            },
+            "drives": {
+              "joint": "revolute_1_1",
+              "robot": "puppyarm"
+            },
             "id": 4,
             "name": "Wrist Servo",
             "profile": "ST3215",
-            "drives": {
-              "robot": "puppyarm",
-              "joint": "revolute_1_1"
-            },
-            "calibration": {
-              "zeroOffset": 2048,
-              "direction": 1
-            }
+            "type": "servo"
           }
-        ]
+        ],
+        "id": "main_bus",
+        "name": "Main Serial Bus",
+        "protocol": "feetech",
+        "transport": {
+          "baud": 1000000,
+          "type": "virtual"
+        }
       }
     ]
   },
-  "notes": "Git-friendly RobotDreams project manifest for the local demo PuppyArm model."
+  "modelProfile": "model/robotdreams.json",
+  "name": "PuppyArm",
+  "notes": "Git-friendly RobotDreams project manifest for the local demo PuppyArm model.",
+  "robots": [
+    {
+      "base": {
+        "translation": [
+          0.0,
+          0.154023,
+          0.0
+        ]
+      },
+      "id": "puppyarm",
+      "jointNames": {
+        "revolute_1_1": "wrist",
+        "revolute_1_2": "shoulder",
+        "revolute_1_3": "elbow",
+        "revolute_2_1": "yaw"
+      },
+      "model": {
+        "path": "model/final/urdf/final.urdf",
+        "type": "urdf"
+      },
+      "name": "PuppyArm"
+    }
+  ],
+  "scene": {
+    "cameras": [
+      {
+        "fov": 62.0,
+        "icon": "CAM",
+        "id": "overhead_camera",
+        "mountedOn": {
+          "link": "root",
+          "robot": "puppyarm"
+        },
+        "name": "Overhead Camera",
+        "position": [
+          0.0,
+          0.0,
+          0.6499999761581421
+        ],
+        "rate": "30 Hz",
+        "resolution": [
+          640,
+          480
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "type": "camera"
+      },
+      {
+        "fov": 70.0,
+        "icon": "CAM",
+        "id": "wrist_camera",
+        "mountedOn": {
+          "link": "part_1_1",
+          "robot": "puppyarm"
+        },
+        "name": "TCP Camera",
+        "position": [
+          -0.0430000014603138,
+          0.0,
+          0.019999999552965164
+        ],
+        "rate": "30 Hz",
+        "resolution": [
+          640,
+          480
+        ],
+        "rotation": [
+          0.0,
+          3.1415927410125732,
+          3.1415927410125732
+        ],
+        "type": "camera"
+      }
+    ],
+    "objects": [
+      {
+        "color": "#162331",
+        "icon": "PLN",
+        "id": "floor_5m",
+        "includeInFit": false,
+        "name": "Floor 5m",
+        "position": [
+          0.0,
+          -0.011,
+          0.0
+        ],
+        "shape": "box",
+        "size": [
+          5.0,
+          0.02,
+          5.0
+        ],
+        "type": "floor"
+      },
+      {
+        "asset": "../trashbin.gltf",
+        "icon": "BIN",
+        "id": "trashbin",
+        "name": "Trash Bin",
+        "position": [
+          0.38,
+          0.0,
+          -0.28
+        ],
+        "rotation": [
+          -1.5707964,
+          0.0,
+          0.0
+        ],
+        "type": "container"
+      }
+    ]
+  }
 }
