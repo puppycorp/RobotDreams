@@ -69,8 +69,8 @@
           "robot": "puppyarm",
           "link": "part_1_1"
         },
-        "position": [0.0, 0.0, -0.2],
-        "rotation": [0.0, 0.0, 0.0],
+        "position": [-0.05, 0.0, 0.02],
+        "rotation": [0.0, 3.1415927, 3.1415927],
         "fov": 70.0,
         "rate": "30 Hz",
         "resolution": [640, 480]
