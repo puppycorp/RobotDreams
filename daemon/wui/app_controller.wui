@@ -33,6 +33,14 @@
     <Button text="Pause" onClick="PauseSimulation" backgroundColor="#111c2b" border="1px solid #26364d" color="#dce7f3" height=36 />
     <Button text="Stop" onClick="StopSimulation" backgroundColor="#111c2b" border="1px solid #26364d" color="#dce7f3" height=36 />
     <Button text="Reset" onClick="ResetSimulation" backgroundColor="#111c2b" border="1px solid #26364d" color="#dce7f3" height=36 />
+    <Button
+      text={state.project_save_label}
+      onClick="SaveProject"
+      backgroundColor={state.project_dirty ? "#1267c8" : "#111c2b"}
+      border={state.project_dirty ? "1px solid #2a8dff" : "1px solid #26364d"}
+      color="#f4f8ff"
+      height=36
+    />
     <Text value="" grow=1 />
   </HStack>
 
