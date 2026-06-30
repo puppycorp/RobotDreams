@@ -43,6 +43,38 @@
         "position": [0.38, 0.0, -0.28],
         "rotation": [-1.5707964, 0.0, 0.0]
       }
+    ],
+    "cameras": [
+      {
+        "id": "overhead_camera",
+        "name": "Overhead Camera",
+        "type": "camera",
+        "icon": "CAM",
+        "mountedOn": {
+          "robot": "puppyarm",
+          "link": "root"
+        },
+        "position": [0.0, 0.0, 0.65],
+        "rotation": [0.0, 0.0, 0.0],
+        "fov": 62.0,
+        "rate": "30 Hz",
+        "resolution": [640, 480]
+      },
+      {
+        "id": "wrist_camera",
+        "name": "TCP Camera",
+        "type": "camera",
+        "icon": "CAM",
+        "mountedOn": {
+          "robot": "puppyarm",
+          "link": "part_1_1"
+        },
+        "position": [0.0, 0.0, -0.2],
+        "rotation": [0.0, 0.0, 0.0],
+        "fov": 70.0,
+        "rate": "30 Hz",
+        "resolution": [640, 480]
+      }
     ]
   },
   "hardware": {
