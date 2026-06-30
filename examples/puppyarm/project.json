@@ -10,6 +10,9 @@
         "type": "urdf",
         "path": "model/final/urdf/final.urdf"
       },
+      "base": {
+        "translation": [0.0, 0.154023, 0.0]
+      },
       "jointNames": {
         "revolute_2_1": "yaw",
         "revolute_1_1": "wrist",
@@ -18,6 +21,30 @@
       }
     }
   ],
+  "scene": {
+    "objects": [
+      {
+        "id": "floor_5m",
+        "name": "Floor 5m",
+        "type": "floor",
+        "icon": "PLN",
+        "shape": "box",
+        "size": [5.0, 0.02, 5.0],
+        "position": [0.0, -0.011, 0.0],
+        "color": "#162331",
+        "includeInFit": false
+      },
+      {
+        "id": "trashbin",
+        "name": "Trash Bin",
+        "type": "container",
+        "icon": "BIN",
+        "asset": "../trashbin.gltf",
+        "position": [0.38, 0.0, -0.28],
+        "rotation": [-1.5707964, 0.0, 0.0]
+      }
+    ]
+  },
   "hardware": {
     "buses": [
       {
