@@ -20,6 +20,20 @@ struct Cli {
     #[arg(long, default_value = DEFAULT_SOCKET)]
     socket: PathBuf,
 
+    #[arg(
+        long,
+        default_value = "project.json",
+        help = "Project to open if a CLI request needs to auto-start the daemon"
+    )]
+    project: PathBuf,
+
+    #[arg(
+        long,
+        default_value = "127.0.0.1:8345",
+        help = "Daemon web bind address used when auto-starting the daemon"
+    )]
+    daemon_bind: String,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -262,6 +276,21 @@ async fn open_project(socket: &Path, path: &Path, bind: &str) -> Result<DaemonRe
         Err(_) => {
             start_daemon(socket, path, bind).await?;
             send_request(socket, &request).await
+        }
+    }
+}
+
+async fn send_request_or_start(
+    socket: &Path,
+    request: &DaemonRequest,
+    project_path: &Path,
+    bind: &str,
+) -> Result<DaemonResponse> {
+    match send_request(socket, request).await {
+        Ok(response) => Ok(response),
+        Err(_) => {
+            start_daemon(socket, project_path, bind).await?;
+            send_request(socket, request).await
         }
     }
 }
@@ -660,7 +689,15 @@ async fn main() -> Result<()> {
             print_response(response)?;
         }
         Command::Status => {
-            print_response(send_request(&cli.socket, &DaemonRequest::Status).await?)?;
+            print_response(
+                send_request_or_start(
+                    &cli.socket,
+                    &DaemonRequest::Status,
+                    &cli.project,
+                    &cli.daemon_bind,
+                )
+                .await?,
+            )?;
         }
         Command::Close => {
             print_response(send_request(&cli.socket, &DaemonRequest::Close).await?)?;
@@ -669,22 +706,46 @@ async fn main() -> Result<()> {
             render_frame(&cli.socket, args).await?;
         }
         Command::Bus(BusCommand::Start) => {
-            print_response(send_request(&cli.socket, &DaemonRequest::BusStart).await?)?;
+            print_response(
+                send_request_or_start(
+                    &cli.socket,
+                    &DaemonRequest::BusStart,
+                    &cli.project,
+                    &cli.daemon_bind,
+                )
+                .await?,
+            )?;
         }
         Command::Bus(BusCommand::Stop) => {
-            print_response(send_request(&cli.socket, &DaemonRequest::BusStop).await?)?;
+            print_response(
+                send_request_or_start(
+                    &cli.socket,
+                    &DaemonRequest::BusStop,
+                    &cli.project,
+                    &cli.daemon_bind,
+                )
+                .await?,
+            )?;
         }
         Command::Project(ProjectCommand::List(args)) => {
             print_project_data(
-                send_request(&cli.socket, &DaemonRequest::ProjectList).await?,
+                send_request_or_start(
+                    &cli.socket,
+                    &DaemonRequest::ProjectList,
+                    &cli.project,
+                    &cli.daemon_bind,
+                )
+                .await?,
                 args.json,
             )?;
         }
         Command::Project(ProjectCommand::State(args)) => {
             print_project_data(
-                send_request(
+                send_request_or_start(
                     &cli.socket,
                     &DaemonRequest::ProjectState { item: args.item },
+                    &cli.project,
+                    &cli.daemon_bind,
                 )
                 .await?,
                 args.json,
@@ -693,13 +754,15 @@ async fn main() -> Result<()> {
         Command::Project(ProjectCommand::Command(args)) => {
             let payload = parse_payload(args.payload)?;
             print_project_data(
-                send_request(
+                send_request_or_start(
                     &cli.socket,
                     &DaemonRequest::ProjectCommand {
                         target: args.target,
                         action: args.action,
                         payload,
                     },
+                    &cli.project,
+                    &cli.daemon_bind,
                 )
                 .await?,
                 args.json,
