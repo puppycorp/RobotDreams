@@ -122,8 +122,17 @@ struct VbusArgs {
 
 #[derive(Debug, Subcommand)]
 enum DaemonCommand {
-    Start(OpenArgs),
+    Start(DaemonStartArgs),
     Stop,
+}
+
+#[derive(Debug, Args)]
+struct DaemonStartArgs {
+    #[arg(value_name = "PATH")]
+    path: Option<PathBuf>,
+
+    #[arg(long, default_value = "127.0.0.1:8345")]
+    bind: String,
 }
 
 #[derive(Debug, Subcommand)]
@@ -769,7 +778,8 @@ async fn main() -> Result<()> {
             )?;
         }
         Command::Daemon(DaemonCommand::Start(args)) => {
-            start_daemon(&cli.socket, &args.path, &args.bind).await?;
+            let path = args.path.as_deref().unwrap_or(&cli.project);
+            start_daemon(&cli.socket, path, &args.bind).await?;
             print_response(send_request(&cli.socket, &DaemonRequest::Status).await?)?;
         }
         Command::Daemon(DaemonCommand::Stop) => {
