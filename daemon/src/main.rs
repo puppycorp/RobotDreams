@@ -957,10 +957,7 @@ fn resolve_urdf_path(path: Option<PathBuf>) -> Result<PathBuf, Box<dyn std::erro
 }
 
 fn project_config_for_input_path(path: Option<&Path>) -> Option<ProjectConfig> {
-    let manifest_path = match path {
-        Some(path) => project_manifest_for_input_path(path)?,
-        None => project_manifest_for_input_path(Path::new("."))?,
-    };
+    let manifest_path = project_manifest_for_input_path(path?)?;
     project_config_from_manifest(&manifest_path)
 }
 
@@ -2926,10 +2923,7 @@ async fn run_app(
     bind_addr: SocketAddr,
     socket_path: PathBuf,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let project_launch = match path.as_deref() {
-        Some(path) => project_launch_for_input_path(path),
-        None => project_launch_for_input_path(Path::new(".")),
-    };
+    let project_launch = path.as_deref().and_then(project_launch_for_input_path);
     let source_path = canonical_input_path(path.as_deref().unwrap_or_else(|| Path::new(".")));
     let project_config = project_config_for_input_path(path.as_deref());
     let urdf_path = resolve_urdf_path(path)?;
@@ -2947,7 +2941,7 @@ async fn run_app(
     let project_id = project_launch
         .as_ref()
         .map(|project| project.slug.clone())
-        .unwrap_or_else(|| "project".to_string());
+        .unwrap_or_else(|| "workbench".to_string());
     let url = project_launch
         .as_ref()
         .map(|project| project_url(bind_addr, project))

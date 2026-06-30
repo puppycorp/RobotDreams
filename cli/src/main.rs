@@ -128,9 +128,6 @@ enum DaemonCommand {
 
 #[derive(Debug, Args)]
 struct DaemonStartArgs {
-    #[arg(value_name = "PATH")]
-    path: Option<PathBuf>,
-
     #[arg(long, default_value = "127.0.0.1:8345")]
     bind: String,
 }
@@ -237,7 +234,7 @@ fn daemon_exe() -> Result<PathBuf> {
     Ok(dir.join("robotdreams-daemon"))
 }
 
-async fn start_daemon(socket: &Path, path: &Path, bind: &str) -> Result<()> {
+async fn start_daemon(socket: &Path, path: Option<&Path>, bind: &str) -> Result<()> {
     let exe = daemon_exe()?;
     let mut command = if exe.exists() {
         ProcessCommand::new(exe)
@@ -251,10 +248,12 @@ async fn start_daemon(socket: &Path, path: &Path, bind: &str) -> Result<()> {
         .arg(bind)
         .arg("--socket")
         .arg(socket)
-        .arg(path)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    if let Some(path) = path {
+        command.arg(path);
+    }
     #[cfg(unix)]
     unsafe {
         command.pre_exec(|| {
@@ -281,12 +280,30 @@ async fn open_project(socket: &Path, path: &Path, bind: &str) -> Result<DaemonRe
         path: path.display().to_string(),
     };
     match send_request(socket, &request).await {
-        Ok(response) => Ok(response),
+        Ok(response) if response.ok => Ok(response),
+        Ok(_) => restart_daemon_with_project(socket, path, bind).await,
         Err(_) => {
-            start_daemon(socket, path, bind).await?;
+            start_daemon(socket, Some(path), bind).await?;
             send_request(socket, &request).await
         }
     }
+}
+
+async fn restart_daemon_with_project(
+    socket: &Path,
+    path: &Path,
+    bind: &str,
+) -> Result<DaemonResponse> {
+    let _ = send_request(socket, &DaemonRequest::Shutdown).await;
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    start_daemon(socket, Some(path), bind).await?;
+    send_request(
+        socket,
+        &DaemonRequest::Open {
+            path: path.display().to_string(),
+        },
+    )
+    .await
 }
 
 async fn send_request_or_start(
@@ -298,7 +315,7 @@ async fn send_request_or_start(
     match send_request(socket, request).await {
         Ok(response) => Ok(response),
         Err(_) => {
-            start_daemon(socket, project_path, bind).await?;
+            start_daemon(socket, Some(project_path), bind).await?;
             send_request(socket, request).await
         }
     }
@@ -778,8 +795,7 @@ async fn main() -> Result<()> {
             )?;
         }
         Command::Daemon(DaemonCommand::Start(args)) => {
-            let path = args.path.as_deref().unwrap_or(&cli.project);
-            start_daemon(&cli.socket, path, &args.bind).await?;
+            start_daemon(&cli.socket, None, &args.bind).await?;
             print_response(send_request(&cli.socket, &DaemonRequest::Status).await?)?;
         }
         Command::Daemon(DaemonCommand::Stop) => {
