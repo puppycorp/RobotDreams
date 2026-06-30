@@ -4,7 +4,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 #[cfg(unix)]
 use feetech_servo::servo::protocol::port_handler::PortHandler;
@@ -18,7 +18,7 @@ use crate::{
     BusConfig, DeviceConfig, HardwareConfig, ProjectCameraConfig, ProjectConfig,
     ProjectSceneObjectConfig, ProjectSceneObjectGeometry, ServoDeviceConfig,
     URDF_BASE_SLIDER_BASE_ID, URDF_JOINT_SLIDER_BASE_ID, UrdfViewerState, apply_urdf_slider_change,
-    joint_display_label, project_joint_name, reload_urdf_state,
+    joint_display_label, project_config_from_manifest, project_joint_name, reload_urdf_state,
     robot_scene_props_with_static_scene, servo_ticks_to_slider_value, slider_value_to_servo_ticks,
     urdf_joint_slider_range, urdf_joint_type_name, urdf_slider_value_to_units,
     urdf_value_to_joint_units,
@@ -153,7 +153,8 @@ pub(crate) struct WorkbenchModel {
 
 pub(crate) struct AppController {
     urdf_state: UrdfViewerState,
-    project_config: Option<ProjectConfig>,
+    project_config: RefCell<Option<ProjectConfig>>,
+    project_config_modified: Cell<Option<SystemTime>>,
     hardware_runtime: HardwareRuntime,
     virtual_bus: WorkbenchVirtualBusHandle,
     robot_static_scene_dirty: Cell<bool>,
@@ -693,6 +694,7 @@ pub(crate) struct RobotSceneComponent {
     virtual_bus: WorkbenchVirtualBusHandle,
     urdf_state: UrdfViewerState,
     project_config: Option<ProjectConfig>,
+    project_config_modified: Option<SystemTime>,
     hardware_runtime: HardwareRuntime,
 }
 
@@ -704,14 +706,42 @@ impl RobotSceneComponent {
     ) -> Self {
         let mut urdf_state = UrdfViewerState::new(urdf_path);
         reload_urdf_state(&mut urdf_state);
+        let project_config_modified = project_manifest_modified(project_config.as_ref());
         let hardware_runtime = hardware_runtime_from_project(project_config.as_ref(), &urdf_state);
         virtual_bus.configure_from_hardware(&hardware_runtime);
         Self {
             virtual_bus,
             urdf_state,
             project_config,
+            project_config_modified,
             hardware_runtime,
         }
+    }
+
+    fn reload_project_config_if_changed(&mut self) {
+        let Some(manifest_path) = self
+            .project_config
+            .as_ref()
+            .map(|project| project.manifest_path.clone())
+        else {
+            return;
+        };
+        let modified = manifest_path
+            .metadata()
+            .ok()
+            .and_then(|metadata| metadata.modified().ok());
+        if modified == self.project_config_modified {
+            return;
+        }
+        let Some(project_config) = project_config_from_manifest(&manifest_path) else {
+            return;
+        };
+        self.project_config = Some(project_config);
+        self.project_config_modified = modified;
+        self.hardware_runtime =
+            hardware_runtime_from_project(self.project_config.as_ref(), &self.urdf_state);
+        self.virtual_bus
+            .configure_from_hardware(&self.hardware_runtime);
     }
 
     fn robot_scene_props_for_snapshots(
@@ -781,6 +811,7 @@ pub(crate) fn servo_snapshots_json(snapshots: &[FeetechServoSnapshot]) -> serde_
 impl CustomComponentController for RobotSceneComponent {
     async fn process(&mut self, ctx: CustomComponentCtx) -> anyhow::Result<()> {
         loop {
+            self.reload_project_config_if_changed();
             if self.virtual_bus.is_running() {
                 let snapshots = self.virtual_bus.snapshots();
                 ctx.send_data(
@@ -2742,6 +2773,12 @@ fn joint_slider_servo_target(
     Some((u8::try_from(servo.id).ok()?, target, joint.name.clone()))
 }
 
+fn project_manifest_modified(project_config: Option<&ProjectConfig>) -> Option<SystemTime> {
+    project_config
+        .and_then(|project| project.manifest_path.metadata().ok())
+        .and_then(|metadata| metadata.modified().ok())
+}
+
 #[wgui_controller(template = "app_controller")]
 impl AppController {
     pub(crate) fn new(
@@ -2752,10 +2789,12 @@ impl AppController {
         let mut urdf_state = UrdfViewerState::new(urdf_path);
         reload_urdf_state(&mut urdf_state);
         let hardware_runtime = hardware_runtime_from_project(project_config.as_ref(), &urdf_state);
+        let project_config_modified = project_manifest_modified(project_config.as_ref());
         virtual_bus.configure_from_hardware(&hardware_runtime);
         Self {
             urdf_state,
-            project_config,
+            project_config: RefCell::new(project_config),
+            project_config_modified: Cell::new(project_config_modified),
             hardware_runtime,
             virtual_bus,
             robot_static_scene_dirty: Cell::new(true),
@@ -2766,7 +2805,34 @@ impl AppController {
         }
     }
 
+    fn reload_project_config_if_changed(&self) {
+        let manifest_path = self
+            .project_config
+            .borrow()
+            .as_ref()
+            .map(|project| project.manifest_path.clone());
+        let Some(manifest_path) = manifest_path else {
+            return;
+        };
+        let modified = manifest_path
+            .metadata()
+            .ok()
+            .and_then(|metadata| metadata.modified().ok());
+        if modified == self.project_config_modified.get() {
+            return;
+        }
+        let Some(project_config) = project_config_from_manifest(&manifest_path) else {
+            return;
+        };
+        *self.project_config.borrow_mut() = Some(project_config);
+        self.project_config_modified.set(modified);
+        self.robot_static_scene_dirty.set(true);
+    }
+
     pub(crate) fn state(&self) -> WorkbenchModel {
+        self.reload_project_config_if_changed();
+        let project_config_borrow = self.project_config.borrow();
+        let project_config = project_config_borrow.as_ref();
         let snapshots = self.virtual_bus.snapshots();
         let mut live_hardware_runtime = self.hardware_runtime.clone();
         apply_servo_snapshots_to_hardware(&mut live_hardware_runtime, &snapshots);
@@ -2784,7 +2850,6 @@ impl AppController {
             urdf_slider_value_to_units(live_urdf_state.base_rotation_values[1]),
             urdf_slider_value_to_units(live_urdf_state.base_rotation_values[2]),
         ];
-        let project_config = self.project_config.as_ref();
         let base_translation = add_vec3(
             project_robot_base_translation(project_config),
             live_base_translation,
@@ -2813,7 +2878,7 @@ impl AppController {
         let selected_info = selected_scene_info(
             &live_urdf_state,
             &live_hardware_runtime,
-            self.project_config.as_ref(),
+            project_config,
             self.selected_scene_row_id,
         );
         let include_static_scene = self.robot_static_scene_dirty.replace(false);
@@ -2827,7 +2892,7 @@ impl AppController {
         let sensor_previews = sensor_preview_models(project_config, &robot_scene_props);
 
         WorkbenchModel {
-            project_name: project_name(self.project_config.as_ref()),
+            project_name: project_name(project_config),
             gpu_label: system_gpu_label(&self.gpu_metric),
             cpu_label: system_cpu_label(&self.cpu_sample),
             memory_label: system_memory_label(),
@@ -2869,14 +2934,14 @@ impl AppController {
             scene_sections: scene_sections(
                 &live_urdf_state,
                 &live_hardware_runtime,
-                self.project_config.as_ref(),
+                project_config,
                 self.selected_scene_row_id,
                 &self.collapsed_scene_section_ids,
             ),
             transform_properties: selected_info.transform_properties,
             physics_properties: selected_info.physics_properties,
             base_controls: base_controls(&live_urdf_state),
-            joint_controls: joint_controls(&live_urdf_state, self.project_config.as_ref()),
+            joint_controls: joint_controls(&live_urdf_state, project_config),
             sensors: sensors(),
         }
     }
@@ -2901,8 +2966,9 @@ impl AppController {
     pub(crate) fn reset_simulation(&mut self) {
         self.virtual_bus.stop();
         reload_urdf_state(&mut self.urdf_state);
+        let project_config = self.project_config.borrow();
         self.hardware_runtime =
-            hardware_runtime_from_project(self.project_config.as_ref(), &self.urdf_state);
+            hardware_runtime_from_project(project_config.as_ref(), &self.urdf_state);
         self.virtual_bus.reset_from_hardware(&self.hardware_runtime);
         self.robot_static_scene_dirty.set(true);
     }
@@ -2910,8 +2976,9 @@ impl AppController {
     pub(crate) fn reload_urdf(&mut self) {
         self.virtual_bus.stop();
         reload_urdf_state(&mut self.urdf_state);
+        let project_config = self.project_config.borrow();
         self.hardware_runtime =
-            hardware_runtime_from_project(self.project_config.as_ref(), &self.urdf_state);
+            hardware_runtime_from_project(project_config.as_ref(), &self.urdf_state);
         self.virtual_bus.reset_from_hardware(&self.hardware_runtime);
         self.robot_static_scene_dirty.set(true);
     }
@@ -3099,6 +3166,8 @@ impl AppController {
     }
 
     pub(crate) fn headless_summary(&self) -> HeadlessSummary {
+        self.reload_project_config_if_changed();
+        let project_config = self.project_config.borrow();
         let snapshots = self.virtual_bus.snapshots();
         let mut live_hardware_runtime = self.hardware_runtime.clone();
         apply_servo_snapshots_to_hardware(&mut live_hardware_runtime, &snapshots);
@@ -3117,7 +3186,7 @@ impl AppController {
             .unwrap_or_else(|| "No robot loaded".to_string());
 
         HeadlessSummary {
-            project_name: project_name(self.project_config.as_ref()),
+            project_name: project_name(project_config.as_ref()),
             status: self.urdf_state.status.clone(),
             loaded_summary,
             virtual_bus_running: self.virtual_bus.is_running(),
@@ -3128,13 +3197,14 @@ impl AppController {
     }
 
     pub(crate) fn project_state_json(&mut self) -> serde_json::Value {
+        self.reload_project_config_if_changed();
         self.refresh_from_virtual_bus();
+        let project_config = self.project_config.borrow();
         let snapshots = self.virtual_bus.snapshots();
         let mut live_hardware_runtime = self.hardware_runtime.clone();
         apply_servo_snapshots_to_hardware(&mut live_hardware_runtime, &snapshots);
 
-        let robots = self
-            .project_config
+        let robots = project_config
             .as_ref()
             .map(|project| {
                 project
@@ -3160,7 +3230,7 @@ impl AppController {
                     .map(|_| {
                         vec![serde_json::json!({
                             "id": "robot",
-                            "name": project_name(self.project_config.as_ref()),
+                            "name": project_name(project_config.as_ref()),
                             "model": {
                                 "type": "urdf",
                                 "path": self.urdf_state.urdf_path.as_ref().map(|path| path.display().to_string()),
@@ -3184,11 +3254,11 @@ impl AppController {
                         serde_json::json!({
                             "name": joint.name,
                             "displayName": joint_display_label(
-                                self.project_config.as_ref(),
+                                project_config.as_ref(),
                                 &joint.name,
                             ),
                             "semanticName": project_joint_name(
-                                self.project_config.as_ref(),
+                                project_config.as_ref(),
                                 &joint.name,
                             ),
                             "type": urdf_joint_type_name(joint.joint_type),
@@ -3208,11 +3278,11 @@ impl AppController {
                         serde_json::json!({
                             "name": joint.name,
                             "displayName": joint_display_label(
-                                self.project_config.as_ref(),
+                                project_config.as_ref(),
                                 &joint.name,
                             ),
                             "semanticName": project_joint_name(
-                                self.project_config.as_ref(),
+                                project_config.as_ref(),
                                 &joint.name,
                             ),
                         })
@@ -3224,8 +3294,8 @@ impl AppController {
 
         serde_json::json!({
             "project": {
-                "name": project_name(self.project_config.as_ref()),
-                "format": self.project_config.as_ref().map(|project| project.format.clone()),
+                "name": project_name(project_config.as_ref()),
+                "format": project_config.as_ref().map(|project| project.format.clone()),
                 "status": self.urdf_state.status,
             },
             "urdf": {
@@ -3235,11 +3305,11 @@ impl AppController {
                 "movableJoints": movable_joints,
             },
             "robots": robots,
-            "hardware": hardware_runtime_json(&live_hardware_runtime, self.project_config.as_ref()),
+            "hardware": hardware_runtime_json(&live_hardware_runtime, project_config.as_ref()),
             "controls": {
                 "base": base_controls(&self.urdf_state).into_iter().map(slider_json).collect::<Vec<_>>(),
-                "joints": joint_controls(&self.urdf_state, self.project_config.as_ref()).into_iter().map(slider_json).collect::<Vec<_>>(),
-                "servos": servo_target_controls(&live_hardware_runtime, self.project_config.as_ref()).into_iter().map(slider_json).collect::<Vec<_>>(),
+                "joints": joint_controls(&self.urdf_state, project_config.as_ref()).into_iter().map(slider_json).collect::<Vec<_>>(),
+                "servos": servo_target_controls(&live_hardware_runtime, project_config.as_ref()).into_iter().map(slider_json).collect::<Vec<_>>(),
             },
             "virtualBus": {
                 "running": self.virtual_bus.is_running(),
@@ -3250,20 +3320,19 @@ impl AppController {
     }
 
     pub(crate) fn project_items_json(&mut self) -> serde_json::Value {
+        self.reload_project_config_if_changed();
         self.refresh_from_virtual_bus();
+        let project_state = self.project_state_json();
+        let project_config = self.project_config.borrow();
         let mut items = vec![
-            serde_json::json!({"id": "project", "type": "project", "name": project_name(self.project_config.as_ref())}),
+            serde_json::json!({"id": "project", "type": "project", "name": project_name(project_config.as_ref())}),
             serde_json::json!({"id": "urdf", "type": "urdf", "name": self.urdf_state.urdf_path.as_ref().map(|path| path.display().to_string()).unwrap_or_else(|| "URDF".to_string())}),
             serde_json::json!({"id": "hardware", "type": "hardware", "name": "Hardware"}),
             serde_json::json!({"id": "virtual-bus", "type": "virtualBus", "name": "Virtual Bus"}),
             serde_json::json!({"id": "snapshots", "type": "snapshots", "name": "Servo Snapshots"}),
         ];
 
-        for robot in self.project_state_json()["robots"]
-            .as_array()
-            .into_iter()
-            .flatten()
-        {
+        for robot in project_state["robots"].as_array().into_iter().flatten() {
             if let Some(id) = robot.get("id").and_then(|id| id.as_str()) {
                 items.push(serde_json::json!({
                     "id": format!("robot:{id}"),
@@ -3284,7 +3353,7 @@ impl AppController {
                 items.push(serde_json::json!({
                     "id": format!("device:{}:{device_id}", bus.id),
                     "type": hardware_device_kind(device),
-                    "name": device_row_label(device, self.project_config.as_ref()),
+                    "name": device_row_label(device, project_config.as_ref()),
                 }));
             }
         }

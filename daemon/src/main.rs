@@ -133,6 +133,7 @@ impl UrdfViewerState {
 pub(crate) struct ProjectConfig {
     pub(crate) format: String,
     pub(crate) name: String,
+    pub(crate) manifest_path: PathBuf,
     pub(crate) base_dir: PathBuf,
     pub(crate) scene: ProjectSceneConfig,
     pub(crate) robots: Vec<ProjectRobotConfig>,
@@ -772,12 +773,19 @@ fn parse_project_robot_config(value: &serde_json::Value) -> Option<ProjectRobotC
     })
 }
 
-fn parse_project_config(value: &serde_json::Value, base_dir: PathBuf) -> Option<ProjectConfig> {
+fn parse_project_config(
+    value: &serde_json::Value,
+    manifest_path: PathBuf,
+) -> Option<ProjectConfig> {
     let format = json_string_path(value, &["format"])?;
     if format != ROBOT_DREAMS_PROJECT_FORMAT {
         return None;
     }
 
+    let base_dir = manifest_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
     let name = json_string_path(value, &["name"])
         .unwrap_or("RobotDreams Project")
         .to_string();
@@ -795,6 +803,7 @@ fn parse_project_config(value: &serde_json::Value, base_dir: PathBuf) -> Option<
     Some(ProjectConfig {
         format: format.to_string(),
         name,
+        manifest_path,
         base_dir,
         scene: parse_project_scene_config(value),
         robots,
@@ -802,13 +811,9 @@ fn parse_project_config(value: &serde_json::Value, base_dir: PathBuf) -> Option<
     })
 }
 
-fn project_config_from_manifest(path: &Path) -> Option<ProjectConfig> {
+pub(crate) fn project_config_from_manifest(path: &Path) -> Option<ProjectConfig> {
     let json = read_json_file(path).ok()?;
-    let base_dir = path
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .to_path_buf();
-    parse_project_config(&json, base_dir)
+    parse_project_config(&json, path.to_path_buf())
 }
 
 fn project_manifest_for_input_path(path: &Path) -> Option<PathBuf> {
@@ -2629,9 +2634,14 @@ impl DaemonState {
     }
 
     fn controller(&self) -> AppController {
+        let project_config = self
+            .project_config
+            .as_ref()
+            .and_then(|project| project_config_from_manifest(&project.manifest_path))
+            .or_else(|| self.project_config.clone());
         AppController::new(
             Some(self.urdf_path.clone()),
-            self.project_config.clone(),
+            project_config,
             self.virtual_bus.clone(),
         )
     }
