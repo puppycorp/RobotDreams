@@ -5,6 +5,7 @@ members = [
     "cli",
     "crates/feetech-servo",
 ]
+default-members = ["cli"]
 resolver = "3"
 
 [workspace.dependencies]
