@@ -327,6 +327,26 @@
             </HStack>
           </For>
 
+        <If test={state.show_camera_controls}>
+          <Text value="Camera Transform" color="#55a7ff" />
+          <For each={state.camera_transform_controls} itemAs="control" key={control.index}>
+            <VStack spacing=3>
+              <HStack>
+                <Text value={control.label} color="#dce7f3" grow=1 />
+                <Text value={control.display_value} color="#55a7ff" />
+              </HStack>
+              <Slider
+                min={control.min}
+                max={control.max}
+                value={control.value}
+                step=1
+                onSliderChange="SetCameraTransformControl"
+                arg={control.action_arg}
+              />
+            </VStack>
+          </For>
+        </If>
+
         <If test={state.show_servo_controls}>
           <Text value="Servo Control" color="#55a7ff" />
           <For each={state.servo_target_controls} itemAs="servo" key={servo.index}>

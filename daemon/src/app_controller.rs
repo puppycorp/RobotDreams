@@ -141,8 +141,10 @@ pub(crate) struct WorkbenchModel {
     show_bus_controls: bool,
     bus_control_label: String,
     show_servo_controls: bool,
+    show_camera_controls: bool,
     show_robot_controls: bool,
     servo_target_controls: Vec<WorkbenchSliderModel>,
+    camera_transform_controls: Vec<WorkbenchSliderModel>,
     scene_sections: Vec<WorkbenchSectionModel>,
     transform_properties: Vec<WorkbenchPropertyModel>,
     physics_properties: Vec<WorkbenchPropertyModel>,
@@ -1295,6 +1297,64 @@ fn base_controls(state: &UrdfViewerState) -> Vec<WorkbenchSliderModel> {
                 display_value: format!("{:.3}", urdf_slider_value_to_units(value)),
                 velocity_display: "0.0".to_string(),
                 torque_display: "-".to_string(),
+            }
+        })
+        .collect()
+}
+
+fn selected_project_camera_index(selected_scene_row_id: u32) -> Option<usize> {
+    if selected_scene_row_id < SCENE_ROW_PROJECT_CAMERA_BASE {
+        return None;
+    }
+    Some((selected_scene_row_id - SCENE_ROW_PROJECT_CAMERA_BASE) as usize)
+}
+
+fn selected_camera_transform_controls(
+    project_config: Option<&ProjectConfig>,
+    selected_scene_row_id: u32,
+) -> Vec<WorkbenchSliderModel> {
+    let Some(index) = selected_project_camera_index(selected_scene_row_id) else {
+        return Vec::new();
+    };
+    let Some(camera) = project_config.and_then(|project| project.scene.cameras.get(index)) else {
+        return Vec::new();
+    };
+
+    let labels = ["X", "Y", "Z", "Roll", "Pitch", "Yaw"];
+    labels
+        .iter()
+        .enumerate()
+        .map(|(axis, label)| {
+            let value = if axis < 3 {
+                (camera.position[axis] * crate::URDF_VALUE_SCALE).round() as i32
+            } else {
+                (camera.rotation[axis - 3] * crate::URDF_VALUE_SCALE).round() as i32
+            };
+            let (min, max) = if axis < 3 {
+                (
+                    -crate::URDF_BASE_POSITION_RANGE,
+                    crate::URDF_BASE_POSITION_RANGE,
+                )
+            } else {
+                (crate::URDF_BASE_ROTATION_MIN, crate::URDF_BASE_ROTATION_MAX)
+            };
+            WorkbenchSliderModel {
+                index: axis as u32,
+                action_arg: (index as u32) * 6 + axis as u32,
+                label: (*label).to_string(),
+                min,
+                max,
+                value,
+                display_value: if axis < 3 {
+                    format!("{:.3} m", value as f32 / crate::URDF_VALUE_SCALE)
+                } else {
+                    format!(
+                        "{:.1} deg",
+                        (value as f32 / crate::URDF_VALUE_SCALE).to_degrees()
+                    )
+                },
+                velocity_display: String::new(),
+                torque_display: String::new(),
             }
         })
         .collect()
@@ -2779,6 +2839,39 @@ fn project_manifest_modified(project_config: Option<&ProjectConfig>) -> Option<S
         .and_then(|metadata| metadata.modified().ok())
 }
 
+fn update_project_manifest_json(
+    manifest_path: &std::path::Path,
+    update: impl FnOnce(&mut serde_json::Value) -> Result<(), String>,
+) -> Result<(), String> {
+    let raw = std::fs::read_to_string(manifest_path)
+        .map_err(|err| format!("read {}: {err}", manifest_path.display()))?;
+    let mut json: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|err| format!("parse {}: {err}", manifest_path.display()))?;
+    update(&mut json)?;
+    let formatted = serde_json::to_string_pretty(&json)
+        .map_err(|err| format!("format {}: {err}", manifest_path.display()))?;
+    std::fs::write(manifest_path, format!("{formatted}\n"))
+        .map_err(|err| format!("write {}: {err}", manifest_path.display()))
+}
+
+fn set_project_camera_transform_json(
+    json: &mut serde_json::Value,
+    camera_index: usize,
+    camera: &ProjectCameraConfig,
+) -> Result<(), String> {
+    let Some(camera_json) = json
+        .get_mut("scene")
+        .and_then(|scene| scene.get_mut("cameras"))
+        .and_then(|cameras| cameras.as_array_mut())
+        .and_then(|cameras| cameras.get_mut(camera_index))
+    else {
+        return Err(format!("camera index {camera_index} is not writable"));
+    };
+    camera_json["position"] = serde_json::json!(camera.position);
+    camera_json["rotation"] = serde_json::json!(camera.rotation);
+    Ok(())
+}
+
 #[wgui_controller(template = "app_controller")]
 impl AppController {
     pub(crate) fn new(
@@ -2890,6 +2983,8 @@ impl AppController {
             include_static_scene,
         );
         let sensor_previews = sensor_preview_models(project_config, &robot_scene_props);
+        let camera_transform_controls =
+            selected_camera_transform_controls(project_config, self.selected_scene_row_id);
 
         WorkbenchModel {
             project_name: project_name(project_config),
@@ -2926,11 +3021,13 @@ impl AppController {
             },
             show_servo_controls: selected_servo(&live_hardware_runtime, self.selected_scene_row_id)
                 .is_some(),
+            show_camera_controls: !camera_transform_controls.is_empty(),
             show_robot_controls: show_robot_controls(self.selected_scene_row_id),
             servo_target_controls: selected_servo_target_controls(
                 &live_hardware_runtime,
                 self.selected_scene_row_id,
             ),
+            camera_transform_controls,
             scene_sections: scene_sections(
                 &live_urdf_state,
                 &live_hardware_runtime,
@@ -3112,6 +3209,40 @@ impl AppController {
                 .set_target_position(servo_id, value.clamp(0, 4095) as i16);
             self.refresh_from_virtual_bus();
         }
+    }
+
+    pub(crate) fn set_camera_transform_control(&mut self, arg: u32, value: i32) {
+        let camera_index = (arg / 6) as usize;
+        let axis = (arg % 6) as usize;
+        let scalar = value as f32 / crate::URDF_VALUE_SCALE;
+        let (manifest_path, camera) = {
+            let mut project_config = self.project_config.borrow_mut();
+            let Some(project_config) = project_config.as_mut() else {
+                return;
+            };
+            let Some(camera) = project_config.scene.cameras.get_mut(camera_index) else {
+                return;
+            };
+            if axis < 3 {
+                camera.position[axis] = scalar;
+            } else {
+                camera.rotation[axis - 3] = scalar;
+            }
+            (project_config.manifest_path.clone(), camera.clone())
+        };
+
+        if let Err(err) = update_project_manifest_json(&manifest_path, |json| {
+            set_project_camera_transform_json(json, camera_index, &camera)
+        }) {
+            log::warn!("failed to persist camera transform: {err}");
+        }
+        self.project_config_modified.set(
+            manifest_path
+                .metadata()
+                .ok()
+                .and_then(|metadata| metadata.modified().ok()),
+        );
+        self.robot_static_scene_dirty.set(true);
     }
 }
 
