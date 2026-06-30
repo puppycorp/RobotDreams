@@ -341,7 +341,24 @@
             <VStack spacing=3>
               <HStack>
                 <Text value={control.label} color="#dce7f3" grow=1 />
-                <Text value={control.display_value} color="#55a7ff" />
+                <If test={control.index == 0}>
+                  <TextInput value={control.display_value} onTextChanged="SetCameraX" minWidth=74 height=24 backgroundColor="#101a28" border="1px solid #26364d" color="#dce7f3" />
+                </If>
+                <If test={control.index == 1}>
+                  <TextInput value={control.display_value} onTextChanged="SetCameraY" minWidth=74 height=24 backgroundColor="#101a28" border="1px solid #26364d" color="#dce7f3" />
+                </If>
+                <If test={control.index == 2}>
+                  <TextInput value={control.display_value} onTextChanged="SetCameraZ" minWidth=74 height=24 backgroundColor="#101a28" border="1px solid #26364d" color="#dce7f3" />
+                </If>
+                <If test={control.index == 3}>
+                  <TextInput value={control.display_value} onTextChanged="SetCameraRoll" minWidth=74 height=24 backgroundColor="#101a28" border="1px solid #26364d" color="#dce7f3" />
+                </If>
+                <If test={control.index == 4}>
+                  <TextInput value={control.display_value} onTextChanged="SetCameraPitch" minWidth=74 height=24 backgroundColor="#101a28" border="1px solid #26364d" color="#dce7f3" />
+                </If>
+                <If test={control.index == 5}>
+                  <TextInput value={control.display_value} onTextChanged="SetCameraYaw" minWidth=74 height=24 backgroundColor="#101a28" border="1px solid #26364d" color="#dce7f3" />
+                </If>
               </HStack>
               <Slider
                 min={control.min}

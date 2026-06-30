@@ -1349,10 +1349,10 @@ fn selected_camera_transform_controls(
                 max,
                 value,
                 display_value: if axis < 3 {
-                    format!("{:.3} m", value as f32 / crate::URDF_VALUE_SCALE)
+                    format!("{:.3}", value as f32 / crate::URDF_VALUE_SCALE)
                 } else {
                     format!(
-                        "{:.1} deg",
+                        "{:.1}",
                         (value as f32 / crate::URDF_VALUE_SCALE).to_degrees()
                     )
                 },
@@ -3256,6 +3256,10 @@ impl AppController {
         let camera_index = (arg / 6) as usize;
         let axis = (arg % 6) as usize;
         let scalar = value as f32 / crate::URDF_VALUE_SCALE;
+        self.set_camera_transform_axis(camera_index, axis, scalar);
+    }
+
+    fn set_camera_transform_axis(&mut self, camera_index: usize, axis: usize, scalar: f32) {
         {
             let mut project_config = self.project_config.borrow_mut();
             let Some(project_config) = project_config.as_mut() else {
@@ -3271,6 +3275,45 @@ impl AppController {
             }
         }
         self.project_config_dirty.set(true);
+    }
+
+    fn set_selected_camera_transform_text(&mut self, axis: usize, value: String) {
+        let Some(camera_index) = selected_project_camera_index(self.selected_scene_row_id) else {
+            return;
+        };
+        let Ok(parsed) = value.trim().parse::<f32>() else {
+            return;
+        };
+        let scalar = if axis < 3 {
+            parsed
+        } else {
+            parsed.to_radians()
+        };
+        self.set_camera_transform_axis(camera_index, axis, scalar);
+    }
+
+    pub(crate) fn set_camera_x(&mut self, value: String) {
+        self.set_selected_camera_transform_text(0, value);
+    }
+
+    pub(crate) fn set_camera_y(&mut self, value: String) {
+        self.set_selected_camera_transform_text(1, value);
+    }
+
+    pub(crate) fn set_camera_z(&mut self, value: String) {
+        self.set_selected_camera_transform_text(2, value);
+    }
+
+    pub(crate) fn set_camera_roll(&mut self, value: String) {
+        self.set_selected_camera_transform_text(3, value);
+    }
+
+    pub(crate) fn set_camera_pitch(&mut self, value: String) {
+        self.set_selected_camera_transform_text(4, value);
+    }
+
+    pub(crate) fn set_camera_yaw(&mut self, value: String) {
+        self.set_selected_camera_transform_text(5, value);
     }
 
     pub(crate) fn save_project(&mut self) {
