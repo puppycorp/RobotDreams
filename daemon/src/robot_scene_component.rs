@@ -17,12 +17,20 @@ use crate::{
     robot_scene_props_with_static_scene, urdf_slider_value_to_units,
 };
 
+const LIVE_SCENE_UPDATE_INTERVAL: Duration = Duration::from_millis(66);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SnapshotSignature {
+    servos: Vec<(u8, i16, i16, bool)>,
+}
+
 pub(crate) struct RobotSceneComponent {
     virtual_bus: WorkbenchVirtualBusHandle,
     urdf_state: UrdfViewerState,
     project_config: Option<ProjectConfig>,
     project_config_modified: Option<SystemTime>,
     hardware_runtime: HardwareRuntime,
+    last_sent_snapshots: Option<SnapshotSignature>,
 }
 
 impl RobotSceneComponent {
@@ -42,6 +50,7 @@ impl RobotSceneComponent {
             project_config,
             project_config_modified,
             hardware_runtime,
+            last_sent_snapshots: None,
         }
     }
 
@@ -69,6 +78,7 @@ impl RobotSceneComponent {
             hardware_runtime_from_project(self.project_config.as_ref(), &self.urdf_state);
         self.virtual_bus
             .configure_from_hardware(&self.hardware_runtime);
+        self.last_sent_snapshots = None;
     }
 
     fn robot_scene_props_for_snapshots(
@@ -109,6 +119,31 @@ impl RobotSceneComponent {
             false,
         )
     }
+
+    fn should_send_snapshots(&mut self, snapshots: &[FeetechServoSnapshot]) -> bool {
+        let signature = snapshot_signature(snapshots);
+        if self.last_sent_snapshots.as_ref() == Some(&signature) {
+            return false;
+        }
+        self.last_sent_snapshots = Some(signature);
+        true
+    }
+}
+
+fn snapshot_signature(snapshots: &[FeetechServoSnapshot]) -> SnapshotSignature {
+    SnapshotSignature {
+        servos: snapshots
+            .iter()
+            .map(|snapshot| {
+                (
+                    snapshot.id,
+                    snapshot.present_position,
+                    snapshot.target_position,
+                    snapshot.moving,
+                )
+            })
+            .collect(),
+    }
 }
 
 pub(crate) fn servo_snapshots_json(snapshots: &[FeetechServoSnapshot]) -> serde_json::Value {
@@ -147,17 +182,63 @@ impl CustomComponentController for RobotSceneComponent {
             self.reload_project_config_if_changed();
             if self.virtual_bus.is_running() {
                 let snapshots = self.virtual_bus.snapshots();
-                ctx.send_data(
-                    "servoSnapshots",
-                    serde_json::json!({
-                        "snapshots": servo_snapshots_json(&snapshots),
-                        "robotSceneProps": self.robot_scene_props_for_snapshots(&snapshots),
-                    }),
-                )
-                .await?;
+                if self.should_send_snapshots(&snapshots) {
+                    ctx.send_data(
+                        "servoSnapshots",
+                        serde_json::json!({
+                            "snapshots": servo_snapshots_json(&snapshots),
+                            "robotSceneProps": self.robot_scene_props_for_snapshots(&snapshots),
+                        }),
+                    )
+                    .await?;
+                }
             }
 
-            tokio::time::sleep(Duration::from_millis(33)).await;
+            tokio::time::sleep(LIVE_SCENE_UPDATE_INTERVAL).await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn snapshot(id: u8, present_position: i16, target_position: i16) -> FeetechServoSnapshot {
+        FeetechServoSnapshot {
+            id,
+            mode: 0,
+            torque_enabled: true,
+            moving: present_position != target_position,
+            target_position,
+            present_position,
+            present_speed: 0,
+            present_load: 0,
+            current_raw: 0,
+            present_current: 0,
+            temperature_c: 30,
+            present_temperature_c: 30,
+            voltage_tenths: 74,
+            present_voltage_tenths: 74,
+        }
+    }
+
+    #[test]
+    fn snapshot_signature_ignores_sensor_noise_not_used_by_scene() {
+        let mut left = snapshot(1, 2048, 2200);
+        let mut right = left.clone();
+        right.temperature_c = 45;
+        right.voltage_tenths = 70;
+        right.present_load = 12;
+        left.current_raw = 3;
+
+        assert_eq!(snapshot_signature(&[left]), snapshot_signature(&[right]));
+    }
+
+    #[test]
+    fn snapshot_signature_changes_when_scene_pose_changes() {
+        let left = snapshot(1, 2048, 2200);
+        let right = snapshot(1, 2049, 2200);
+
+        assert_ne!(snapshot_signature(&[left]), snapshot_signature(&[right]));
     }
 }
