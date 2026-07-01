@@ -44,6 +44,19 @@ impl ObjectState {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PressureSensorState {
+    pub(crate) pressed: bool,
+    pub(crate) pressure: f32,
+}
+
+impl PressureSensorState {
+    pub(crate) fn new(pressed: bool, pressure: f32) -> Self {
+        Self { pressed, pressure }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ScenarioWorld {
@@ -55,6 +68,8 @@ pub(crate) struct ScenarioWorld {
     pub(crate) objects: HashMap<String, ObjectState>,
     #[serde(default)]
     pub(crate) servos: HashMap<u8, i16>,
+    #[serde(default)]
+    pub(crate) pressure_sensors: HashMap<String, PressureSensorState>,
 }
 
 impl ScenarioWorld {
@@ -87,6 +102,18 @@ impl ScenarioWorld {
 
     pub(crate) fn set_servo_position(&mut self, id: u8, position: i16) {
         self.servos.insert(id, position);
+    }
+
+    pub(crate) fn pressure_sensor(&self, sensor: &str) -> Option<PressureSensorState> {
+        self.pressure_sensors.get(sensor).copied()
+    }
+
+    pub(crate) fn set_pressure_sensor(
+        &mut self,
+        sensor: impl Into<String>,
+        state: PressureSensorState,
+    ) {
+        self.pressure_sensors.insert(sensor.into(), state);
     }
 
     pub(crate) fn attach_object(

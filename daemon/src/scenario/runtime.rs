@@ -3,7 +3,9 @@ use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 
 use super::ast::{Action, Condition, Scenario, Volume};
-use super::world::{Pose, ScenarioWorld, distance, volume_center, volume_contains};
+use super::world::{
+    Pose, PressureSensorState, ScenarioWorld, distance, volume_center, volume_contains,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -57,6 +59,10 @@ impl ScenarioRuntime {
 
     pub(crate) fn triggered_steps(&self) -> &HashSet<String> {
         &self.triggered_steps
+    }
+
+    pub(crate) fn failure_reason(&self) -> Option<&str> {
+        self.failure_reason.as_deref()
     }
 
     pub(crate) fn tick(
@@ -174,6 +180,14 @@ impl ScenarioRuntime {
                 .map(|actual| actual <= position)
                 .unwrap_or(false),
             Condition::ElapsedSeconds { seconds } => world.elapsed_seconds >= *seconds,
+            Condition::PressureSensorPressed { sensor } => world
+                .pressure_sensor(sensor)
+                .map(|sensor| sensor.pressed)
+                .unwrap_or(false),
+            Condition::PressureSensorAtOrAbove { sensor, pressure } => world
+                .pressure_sensor(sensor)
+                .map(|sensor| sensor.pressure >= *pressure)
+                .unwrap_or(false),
         }
     }
 
@@ -209,6 +223,17 @@ impl ScenarioRuntime {
             Action::MarkFailed { reason } => {
                 self.status = ScenarioStatus::Failed;
                 self.failure_reason = Some(reason.clone());
+                Ok(())
+            }
+            Action::SetPressureSensor {
+                sensor,
+                pressed,
+                pressure,
+            } => {
+                world.set_pressure_sensor(
+                    sensor.clone(),
+                    PressureSensorState::new(*pressed, *pressure),
+                );
                 Ok(())
             }
         }

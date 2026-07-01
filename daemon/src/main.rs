@@ -6,6 +6,7 @@ mod hardware_runtime;
 mod physics;
 mod projects_controller;
 mod robot_scene_component;
+mod scenario;
 mod scene_transform;
 mod system_metrics;
 mod urdf;
@@ -2578,6 +2579,14 @@ enum DaemonRequest {
         action: String,
         payload: Option<serde_json::Value>,
     },
+    ScenarioCommand {
+        project: Option<String>,
+        simulation: Option<String>,
+        action: String,
+        path: Option<String>,
+        scenario: Option<String>,
+        payload: Option<serde_json::Value>,
+    },
     SimulationCommand {
         project: Option<String>,
         simulation: Option<String>,
@@ -2624,6 +2633,8 @@ struct ProjectSession {
 struct DaemonState {
     bind_addr: SocketAddr,
     projects: HashMap<String, ProjectSession>,
+    scenario_sessions: HashMap<String, scenario::BallToBinScenarioSession>,
+    active_scenarios: HashMap<String, String>,
 }
 
 impl DaemonState {
@@ -3023,6 +3034,206 @@ fn servo_target_from_command(
     None
 }
 
+fn scenario_export_payload(
+    payload: Option<&serde_json::Value>,
+) -> Result<(PathBuf, String), String> {
+    let Some(payload) = payload else {
+        return Err("scenario export-sensors requires payload {\"out\":\"/path\"}".to_string());
+    };
+    let Some(out) = payload
+        .get("out")
+        .or_else(|| payload.get("path"))
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return Err("scenario export-sensors payload requires string field out".to_string());
+    };
+    let sensor = payload
+        .get("sensor")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("bin_pressure")
+        .to_string();
+    Ok((PathBuf::from(out), sensor))
+}
+
+fn scenario_sensor_json(
+    report: &scenario::ScenarioStateReport,
+    sensor: &str,
+) -> Result<serde_json::Value, String> {
+    let Some(state) = report.sensors.get(sensor) else {
+        return Err(format!("unknown scenario sensor {sensor}"));
+    };
+    Ok(serde_json::json!({
+        "pressed": state.pressed,
+        "pressure": state.pressure,
+    }))
+}
+
+fn scenario_scope_key(project_id: &str, simulation_id: &str) -> String {
+    format!("{project_id}:{simulation_id}")
+}
+
+fn scenario_session_key(scope: &str, scenario_id: &str) -> String {
+    format!("{scope}:{scenario_id}")
+}
+
+fn scenario_report_data(
+    report: scenario::ScenarioStateReport,
+) -> Result<serde_json::Value, String> {
+    serde_json::to_value(report).map_err(|err| err.to_string())
+}
+
+fn ensure_scenario_session_id(
+    state: &mut DaemonState,
+    scope: &str,
+    requested_scenario: Option<&str>,
+) -> Result<String, String> {
+    if let Some(scenario_id) = requested_scenario.filter(|scenario_id| !scenario_id.is_empty()) {
+        let key = scenario_session_key(scope, scenario_id);
+        if state.scenario_sessions.contains_key(&key) {
+            return Ok(scenario_id.to_string());
+        }
+        return Err(format!("scenario {scenario_id} is not loaded"));
+    }
+
+    if let Some(scenario_id) = state.active_scenarios.get(scope) {
+        return Ok(scenario_id.clone());
+    }
+
+    let session = scenario::BallToBinScenarioSession::new();
+    let scenario_id = session.state().scenario_id;
+    let key = scenario_session_key(scope, &scenario_id);
+    state.scenario_sessions.insert(key, session);
+    state
+        .active_scenarios
+        .insert(scope.to_string(), scenario_id.clone());
+    Ok(scenario_id)
+}
+
+fn handle_scenario_command_data(
+    state: &mut DaemonState,
+    project_id: &str,
+    simulation_id: &str,
+    action: &str,
+    path: Option<&str>,
+    requested_scenario: Option<&str>,
+    payload: Option<&serde_json::Value>,
+) -> Result<(String, bool, serde_json::Value), String> {
+    let scope = scenario_scope_key(project_id, simulation_id);
+    match action {
+        "load" => {
+            let path = path
+                .map(PathBuf::from)
+                .ok_or_else(|| "scenario load requires --path".to_string())?;
+            let scenario = scenario::load_scenario_json(&path)?;
+            let scenario_id = scenario.id.clone();
+            let session = scenario::BallToBinScenarioSession::from_scenario(scenario);
+            let report = session.state();
+            let key = scenario_session_key(&scope, &scenario_id);
+            state.scenario_sessions.insert(key, session);
+            state.active_scenarios.insert(scope, scenario_id);
+            Ok((
+                format!("scenario loaded from {}", path.display()),
+                true,
+                scenario_report_data(report)?,
+            ))
+        }
+        "smoke" | "smoke-test" | "test" => {
+            let report = if let Some(path) = path {
+                let scenario = scenario::load_scenario_json(Path::new(path))?;
+                scenario::run_ball_to_bin_smoke_for_scenario(scenario)
+            } else {
+                scenario::run_ball_to_bin_smoke()
+            };
+            let ok = report.success;
+            let message = if ok {
+                "scenario smoke test complete"
+            } else {
+                "scenario smoke test failed"
+            };
+            let data = serde_json::to_value(report).map_err(|err| err.to_string())?;
+            Ok((message.to_string(), ok, data))
+        }
+        "state" => {
+            let scenario_id = ensure_scenario_session_id(state, &scope, requested_scenario)?;
+            let key = scenario_session_key(&scope, &scenario_id);
+            let session = state
+                .scenario_sessions
+                .get_mut(&key)
+                .ok_or_else(|| format!("scenario {scenario_id} is not loaded"))?;
+            let report = if let Some(payload) = payload.cloned() {
+                let observation: scenario::BallToBinObservation =
+                    serde_json::from_value(payload)
+                        .map_err(|err| format!("invalid scenario observation: {err}"))?;
+                session.observe(observation)?
+            } else {
+                session.state()
+            };
+            Ok((
+                "scenario state".to_string(),
+                true,
+                scenario_report_data(report)?,
+            ))
+        }
+        "reset" => {
+            let scenario_id = ensure_scenario_session_id(state, &scope, requested_scenario)?;
+            let key = scenario_session_key(&scope, &scenario_id);
+            let session = state
+                .scenario_sessions
+                .get_mut(&key)
+                .ok_or_else(|| format!("scenario {scenario_id} is not loaded"))?;
+            let report = session.reset();
+            state.active_scenarios.insert(scope, scenario_id);
+            Ok((
+                "scenario reset".to_string(),
+                true,
+                scenario_report_data(report)?,
+            ))
+        }
+        "export-sensors" | "exportSensors" => {
+            let (out, sensor) = scenario_export_payload(payload)?;
+            let scenario_id = ensure_scenario_session_id(state, &scope, requested_scenario)?;
+            let key = scenario_session_key(&scope, &scenario_id);
+            let report = state
+                .scenario_sessions
+                .get(&key)
+                .ok_or_else(|| format!("scenario {scenario_id} is not loaded"))?
+                .state();
+            let sensor_data = scenario_sensor_json(&report, &sensor)?;
+            let raw = serde_json::to_string_pretty(&sensor_data).map_err(|err| err.to_string())?;
+            if let Some(parent) = out.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+                std::fs::create_dir_all(parent).map_err(|err| {
+                    format!(
+                        "failed to create sensor export directory {}: {err}",
+                        parent.display()
+                    )
+                })?;
+            }
+            std::fs::write(&out, format!("{raw}\n")).map_err(|err| {
+                format!(
+                    "failed to write scenario sensor export {}: {err}",
+                    out.display()
+                )
+            })?;
+            let data = serde_json::json!({
+                "sensor": sensor,
+                "out": out.display().to_string(),
+                "value": sensor_data,
+                "sensors": report.sensors,
+                "progress": report.progress,
+                "status": report.status,
+            });
+            Ok((
+                format!("scenario sensors exported to {}", out.display()),
+                true,
+                data,
+            ))
+        }
+        _ => Err(format!("unsupported scenario command {action}")),
+    }
+}
+
 async fn handle_daemon_request(
     state: Arc<AsyncMutex<DaemonState>>,
     request: DaemonRequest,
@@ -3111,6 +3322,60 @@ async fn handle_daemon_request(
             };
             DaemonState::response_with_data_for_project(project, simulation, None, true, data)
         }
+        DaemonRequest::ScenarioCommand {
+            project,
+            simulation,
+            action,
+            path,
+            scenario,
+            payload,
+        } => {
+            let mut state = state.lock().await;
+            let project_id = match state.resolve_project_id(project.as_deref()) {
+                Ok(project_id) => project_id,
+                Err(err) => return DaemonState::error(err),
+            };
+            let simulation_id = {
+                let project = state
+                    .projects
+                    .get_mut(&project_id)
+                    .expect("project resolved");
+                match project.ensure_simulation(simulation.as_deref()) {
+                    Ok(simulation_id) => simulation_id,
+                    Err(err) => return DaemonState::error(err),
+                }
+            };
+            match handle_scenario_command_data(
+                &mut state,
+                &project_id,
+                &simulation_id,
+                &action,
+                path.as_deref(),
+                scenario.as_deref(),
+                payload.as_ref(),
+            ) {
+                Ok((message, ok, data)) => {
+                    let project = state.projects.get(&project_id).expect("project resolved");
+                    let simulation = match project.default_simulation() {
+                        Ok(_) => match project.simulation(&simulation_id) {
+                            Ok(simulation) => simulation,
+                            Err(err) => return DaemonState::error(err),
+                        },
+                        Err(err) => return DaemonState::error(err),
+                    };
+                    let mut response = DaemonState::response_with_data_for_project(
+                        project,
+                        simulation,
+                        Some(message),
+                        true,
+                        data,
+                    );
+                    response.ok = ok;
+                    response
+                }
+                Err(err) => DaemonState::error(err),
+            }
+        }
         DaemonRequest::ProjectCommand {
             project,
             simulation,
@@ -3133,6 +3398,38 @@ async fn handle_daemon_request(
                     Err(err) => return DaemonState::error(err),
                 }
             };
+            if target == "scenario" {
+                match handle_scenario_command_data(
+                    &mut state,
+                    &project_id,
+                    &simulation_id,
+                    &action,
+                    None,
+                    None,
+                    payload.as_ref(),
+                ) {
+                    Ok((message, ok, data)) => {
+                        let project = state.projects.get(&project_id).expect("project resolved");
+                        let simulation = match project.default_simulation() {
+                            Ok(_) => match project.simulation(&simulation_id) {
+                                Ok(simulation) => simulation,
+                                Err(err) => return DaemonState::error(err),
+                            },
+                            Err(err) => return DaemonState::error(err),
+                        };
+                        let mut response = DaemonState::response_with_data_for_project(
+                            project,
+                            simulation,
+                            Some(message),
+                            true,
+                            data,
+                        );
+                        response.ok = ok;
+                        return response;
+                    }
+                    Err(err) => return DaemonState::error(err),
+                }
+            }
             let project = state.projects.get(&project_id).expect("project resolved");
             let simulation = match project.default_simulation() {
                 Ok(_) => match project.simulation(&simulation_id) {
@@ -3464,6 +3761,8 @@ async fn run_app(
     let daemon_state = Arc::new(AsyncMutex::new(DaemonState {
         bind_addr,
         projects,
+        scenario_sessions: HashMap::new(),
+        active_scenarios: HashMap::new(),
     }));
     tokio::spawn(run_daemon_socket(socket_path, daemon_state.clone()));
     let robot_scene_virtual_bus = route_virtual_bus.clone();
@@ -3725,6 +4024,8 @@ mod tests {
         DaemonState {
             bind_addr: test_bind_addr(),
             projects: HashMap::new(),
+            scenario_sessions: HashMap::new(),
+            active_scenarios: HashMap::new(),
         }
     }
 
@@ -3735,6 +4036,119 @@ mod tests {
             .join(relative)
             .display()
             .to_string()
+    }
+
+    fn temp_path(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("robotdreams-{}-{name}", std::process::id()))
+    }
+
+    #[test]
+    fn scenario_command_loads_json_advances_and_exports_sensor() {
+        let mut state = test_state();
+        let (project_id, _) =
+            open_project_session(&mut state, &repo_path("examples/puppyarm/project.json")).unwrap();
+        let simulation_id = {
+            let project = state.projects.get_mut(&project_id).unwrap();
+            project.ensure_simulation(None).unwrap()
+        };
+        let scenario_path = temp_path("ball-to-bin-scenario.json");
+        let sensor_path = temp_path("bin-pressure.json");
+        std::fs::write(
+            &scenario_path,
+            serde_json::to_string_pretty(&scenario::ball_to_bin_scenario()).unwrap(),
+        )
+        .unwrap();
+
+        let (_, ok, loaded) = handle_scenario_command_data(
+            &mut state,
+            &project_id,
+            &simulation_id,
+            "load",
+            Some(scenario_path.to_str().unwrap()),
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(ok);
+        assert_eq!(
+            loaded.get("progress").and_then(|value| value.as_str()),
+            Some("seekingBall")
+        );
+
+        let (_, _, grasped) = handle_scenario_command_data(
+            &mut state,
+            &project_id,
+            &simulation_id,
+            "state",
+            None,
+            None,
+            Some(&serde_json::json!({
+                "toolPosition": [-0.18, 0.055, -0.34],
+                "ballPosition": [-0.18, 0.055, -0.34],
+                "gripperTick": 2700
+            })),
+        )
+        .unwrap();
+        assert_eq!(
+            grasped.get("progress").and_then(|value| value.as_str()),
+            Some("grasped")
+        );
+
+        let (_, _, carrying) = handle_scenario_command_data(
+            &mut state,
+            &project_id,
+            &simulation_id,
+            "state",
+            None,
+            None,
+            Some(&serde_json::json!({
+                "toolPosition": [0.38, 0.24, -0.28],
+                "gripperTick": 2700
+            })),
+        )
+        .unwrap();
+        assert_eq!(
+            carrying.get("progress").and_then(|value| value.as_str()),
+            Some("carrying")
+        );
+
+        let (_, _, complete) = handle_scenario_command_data(
+            &mut state,
+            &project_id,
+            &simulation_id,
+            "state",
+            None,
+            None,
+            Some(&serde_json::json!({
+                "toolPosition": [0.38, 0.24, -0.28],
+                "gripperTick": 2000
+            })),
+        )
+        .unwrap();
+        assert_eq!(
+            complete.get("status").and_then(|value| value.as_str()),
+            Some("complete")
+        );
+
+        let (_, _, exported) = handle_scenario_command_data(
+            &mut state,
+            &project_id,
+            &simulation_id,
+            "export-sensors",
+            None,
+            None,
+            Some(&serde_json::json!({
+                "out": sensor_path,
+                "sensor": "bin_pressure"
+            })),
+        )
+        .unwrap();
+        assert_eq!(
+            exported
+                .pointer("/value/pressed")
+                .and_then(|value| value.as_bool()),
+            Some(true)
+        );
     }
 
     #[test]

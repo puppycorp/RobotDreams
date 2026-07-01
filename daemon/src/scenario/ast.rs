@@ -56,6 +56,7 @@ pub(crate) enum Condition {
     FrameNearObject {
         frame: String,
         object: String,
+        #[serde(alias = "distanceM")]
         distance_m: f32,
     },
     FrameInsideVolume {
@@ -83,6 +84,13 @@ pub(crate) enum Condition {
     ElapsedSeconds {
         seconds: f32,
     },
+    PressureSensorPressed {
+        sensor: String,
+    },
+    PressureSensorAtOrAbove {
+        sensor: String,
+        pressure: f32,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -108,6 +116,11 @@ pub(crate) enum Action {
     MarkComplete,
     MarkFailed {
         reason: String,
+    },
+    SetPressureSensor {
+        sensor: String,
+        pressed: bool,
+        pressure: f32,
     },
 }
 

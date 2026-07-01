@@ -55,6 +55,8 @@ enum Command {
     #[command(subcommand)]
     Project(ProjectCommand),
     #[command(subcommand)]
+    Scenario(ScenarioCommand),
+    #[command(subcommand)]
     Simulation(SimulationCommand),
     #[command(subcommand)]
     Recording(RecordingCommand),
@@ -156,6 +158,16 @@ enum ProjectCommand {
 }
 
 #[derive(Debug, Subcommand)]
+enum ScenarioCommand {
+    Load(ScenarioLoadArgs),
+    Reset(ScenarioArgs),
+    State(ScenarioStateArgs),
+    #[command(name = "export-sensors")]
+    ExportSensors(ScenarioExportSensorsArgs),
+    Smoke(ScenarioSmokeArgs),
+}
+
+#[derive(Debug, Subcommand)]
 enum SimulationCommand {
     Start(SimulationArgs),
     Pause(SimulationArgs),
@@ -200,6 +212,87 @@ struct ProjectCommandArgs {
 
     #[arg(long)]
     payload: Option<String>,
+
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct ScenarioLoadArgs {
+    #[arg(long)]
+    project: Option<String>,
+
+    #[arg(long)]
+    simulation: Option<String>,
+
+    #[arg(long)]
+    path: PathBuf,
+
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct ScenarioArgs {
+    #[arg(long)]
+    project: Option<String>,
+
+    #[arg(long)]
+    simulation: Option<String>,
+
+    #[arg(long)]
+    id: Option<String>,
+
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct ScenarioStateArgs {
+    #[arg(long)]
+    project: Option<String>,
+
+    #[arg(long)]
+    simulation: Option<String>,
+
+    #[arg(long)]
+    id: Option<String>,
+
+    #[arg(long)]
+    payload: Option<String>,
+
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct ScenarioExportSensorsArgs {
+    #[arg(long)]
+    project: Option<String>,
+
+    #[arg(long)]
+    simulation: Option<String>,
+
+    #[arg(long)]
+    id: Option<String>,
+
+    #[arg(long)]
+    payload: String,
+
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct ScenarioSmokeArgs {
+    #[arg(long)]
+    project: Option<String>,
+
+    #[arg(long)]
+    simulation: Option<String>,
+
+    #[arg(long)]
+    path: PathBuf,
 
     #[arg(long)]
     json: bool,
@@ -302,6 +395,14 @@ enum DaemonRequest {
         simulation: Option<String>,
         target: String,
         action: String,
+        payload: Option<serde_json::Value>,
+    },
+    ScenarioCommand {
+        project: Option<String>,
+        simulation: Option<String>,
+        action: String,
+        path: Option<String>,
+        scenario: Option<String>,
         payload: Option<serde_json::Value>,
     },
     SimulationCommand {
@@ -477,6 +578,45 @@ mod tests {
             Some(2)
         );
         assert_eq!(last_sequence, 2);
+    }
+
+    #[test]
+    fn attach_scenario_data_adds_semantic_state_to_trace_sample_data() {
+        let data = serde_json::json!({
+            "status": "running",
+            "busEvents": []
+        });
+        let scenario = serde_json::json!({
+            "scenarioId": "puppybot-ball-to-bin",
+            "status": "complete",
+            "progress": "complete"
+        });
+
+        let merged = attach_scenario_data(data, Some(scenario.clone()));
+
+        assert_eq!(merged.get("scenario"), Some(&scenario));
+    }
+
+    #[test]
+    fn cli_parses_scenario_load_command() {
+        let cli = Cli::try_parse_from([
+            "robotdreams",
+            "scenario",
+            "load",
+            "--path",
+            "scenarios/place_ball_to_bin.robotdreams.json",
+            "--json",
+        ])
+        .expect("parse scenario load command");
+
+        let Command::Scenario(ScenarioCommand::Load(args)) = cli.command else {
+            panic!("expected scenario load command");
+        };
+        assert_eq!(
+            args.path,
+            PathBuf::from("scenarios/place_ball_to_bin.robotdreams.json")
+        );
+        assert!(args.json);
     }
 }
 
@@ -1120,6 +1260,18 @@ fn filter_new_bus_events(
     data
 }
 
+fn attach_scenario_data(
+    mut data: serde_json::Value,
+    scenario_data: Option<serde_json::Value>,
+) -> serde_json::Value {
+    if let Some(scenario_data) = scenario_data
+        && let Some(object) = data.as_object_mut()
+    {
+        object.insert("scenario".to_string(), scenario_data);
+    }
+    data
+}
+
 fn spawn_record_trace_sampler(
     socket: PathBuf,
     project: Option<String>,
@@ -1166,6 +1318,20 @@ fn spawn_record_trace_sampler(
         let mut index: u64 = 0;
         let mut last_bus_event_sequence: u64 = 0;
         while !stop.load(Ordering::Relaxed) {
+            let scenario_data = send_request(
+                &socket,
+                &DaemonRequest::ProjectCommand {
+                    project: project.clone(),
+                    simulation: simulation.clone(),
+                    target: "scenario".to_string(),
+                    action: "state".to_string(),
+                    payload: None,
+                },
+            )
+            .await
+            .ok()
+            .filter(|response| response.ok)
+            .and_then(|response| response.data);
             let response = send_request(
                 &socket,
                 &DaemonRequest::SimulationCommand {
@@ -1180,7 +1346,8 @@ fn spawn_record_trace_sampler(
                 Ok(mut response) => {
                     response.data = response
                         .data
-                        .map(|data| filter_new_bus_events(data, &mut last_bus_event_sequence));
+                        .map(|data| filter_new_bus_events(data, &mut last_bus_event_sequence))
+                        .map(|data| attach_scenario_data(data, scenario_data.clone()));
                     write_trace_line(
                         &mut file,
                         serde_json::json!({
@@ -1660,6 +1827,105 @@ async fn main() -> Result<()> {
                 args.json,
             )?;
         }
+        Command::Scenario(command) => match command {
+            ScenarioCommand::Load(args) => {
+                print_project_data(
+                    send_request_or_start(
+                        &cli.socket,
+                        &DaemonRequest::ScenarioCommand {
+                            project: args.project,
+                            simulation: args.simulation,
+                            action: "load".to_string(),
+                            path: Some(args.path.display().to_string()),
+                            scenario: None,
+                            payload: None,
+                        },
+                        &cli.project,
+                        &cli.daemon_bind,
+                    )
+                    .await?,
+                    args.json,
+                )?;
+            }
+            ScenarioCommand::Reset(args) => {
+                print_project_data(
+                    send_request_or_start(
+                        &cli.socket,
+                        &DaemonRequest::ScenarioCommand {
+                            project: args.project,
+                            simulation: args.simulation,
+                            action: "reset".to_string(),
+                            path: None,
+                            scenario: args.id,
+                            payload: None,
+                        },
+                        &cli.project,
+                        &cli.daemon_bind,
+                    )
+                    .await?,
+                    args.json,
+                )?;
+            }
+            ScenarioCommand::State(args) => {
+                let payload = parse_payload(args.payload)?;
+                print_project_data(
+                    send_request_or_start(
+                        &cli.socket,
+                        &DaemonRequest::ScenarioCommand {
+                            project: args.project,
+                            simulation: args.simulation,
+                            action: "state".to_string(),
+                            path: None,
+                            scenario: args.id,
+                            payload,
+                        },
+                        &cli.project,
+                        &cli.daemon_bind,
+                    )
+                    .await?,
+                    args.json,
+                )?;
+            }
+            ScenarioCommand::ExportSensors(args) => {
+                let payload = parse_payload(Some(args.payload))?;
+                print_project_data(
+                    send_request_or_start(
+                        &cli.socket,
+                        &DaemonRequest::ScenarioCommand {
+                            project: args.project,
+                            simulation: args.simulation,
+                            action: "export-sensors".to_string(),
+                            path: None,
+                            scenario: args.id,
+                            payload,
+                        },
+                        &cli.project,
+                        &cli.daemon_bind,
+                    )
+                    .await?,
+                    args.json,
+                )?;
+            }
+            ScenarioCommand::Smoke(args) => {
+                print_project_data(
+                    send_request_or_start(
+                        &cli.socket,
+                        &DaemonRequest::ScenarioCommand {
+                            project: args.project,
+                            simulation: args.simulation,
+                            action: "smoke".to_string(),
+                            path: Some(args.path.display().to_string()),
+                            scenario: None,
+                            payload: None,
+                        },
+                        &cli.project,
+                        &cli.daemon_bind,
+                    )
+                    .await?,
+                    args.json,
+                )?;
+            }
+        },
         Command::Simulation(command) => match command {
             SimulationCommand::Start(args) => {
                 print_project_data(
