@@ -1,27 +1,32 @@
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
-use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::thread;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, SystemTime};
 
-#[cfg(unix)]
-use feetech_servo::servo::protocol::port_handler::PortHandler;
-#[cfg(unix)]
-use feetech_servo::servo::protocol::virtual_uart::VirtualUartPort;
-use feetech_servo::servo::sim::{FeetechBusSim, FeetechServoSnapshot};
 use wgui::wui::runtime::WuiValue;
-use wgui::{CustomComponentController, CustomComponentCtx, WguiModel, wgui_controller};
+use wgui::{WguiModel, wgui_controller};
 
+use crate::hardware_runtime::{
+    HardwareDeviceRuntime, HardwareImuRuntime, HardwareIoBoardRuntime, HardwareRuntime,
+    HardwareServoRuntime, apply_servo_snapshots_to_hardware, apply_servo_snapshots_to_urdf,
+    bus_servo_count, hardware_device_id, hardware_device_kind, hardware_runtime_from_project,
+    hardware_runtime_json, servo_display_name,
+};
+use crate::robot_scene_component::servo_snapshots_json;
+use crate::scene_transform::{
+    add_vec3, project_robot_base_rotation, project_robot_base_translation,
+};
+use crate::system_metrics::{
+    CpuSample, GpuMetricCache, read_cpu_sample, system_cpu_label, system_gpu_label,
+    system_memory_label,
+};
+use crate::virtual_bus::{TimedFeetechBusEvent, WorkbenchVirtualBusHandle};
 use crate::{
-    BusConfig, DeviceConfig, HardwareConfig, ProjectCameraConfig, ProjectConfig,
-    ProjectSceneObjectConfig, ProjectSceneObjectGeometry, ServoDeviceConfig,
+    ProjectCameraConfig, ProjectConfig, ProjectSceneObjectConfig, ProjectSceneObjectGeometry,
     URDF_BASE_SLIDER_BASE_ID, URDF_JOINT_SLIDER_BASE_ID, UrdfViewerState, apply_urdf_slider_change,
     joint_display_label, project_config_from_manifest, project_joint_name, reload_urdf_state,
-    robot_scene_props_with_static_scene, servo_ticks_to_slider_value, slider_value_to_servo_ticks,
-    urdf_joint_slider_range, urdf_joint_type_name, urdf_slider_value_to_units,
-    urdf_value_to_joint_units,
+    robot_scene_props_with_static_scene, slider_value_to_servo_ticks, urdf_joint_slider_range,
+    urdf_joint_type_name, urdf_slider_value_to_units, urdf_value_to_joint_units,
 };
 
 const SCENE_SECTION_ENVIRONMENT: u32 = 1;
@@ -50,7 +55,6 @@ const SCENE_ROW_DEVICE_BUS_STRIDE: u32 = 1_000;
 const SCENE_ROW_PROJECT_OBJECT_BASE: u32 = 60_000;
 const SCENE_ROW_PROJECT_CAMERA_BASE: u32 = 70_000;
 const SENSOR_PREVIEW_COMPONENT_BASE: u32 = 80_000;
-
 #[derive(Debug, Clone, WguiModel)]
 pub(crate) struct WorkbenchSectionModel {
     id: u32,
@@ -155,6 +159,11 @@ pub(crate) struct WorkbenchModel {
     sensors: Vec<WorkbenchSensorModel>,
 }
 
+#[derive(Debug, Clone, WguiModel)]
+pub(crate) struct ViewportModel {
+    robot_scene_props: WuiValue,
+}
+
 pub(crate) struct AppController {
     urdf_state: UrdfViewerState,
     project_config: RefCell<Option<ProjectConfig>>,
@@ -162,6 +171,7 @@ pub(crate) struct AppController {
     project_config_dirty: Cell<bool>,
     hardware_runtime: HardwareRuntime,
     virtual_bus: WorkbenchVirtualBusHandle,
+    simulation_runtime: SimulationRuntimeHandle,
     robot_static_scene_dirty: Cell<bool>,
     selected_scene_row_id: u32,
     collapsed_scene_section_ids: Vec<u32>,
@@ -169,16 +179,13 @@ pub(crate) struct AppController {
     gpu_metric: RefCell<Option<GpuMetricCache>>,
 }
 
-#[derive(Debug, Clone, Copy)]
-struct CpuSample {
-    idle: u64,
-    total: u64,
-}
-
-#[derive(Debug, Clone)]
-struct GpuMetricCache {
-    sampled_at: Instant,
-    label: String,
+pub(crate) struct ViewportController {
+    urdf_state: UrdfViewerState,
+    project_config: RefCell<Option<ProjectConfig>>,
+    project_config_modified: Cell<Option<SystemTime>>,
+    hardware_runtime: HardwareRuntime,
+    virtual_bus: WorkbenchVirtualBusHandle,
+    robot_static_scene_dirty: Cell<bool>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -191,6 +198,136 @@ pub(crate) struct HeadlessSummary {
     pub(crate) virtual_bus_path: Option<String>,
     pub(crate) servo_count: usize,
     pub(crate) snapshots: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum SimulationStatus {
+    Stopped,
+    Running,
+    Paused,
+}
+
+impl SimulationStatus {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            SimulationStatus::Stopped => "stopped",
+            SimulationStatus::Running => "running",
+            SimulationStatus::Paused => "paused",
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub(crate) enum SimulationEvent {
+    Lifecycle {
+        status: SimulationStatus,
+        clock_sec: f64,
+    },
+    ServoCommand {
+        servo_id: u32,
+        target_position: i32,
+        clock_sec: f64,
+    },
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SimulationSample {
+    clock_sec: f64,
+    servo_snapshots: serde_json::Value,
+}
+
+pub(crate) trait RecordingSink: Send {
+    fn event(&mut self, event: SimulationEvent);
+    fn sample(&mut self, sample: SimulationSample);
+}
+
+#[derive(Default)]
+struct NoopRecordingSink;
+
+impl RecordingSink for NoopRecordingSink {
+    fn event(&mut self, _event: SimulationEvent) {}
+
+    fn sample(&mut self, _sample: SimulationSample) {}
+}
+
+struct SimulationRuntime {
+    status: SimulationStatus,
+    clock_sec: f64,
+    recording_sink: Box<dyn RecordingSink>,
+}
+
+#[derive(Clone)]
+pub(crate) struct SimulationRuntimeHandle {
+    inner: Arc<Mutex<SimulationRuntime>>,
+}
+
+impl SimulationRuntimeHandle {
+    pub(crate) fn new() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(SimulationRuntime {
+                status: SimulationStatus::Stopped,
+                clock_sec: 0.0,
+                recording_sink: Box::<NoopRecordingSink>::default(),
+            })),
+        }
+    }
+
+    pub(crate) fn status(&self) -> SimulationStatus {
+        self.inner
+            .lock()
+            .map(|runtime| runtime.status)
+            .unwrap_or(SimulationStatus::Stopped)
+    }
+
+    pub(crate) fn clock_sec(&self) -> f64 {
+        self.inner
+            .lock()
+            .map(|runtime| runtime.clock_sec)
+            .unwrap_or(0.0)
+    }
+
+    pub(crate) fn set_status(&self, status: SimulationStatus) {
+        if let Ok(mut runtime) = self.inner.lock() {
+            runtime.status = status;
+            let clock_sec = runtime.clock_sec;
+            runtime
+                .recording_sink
+                .event(SimulationEvent::Lifecycle { status, clock_sec });
+        }
+    }
+
+    pub(crate) fn reset_clock(&self) {
+        if let Ok(mut runtime) = self.inner.lock() {
+            runtime.clock_sec = 0.0;
+        }
+    }
+
+    fn advance(&self, dt_sec: f64, servo_snapshots: serde_json::Value) {
+        if let Ok(mut runtime) = self.inner.lock()
+            && runtime.status == SimulationStatus::Running
+        {
+            runtime.clock_sec += dt_sec.max(0.0);
+            let clock_sec = runtime.clock_sec;
+            runtime.recording_sink.sample(SimulationSample {
+                clock_sec,
+                servo_snapshots,
+            });
+        }
+    }
+
+    fn record_servo_command(&self, servo_id: u32, target_position: i32) {
+        if let Ok(mut runtime) = self.inner.lock() {
+            let clock_sec = runtime.clock_sec;
+            runtime.recording_sink.event(SimulationEvent::ServoCommand {
+                servo_id,
+                target_position,
+                clock_sec,
+            });
+        }
+    }
 }
 
 fn serde_json_to_wui_value(value: &serde_json::Value) -> WuiValue {
@@ -349,779 +486,40 @@ fn workbench_sensor(name: &str, target: &str, rate: &str) -> WorkbenchSensorMode
     }
 }
 
-fn extract_servo_frames(buffer: &mut Vec<u8>) -> Vec<Vec<u8>> {
-    let mut frames = Vec::new();
-
-    loop {
-        if buffer.len() < 2 {
-            break;
-        }
-
-        let mut start = None;
-        for idx in 0..(buffer.len() - 1) {
-            if buffer[idx] == 0xFF && buffer[idx + 1] == 0xFF {
-                start = Some(idx);
-                break;
-            }
-        }
-
-        let Some(start) = start else {
-            buffer.clear();
-            break;
-        };
-
-        if start > 0 {
-            buffer.drain(0..start);
-        }
-
-        if buffer.len() < 4 {
-            break;
-        }
-
-        let length = buffer[3] as usize;
-        if length < 2 {
-            buffer.drain(0..1);
-            continue;
-        }
-
-        let total_len = length + 4;
-        if total_len < 6 {
-            buffer.drain(0..1);
-            continue;
-        }
-
-        if buffer.len() < total_len {
-            break;
-        }
-
-        frames.push(buffer.drain(0..total_len).collect());
-    }
-
-    frames
+fn bus_write_event_json(
+    write: &feetech_servo::servo::sim::FeetechBusWriteEvent,
+) -> serde_json::Value {
+    serde_json::json!({
+        "id": write.id,
+        "data": write.data,
+        "targetPosition": write.target_position,
+    })
 }
 
-#[cfg(unix)]
-struct WorkbenchVirtualBus {
-    sim: Arc<Mutex<FeetechBusSim>>,
-    stop: Option<Arc<AtomicBool>>,
-    join: Option<thread::JoinHandle<()>>,
-    path: Option<String>,
-    status: String,
-    configured: bool,
-}
-
-#[cfg(not(unix))]
-struct WorkbenchVirtualBus {
-    sim: Arc<Mutex<FeetechBusSim>>,
-    status: String,
-    configured: bool,
-}
-
-#[cfg(unix)]
-impl WorkbenchVirtualBus {
-    fn new() -> Self {
-        Self {
-            sim: Arc::new(Mutex::new(FeetechBusSim::new())),
-            stop: None,
-            join: None,
-            path: None,
-            status: "Stopped".to_string(),
-            configured: false,
-        }
-    }
-
-    fn is_running(&self) -> bool {
-        self.stop.is_some()
-    }
-
-    fn path(&self) -> Option<&str> {
-        self.path.as_deref()
-    }
-
-    fn status(&self) -> &str {
-        &self.status
-    }
-
-    fn set_servo_count(&self, servo_count: u8) {
-        if let Ok(mut sim) = self.sim.lock() {
-            sim.set_servo_count(servo_count.max(1));
-        }
-    }
-
-    fn configure_from_hardware(&mut self, hardware_runtime: &HardwareRuntime) {
-        if self.is_running() || self.configured {
-            return;
-        }
-        self.reset_from_hardware(hardware_runtime);
-    }
-
-    fn reset_from_hardware(&mut self, hardware_runtime: &HardwareRuntime) {
-        if let Ok(mut sim) = self.sim.lock() {
-            sim.set_servo_count(max_servo_count(hardware_runtime));
-            for bus in &hardware_runtime.buses {
-                for device in &bus.devices {
-                    let HardwareDeviceRuntime::Servo(servo) = device else {
-                        continue;
-                    };
-                    if let Ok(servo_id) = u8::try_from(servo.id) {
-                        let _ = sim.set_target_position(servo_id, servo.zero_offset);
-                    }
-                }
-            }
-            sim.step(3.0);
-            self.configured = true;
-        }
-    }
-
-    fn set_target_position(&self, id: u8, target: i16) {
-        let step_seconds = if self.is_running() { 0.05 } else { 3.0 };
-        if let Ok(mut sim) = self.sim.lock() {
-            let _ = sim.set_target_position(id, target);
-            sim.step(step_seconds);
-        }
-    }
-
-    fn snapshots(&self) -> Vec<FeetechServoSnapshot> {
-        self.sim
-            .lock()
-            .map(|mut sim| {
-                sim.step(0.02);
-                sim.servo_snapshots()
-            })
-            .unwrap_or_default()
-    }
-
-    fn start(&mut self, servo_count: u8) -> Result<String, String> {
-        self.stop();
-        self.set_servo_count(servo_count);
-
-        let mut port = VirtualUartPort::new()
-            .map_err(|err| format!("Failed to create virtual bus device: {err}"))?;
-        let path = port.slave_path().to_string();
-        let stop = Arc::new(AtomicBool::new(false));
-        let stop_in_thread = Arc::clone(&stop);
-        let sim = Arc::clone(&self.sim);
-
-        let join = thread::spawn(move || {
-            let mut buffer = Vec::new();
-            let mut last_step = Instant::now();
-
-            while !stop_in_thread.load(Ordering::Relaxed) {
-                let now = Instant::now();
-                let dt = (now - last_step).as_secs_f32();
-                last_step = now;
-                if let Ok(mut sim) = sim.lock() {
-                    sim.step(dt.max(0.001));
-                }
-
-                let mut incoming = port.read_port(512);
-                if incoming.is_empty() {
-                    thread::sleep(Duration::from_millis(2));
-                    continue;
-                }
-
-                buffer.append(&mut incoming);
-                for frame in extract_servo_frames(&mut buffer) {
-                    let response = sim
-                        .lock()
-                        .ok()
-                        .and_then(|mut sim| sim.handle_frame(&frame).ok().flatten());
-                    if let Some(response) = response {
-                        let _ = port.write_port(&response);
-                    }
-                }
-            }
-        });
-
-        self.stop = Some(stop);
-        self.join = Some(join);
-        self.path = Some(path.clone());
-        self.status = "Running".to_string();
-        self.configured = true;
-        Ok(path)
-    }
-
-    fn stop(&mut self) {
-        if let Some(stop) = self.stop.take() {
-            stop.store(true, Ordering::Relaxed);
-        }
-        if let Some(join) = self.join.take() {
-            let _ = join.join();
-        }
-        self.path = None;
-        self.status = "Stopped".to_string();
-    }
-}
-
-#[cfg(unix)]
-impl Drop for WorkbenchVirtualBus {
-    fn drop(&mut self) {
-        self.stop();
-    }
-}
-
-#[cfg(not(unix))]
-impl WorkbenchVirtualBus {
-    fn new() -> Self {
-        Self {
-            sim: Arc::new(Mutex::new(FeetechBusSim::new())),
-            status: "Virtual bus devices are only available on Unix".to_string(),
-            configured: false,
-        }
-    }
-
-    fn is_running(&self) -> bool {
-        false
-    }
-
-    fn path(&self) -> Option<&str> {
-        None
-    }
-
-    fn status(&self) -> &str {
-        &self.status
-    }
-
-    fn set_servo_count(&self, servo_count: u8) {
-        if let Ok(mut sim) = self.sim.lock() {
-            sim.set_servo_count(servo_count.max(1));
-        }
-    }
-
-    fn configure_from_hardware(&mut self, hardware_runtime: &HardwareRuntime) {
-        if self.configured {
-            return;
-        }
-        self.reset_from_hardware(hardware_runtime);
-    }
-
-    fn reset_from_hardware(&mut self, hardware_runtime: &HardwareRuntime) {
-        if let Ok(mut sim) = self.sim.lock() {
-            sim.set_servo_count(max_servo_count(hardware_runtime));
-            for bus in &hardware_runtime.buses {
-                for device in &bus.devices {
-                    let HardwareDeviceRuntime::Servo(servo) = device else {
-                        continue;
-                    };
-                    if let Ok(servo_id) = u8::try_from(servo.id) {
-                        let _ = sim.set_target_position(servo_id, servo.zero_offset);
-                    }
-                }
-            }
-            sim.step(3.0);
-            self.configured = true;
-        }
-    }
-
-    fn set_target_position(&self, id: u8, target: i16) {
-        if let Ok(mut sim) = self.sim.lock() {
-            let _ = sim.set_target_position(id, target);
-            sim.step(3.0);
-        }
-    }
-
-    fn snapshots(&self) -> Vec<FeetechServoSnapshot> {
-        self.sim
-            .lock()
-            .map(|mut sim| {
-                sim.step(0.02);
-                sim.servo_snapshots()
-            })
-            .unwrap_or_default()
-    }
-
-    fn start(&mut self, _servo_count: u8) -> Result<String, String> {
-        Err(self.status.clone())
-    }
-
-    fn stop(&mut self) {}
-}
-
-#[derive(Clone)]
-pub(crate) struct WorkbenchVirtualBusHandle {
-    inner: Arc<Mutex<WorkbenchVirtualBus>>,
-}
-
-impl WorkbenchVirtualBusHandle {
-    pub(crate) fn new() -> Self {
-        Self {
-            inner: Arc::new(Mutex::new(WorkbenchVirtualBus::new())),
-        }
-    }
-
-    fn with_bus<T>(&self, fallback: T, f: impl FnOnce(&mut WorkbenchVirtualBus) -> T) -> T {
-        self.inner
-            .lock()
-            .map(|mut bus| f(&mut bus))
-            .unwrap_or(fallback)
-    }
-
-    pub(crate) fn is_running(&self) -> bool {
-        self.with_bus(false, |bus| bus.is_running())
-    }
-
-    pub(crate) fn path(&self) -> Option<String> {
-        self.with_bus(None, |bus| bus.path().map(str::to_string))
-    }
-
-    fn set_servo_count(&self, servo_count: u8) {
-        self.with_bus((), |bus| bus.set_servo_count(servo_count));
-    }
-
-    fn configure_from_hardware(&self, hardware_runtime: &HardwareRuntime) {
-        self.with_bus((), |bus| bus.configure_from_hardware(hardware_runtime));
-    }
-
-    fn reset_from_hardware(&self, hardware_runtime: &HardwareRuntime) {
-        self.with_bus((), |bus| bus.reset_from_hardware(hardware_runtime));
-    }
-
-    fn set_target_position(&self, id: u8, target: i16) {
-        self.with_bus((), |bus| bus.set_target_position(id, target));
-    }
-
-    pub(crate) fn snapshots(&self) -> Vec<FeetechServoSnapshot> {
-        self.with_bus(Vec::new(), |bus| bus.snapshots())
-    }
-
-    fn start(&self, servo_count: u8) -> Result<String, String> {
-        self.with_bus(Err("Virtual bus lock is unavailable".to_string()), |bus| {
-            bus.start(servo_count)
-        })
-    }
-
-    pub(crate) fn stop(&self) {
-        self.with_bus((), |bus| bus.stop());
-    }
-}
-
-pub(crate) struct RobotSceneComponent {
-    virtual_bus: WorkbenchVirtualBusHandle,
-    urdf_state: UrdfViewerState,
-    project_config: Option<ProjectConfig>,
-    project_config_modified: Option<SystemTime>,
-    hardware_runtime: HardwareRuntime,
-}
-
-impl RobotSceneComponent {
-    pub(crate) fn new(
-        virtual_bus: WorkbenchVirtualBusHandle,
-        urdf_path: Option<PathBuf>,
-        project_config: Option<ProjectConfig>,
-    ) -> Self {
-        let mut urdf_state = UrdfViewerState::new(urdf_path);
-        reload_urdf_state(&mut urdf_state);
-        let project_config_modified = project_manifest_modified(project_config.as_ref());
-        let hardware_runtime = hardware_runtime_from_project(project_config.as_ref(), &urdf_state);
-        virtual_bus.configure_from_hardware(&hardware_runtime);
-        Self {
-            virtual_bus,
-            urdf_state,
-            project_config,
-            project_config_modified,
-            hardware_runtime,
-        }
-    }
-
-    fn reload_project_config_if_changed(&mut self) {
-        let Some(manifest_path) = self
-            .project_config
-            .as_ref()
-            .map(|project| project.manifest_path.clone())
-        else {
-            return;
-        };
-        let modified = manifest_path
-            .metadata()
-            .ok()
-            .and_then(|metadata| metadata.modified().ok());
-        if modified == self.project_config_modified {
-            return;
-        }
-        let Some(project_config) = project_config_from_manifest(&manifest_path) else {
-            return;
-        };
-        self.project_config = Some(project_config);
-        self.project_config_modified = modified;
-        self.hardware_runtime =
-            hardware_runtime_from_project(self.project_config.as_ref(), &self.urdf_state);
-        self.virtual_bus
-            .configure_from_hardware(&self.hardware_runtime);
-    }
-
-    fn robot_scene_props_for_snapshots(
-        &self,
-        snapshots: &[FeetechServoSnapshot],
-    ) -> serde_json::Value {
-        let mut live_hardware_runtime = self.hardware_runtime.clone();
-        apply_servo_snapshots_to_hardware(&mut live_hardware_runtime, snapshots);
-
-        let mut live_urdf_state = self.urdf_state.clone();
-        apply_servo_snapshots_to_urdf(&mut live_urdf_state, &live_hardware_runtime, snapshots);
-
-        let live_base_translation = [
-            urdf_slider_value_to_units(live_urdf_state.base_translation_values[0]),
-            urdf_slider_value_to_units(live_urdf_state.base_translation_values[1]),
-            urdf_slider_value_to_units(live_urdf_state.base_translation_values[2]),
-        ];
-        let live_base_rotation = [
-            urdf_slider_value_to_units(live_urdf_state.base_rotation_values[0]),
-            urdf_slider_value_to_units(live_urdf_state.base_rotation_values[1]),
-            urdf_slider_value_to_units(live_urdf_state.base_rotation_values[2]),
-        ];
-        let project_config = self.project_config.as_ref();
-        let base_translation = add_vec3(
-            project_robot_base_translation(project_config),
-            live_base_translation,
-        );
-        let base_rotation = add_vec3(
-            project_robot_base_rotation(project_config),
-            live_base_rotation,
-        );
-
-        robot_scene_props_with_static_scene(
-            &live_urdf_state,
-            project_config,
-            base_translation,
-            base_rotation,
-            false,
-        )
-    }
-}
-
-pub(crate) fn servo_snapshots_json(snapshots: &[FeetechServoSnapshot]) -> serde_json::Value {
+fn bus_events_json(events: &[TimedFeetechBusEvent]) -> serde_json::Value {
     serde_json::Value::Array(
-        snapshots
+        events
             .iter()
-            .map(|snapshot| {
+            .map(|timed| {
+                let event = &timed.event;
                 serde_json::json!({
-                    "id": snapshot.id,
-                    "mode": snapshot.mode,
-                    "torqueEnabled": snapshot.torque_enabled,
-                    "moving": snapshot.moving,
-                    "targetPosition": snapshot.target_position,
-                    "presentPosition": snapshot.present_position,
-                    "presentSpeed": snapshot.present_speed,
-                    "presentLoad": snapshot.present_load,
-                    "currentRaw": snapshot.current_raw,
-                    "temperatureC": snapshot.temperature_c,
-                    "voltageTenths": snapshot.voltage_tenths,
+                    "sequence": timed.sequence,
+                    "unixMs": timed.unix_ms,
+                    "instruction": event.instruction,
+                    "id": event.id,
+                    "broadcast": event.broadcast,
+                    "address": event.address,
+                    "length": event.length,
+                    "ids": event.ids,
+                    "writes": event.writes.iter().map(bus_write_event_json).collect::<Vec<_>>(),
+                    "data": event.data,
+                    "targetPosition": event.target_position,
+                    "raw": event.raw,
+                    "error": event.error,
                 })
             })
             .collect(),
     )
-}
-
-#[async_trait::async_trait]
-impl CustomComponentController for RobotSceneComponent {
-    async fn process(&mut self, ctx: CustomComponentCtx) -> anyhow::Result<()> {
-        loop {
-            self.reload_project_config_if_changed();
-            if self.virtual_bus.is_running() {
-                let snapshots = self.virtual_bus.snapshots();
-                ctx.send_data(
-                    "servoSnapshots",
-                    serde_json::json!({
-                        "snapshots": servo_snapshots_json(&snapshots),
-                        "robotSceneProps": self.robot_scene_props_for_snapshots(&snapshots),
-                    }),
-                )
-                .await?;
-            }
-
-            tokio::time::sleep(Duration::from_millis(33)).await;
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-struct HardwareRuntime {
-    buses: Vec<HardwareBusRuntime>,
-}
-
-#[derive(Debug, Clone)]
-struct HardwareBusRuntime {
-    id: String,
-    name: String,
-    transport_type: String,
-    device_path: Option<String>,
-    baud: Option<u32>,
-    protocol: String,
-    devices: Vec<HardwareDeviceRuntime>,
-}
-
-#[derive(Debug, Clone)]
-enum HardwareDeviceRuntime {
-    Servo(HardwareServoRuntime),
-    Imu(HardwareImuRuntime),
-    IoBoard(HardwareIoBoardRuntime),
-}
-
-#[derive(Debug, Clone)]
-struct HardwareServoRuntime {
-    id: u32,
-    name: String,
-    profile: String,
-    drives_robot: String,
-    drives_joint: String,
-    zero_offset: i16,
-    direction: i8,
-    target_position: i16,
-    present_position: i16,
-    torque_enabled: bool,
-    temperature_c: i16,
-    voltage_v: f32,
-}
-
-#[derive(Debug, Clone)]
-struct HardwareImuRuntime {
-    id: u32,
-    name: String,
-    profile: String,
-    mounted_robot: Option<String>,
-    mounted_link: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-struct HardwareIoBoardRuntime {
-    id: u32,
-    name: String,
-    profile: String,
-    digital_inputs: usize,
-    digital_outputs: usize,
-    analog_inputs: usize,
-}
-
-fn inferred_servo_runtime(slot: usize, joint_name: &str) -> HardwareDeviceRuntime {
-    HardwareDeviceRuntime::Servo(HardwareServoRuntime {
-        id: (slot + 1) as u32,
-        name: format!("Servo {}", slot + 1),
-        profile: "ST3215".to_string(),
-        drives_robot: "puppyarm".to_string(),
-        drives_joint: joint_name.to_string(),
-        zero_offset: 2048,
-        direction: 1,
-        target_position: 2048,
-        present_position: 2048,
-        torque_enabled: true,
-        temperature_c: 25,
-        voltage_v: 7.4,
-    })
-}
-
-fn servo_runtime_from_config(config: &ServoDeviceConfig) -> HardwareServoRuntime {
-    let drives = config.drives.as_ref();
-    HardwareServoRuntime {
-        id: config.id,
-        name: config.name.clone(),
-        profile: config.profile.clone(),
-        drives_robot: drives
-            .map(|mapping| mapping.robot.clone())
-            .unwrap_or_else(|| "puppyarm".to_string()),
-        drives_joint: drives
-            .map(|mapping| mapping.target.clone())
-            .unwrap_or_else(|| "-".to_string()),
-        zero_offset: config.calibration.zero_offset,
-        direction: config.calibration.direction,
-        target_position: config.calibration.zero_offset,
-        present_position: config.calibration.zero_offset,
-        torque_enabled: true,
-        temperature_c: 25,
-        voltage_v: 7.4,
-    }
-}
-
-fn device_runtime_from_config(config: &DeviceConfig) -> HardwareDeviceRuntime {
-    match config {
-        DeviceConfig::Servo(config) => {
-            HardwareDeviceRuntime::Servo(servo_runtime_from_config(config))
-        }
-        DeviceConfig::Imu(config) => HardwareDeviceRuntime::Imu(HardwareImuRuntime {
-            id: config.id,
-            name: config.name.clone(),
-            profile: config.profile.clone(),
-            mounted_robot: config
-                .mounted_on
-                .as_ref()
-                .map(|mapping| mapping.robot.clone()),
-            mounted_link: config
-                .mounted_on
-                .as_ref()
-                .map(|mapping| mapping.target.clone()),
-        }),
-        DeviceConfig::IoBoard(config) => HardwareDeviceRuntime::IoBoard(HardwareIoBoardRuntime {
-            id: config.id,
-            name: config.name.clone(),
-            profile: config.profile.clone(),
-            digital_inputs: 0,
-            digital_outputs: 0,
-            analog_inputs: 0,
-        }),
-    }
-}
-
-fn bus_runtime_from_config(config: &BusConfig) -> HardwareBusRuntime {
-    HardwareBusRuntime {
-        id: config.id.clone(),
-        name: config.name.clone(),
-        transport_type: config.transport.type_name.clone(),
-        device_path: config.transport.path.clone(),
-        baud: config.transport.baud,
-        protocol: config.protocol.clone(),
-        devices: config
-            .devices
-            .iter()
-            .map(device_runtime_from_config)
-            .collect(),
-    }
-}
-
-fn inferred_hardware_runtime(state: &UrdfViewerState) -> HardwareRuntime {
-    let devices = state
-        .robot
-        .as_ref()
-        .map(|robot| {
-            robot
-                .movable_joint_indices
-                .iter()
-                .enumerate()
-                .filter_map(|(slot, joint_index)| {
-                    robot
-                        .joints
-                        .get(*joint_index)
-                        .map(|joint| inferred_servo_runtime(slot, &joint.name))
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-
-    HardwareRuntime {
-        buses: vec![HardwareBusRuntime {
-            id: "main_bus".to_string(),
-            name: "Main Serial Bus".to_string(),
-            transport_type: "virtual".to_string(),
-            device_path: None,
-            baud: Some(1_000_000),
-            protocol: "feetech".to_string(),
-            devices,
-        }],
-    }
-}
-
-fn hardware_runtime_from_config(hardware: &HardwareConfig) -> HardwareRuntime {
-    HardwareRuntime {
-        buses: hardware.buses.iter().map(bus_runtime_from_config).collect(),
-    }
-}
-
-fn hardware_runtime_from_project(
-    project_config: Option<&ProjectConfig>,
-    state: &UrdfViewerState,
-) -> HardwareRuntime {
-    if let Some(project_config) = project_config
-        && !project_config.hardware.buses.is_empty()
-    {
-        return hardware_runtime_from_config(&project_config.hardware);
-    }
-
-    inferred_hardware_runtime(state)
-}
-
-fn hardware_device_id(device: &HardwareDeviceRuntime) -> u32 {
-    match device {
-        HardwareDeviceRuntime::Servo(device) => device.id,
-        HardwareDeviceRuntime::Imu(device) => device.id,
-        HardwareDeviceRuntime::IoBoard(device) => device.id,
-    }
-}
-
-fn hardware_device_kind(device: &HardwareDeviceRuntime) -> &'static str {
-    match device {
-        HardwareDeviceRuntime::Servo(_) => "servo",
-        HardwareDeviceRuntime::Imu(_) => "imu",
-        HardwareDeviceRuntime::IoBoard(_) => "io_board",
-    }
-}
-
-fn hardware_device_json(
-    device: &HardwareDeviceRuntime,
-    project_config: Option<&ProjectConfig>,
-) -> serde_json::Value {
-    match device {
-        HardwareDeviceRuntime::Servo(device) => serde_json::json!({
-            "type": "servo",
-            "id": device.id,
-            "name": servo_display_name(device, project_config),
-            "configuredName": device.name,
-            "profile": device.profile,
-            "drives": {
-                "robot": device.drives_robot,
-                "joint": device.drives_joint,
-                "displayName": joint_display_label(project_config, &device.drives_joint),
-                "semanticName": project_joint_name(project_config, &device.drives_joint),
-            },
-            "calibration": {
-                "zeroOffset": device.zero_offset,
-                "direction": device.direction,
-            },
-            "state": {
-                "targetPosition": device.target_position,
-                "presentPosition": device.present_position,
-                "torqueEnabled": device.torque_enabled,
-                "temperatureC": device.temperature_c,
-                "voltageV": device.voltage_v,
-            },
-        }),
-        HardwareDeviceRuntime::Imu(device) => serde_json::json!({
-            "type": "imu",
-            "id": device.id,
-            "name": device.name,
-            "profile": device.profile,
-            "mountedOn": {
-                "robot": device.mounted_robot,
-                "link": device.mounted_link,
-            },
-            "state": {
-                "orientation": [0.0, 0.0, 0.0],
-                "angularVelocity": [0.0, 0.0, 0.0],
-                "linearAcceleration": [0.0, 0.0, 0.0],
-            },
-        }),
-        HardwareDeviceRuntime::IoBoard(device) => serde_json::json!({
-            "type": "io_board",
-            "id": device.id,
-            "name": device.name,
-            "profile": device.profile,
-            "state": {
-                "digitalInputs": device.digital_inputs,
-                "digitalOutputs": device.digital_outputs,
-                "analogInputs": device.analog_inputs,
-            },
-        }),
-    }
-}
-
-fn hardware_runtime_json(
-    hardware_runtime: &HardwareRuntime,
-    project_config: Option<&ProjectConfig>,
-) -> serde_json::Value {
-    serde_json::json!({
-        "buses": hardware_runtime.buses.iter().map(|bus| {
-            serde_json::json!({
-                "id": bus.id,
-                "name": bus.name,
-                "transport": {
-                    "type": bus.transport_type,
-                    "path": bus.device_path,
-                    "baud": bus.baud,
-                },
-                "protocol": bus.protocol,
-                "devices": bus.devices.iter().map(|device| {
-                    hardware_device_json(device, project_config)
-                }).collect::<Vec<_>>(),
-            })
-        }).collect::<Vec<_>>(),
-    })
 }
 
 fn slider_json(slider: WorkbenchSliderModel) -> serde_json::Value {
@@ -1146,120 +544,6 @@ fn file_label(state: &UrdfViewerState) -> String {
         .unwrap_or_else(|| {
             "(auto-discovery failed: place a .urdf in ./models, ./examples, or ./model)".to_string()
         })
-}
-
-fn system_memory_label() -> String {
-    system_memory_bytes()
-        .map(|(used, total)| {
-            format!(
-                "Memory {} used / {} total",
-                format_memory_bytes(used),
-                format_memory_bytes(total)
-            )
-        })
-        .unwrap_or_else(|| "Memory --".to_string())
-}
-
-fn system_memory_bytes() -> Option<(u64, u64)> {
-    let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
-    let total = meminfo_value_bytes(&meminfo, "MemTotal:")?;
-    let available = meminfo_value_bytes(&meminfo, "MemAvailable:")?;
-    Some((total.saturating_sub(available), total))
-}
-
-fn meminfo_value_bytes(meminfo: &str, key: &str) -> Option<u64> {
-    meminfo.lines().find_map(|line| {
-        let value = line.strip_prefix(key)?;
-        let kb = value.split_whitespace().next()?.parse::<u64>().ok()?;
-        Some(kb.saturating_mul(1024))
-    })
-}
-
-fn format_memory_bytes(bytes: u64) -> String {
-    const MIB: f64 = 1024.0 * 1024.0;
-    const GIB: f64 = 1024.0 * MIB;
-    let bytes = bytes as f64;
-
-    if bytes >= GIB {
-        format!("{:.1} GB", bytes / GIB)
-    } else {
-        format!("{:.0} MB", bytes / MIB)
-    }
-}
-
-fn system_cpu_label(cpu_sample: &Cell<Option<CpuSample>>) -> String {
-    let Some(current) = read_cpu_sample() else {
-        return "CPU --".to_string();
-    };
-    let previous = cpu_sample.replace(Some(current));
-    let Some(previous) = previous else {
-        return "CPU --".to_string();
-    };
-
-    let total_delta = current.total.saturating_sub(previous.total);
-    if total_delta == 0 {
-        return "CPU --".to_string();
-    }
-
-    let idle_delta = current.idle.saturating_sub(previous.idle);
-    let used_delta = total_delta.saturating_sub(idle_delta);
-    let usage = 100.0 * used_delta as f64 / total_delta as f64;
-    format!("CPU {:.0}%", usage)
-}
-
-fn read_cpu_sample() -> Option<CpuSample> {
-    let stat = std::fs::read_to_string("/proc/stat").ok()?;
-    let cpu_line = stat.lines().next()?.strip_prefix("cpu ")?;
-    let values = cpu_line
-        .split_whitespace()
-        .map(str::parse::<u64>)
-        .collect::<Result<Vec<_>, _>>()
-        .ok()?;
-    if values.len() < 4 {
-        return None;
-    }
-
-    let idle = values
-        .get(3)
-        .copied()
-        .unwrap_or(0)
-        .saturating_add(values.get(4).copied().unwrap_or(0));
-    let total = values.iter().copied().sum();
-    Some(CpuSample { idle, total })
-}
-
-fn system_gpu_label(cache: &RefCell<Option<GpuMetricCache>>) -> String {
-    let now = Instant::now();
-    if let Some(cached) = cache.borrow().as_ref()
-        && now.duration_since(cached.sampled_at) < Duration::from_secs(2)
-    {
-        return cached.label.clone();
-    }
-
-    let label = read_gpu_usage_percent()
-        .map(|usage| format!("GPU {usage}%"))
-        .unwrap_or_else(|| "GPU --".to_string());
-    *cache.borrow_mut() = Some(GpuMetricCache {
-        sampled_at: now,
-        label: label.clone(),
-    });
-    label
-}
-
-fn read_gpu_usage_percent() -> Option<u32> {
-    let output = Command::new("nvidia-smi")
-        .args([
-            "--query-gpu=utilization.gpu",
-            "--format=csv,noheader,nounits",
-        ])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-
-    let stdout = String::from_utf8(output.stdout).ok()?;
-    stdout.lines().next()?.trim().parse::<u32>().ok()
 }
 
 fn base_controls(state: &UrdfViewerState) -> Vec<WorkbenchSliderModel> {
@@ -1569,24 +853,6 @@ fn device_row_detail(
             .unwrap_or_else(|| device.profile.clone()),
         HardwareDeviceRuntime::IoBoard(device) => device.profile.clone(),
     }
-}
-
-fn title_case_ascii(value: &str) -> String {
-    let mut chars = value.chars();
-    let Some(first) = chars.next() else {
-        return String::new();
-    };
-
-    format!("{}{}", first.to_ascii_uppercase(), chars.as_str())
-}
-
-fn servo_display_name(
-    servo: &HardwareServoRuntime,
-    project_config: Option<&ProjectConfig>,
-) -> String {
-    project_joint_name(project_config, &servo.drives_joint)
-        .map(|joint_name| format!("{} Servo", title_case_ascii(joint_name)))
-        .unwrap_or_else(|| servo.name.clone())
 }
 
 fn device_row_label(
@@ -1911,24 +1177,6 @@ struct SelectedSceneInfo {
 
 fn format_vec3(value: [f32; 3]) -> String {
     format!("{:.3}, {:.3}, {:.3}", value[0], value[1], value[2])
-}
-
-fn add_vec3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
-}
-
-fn project_robot_base_translation(project_config: Option<&ProjectConfig>) -> [f32; 3] {
-    project_config
-        .and_then(|config| config.robots.first())
-        .map(|robot| robot.base_translation)
-        .unwrap_or([0.0, 0.0, 0.0])
-}
-
-fn project_robot_base_rotation(project_config: Option<&ProjectConfig>) -> [f32; 3] {
-    project_config
-        .and_then(|config| config.robots.first())
-        .map(|robot| robot.base_rotation)
-        .unwrap_or([0.0, 0.0, 0.0])
 }
 
 fn static_scene_info(
@@ -2644,105 +1892,6 @@ fn servo_target_controls(
         .collect()
 }
 
-fn bus_servo_count(bus: &HardwareBusRuntime) -> u8 {
-    bus.devices
-        .iter()
-        .filter_map(|device| match device {
-            HardwareDeviceRuntime::Servo(servo) => u8::try_from(servo.id).ok(),
-            _ => None,
-        })
-        .max()
-        .unwrap_or(1)
-}
-
-fn max_servo_count(hardware_runtime: &HardwareRuntime) -> u8 {
-    hardware_runtime
-        .buses
-        .iter()
-        .map(bus_servo_count)
-        .max()
-        .unwrap_or(1)
-}
-
-fn servo_snapshot<'a>(
-    snapshots: &'a [FeetechServoSnapshot],
-    servo: &HardwareServoRuntime,
-) -> Option<&'a FeetechServoSnapshot> {
-    let servo_id = u8::try_from(servo.id).ok()?;
-    snapshots.iter().find(|snapshot| snapshot.id == servo_id)
-}
-
-fn apply_servo_snapshots_to_hardware(
-    hardware_runtime: &mut HardwareRuntime,
-    snapshots: &[FeetechServoSnapshot],
-) {
-    for bus in &mut hardware_runtime.buses {
-        for device in &mut bus.devices {
-            let HardwareDeviceRuntime::Servo(servo) = device else {
-                continue;
-            };
-            let Some(snapshot) = servo_snapshot(snapshots, servo) else {
-                continue;
-            };
-
-            servo.target_position = snapshot.target_position;
-            servo.present_position = snapshot.present_position;
-            servo.torque_enabled = snapshot.torque_enabled;
-            servo.temperature_c = i16::from(snapshot.temperature_c);
-            servo.voltage_v = f32::from(snapshot.voltage_tenths) / 10.0;
-        }
-    }
-}
-
-fn find_joint_index_by_name(state: &UrdfViewerState, joint_name: &str) -> Option<usize> {
-    state
-        .robot
-        .as_ref()?
-        .joints
-        .iter()
-        .position(|joint| joint.name == joint_name)
-}
-
-fn apply_servo_snapshots_to_urdf(
-    state: &mut UrdfViewerState,
-    hardware_runtime: &HardwareRuntime,
-    snapshots: &[FeetechServoSnapshot],
-) {
-    let Some(robot) = state.robot.as_ref() else {
-        return;
-    };
-    let mut updates = Vec::new();
-    for bus in &hardware_runtime.buses {
-        for device in &bus.devices {
-            let HardwareDeviceRuntime::Servo(servo) = device else {
-                continue;
-            };
-            let Some(snapshot) = servo_snapshot(snapshots, servo) else {
-                continue;
-            };
-            let Some(joint_index) = robot
-                .joints
-                .iter()
-                .position(|joint| joint.name == servo.drives_joint)
-            else {
-                continue;
-            };
-            let joint = &robot.joints[joint_index];
-            let (min, max) = urdf_joint_slider_range(joint);
-            updates.push((
-                joint_index,
-                servo_ticks_to_slider_value(snapshot.present_position, min, max),
-            ));
-        }
-    }
-
-    for (joint_index, value) in updates {
-        if let Some(joint_value) = state.joint_values.get_mut(joint_index) {
-            *joint_value = value;
-        }
-    }
-}
-
 fn sensors() -> Vec<WorkbenchSensorModel> {
     vec![
         workbench_sensor("Joint States", "JS_1", "100 Hz"),
@@ -2881,6 +2030,7 @@ impl AppController {
         urdf_path: Option<PathBuf>,
         project_config: Option<ProjectConfig>,
         virtual_bus: WorkbenchVirtualBusHandle,
+        simulation_runtime: SimulationRuntimeHandle,
     ) -> Self {
         let mut urdf_state = UrdfViewerState::new(urdf_path);
         reload_urdf_state(&mut urdf_state);
@@ -2894,6 +2044,7 @@ impl AppController {
             project_config_dirty: Cell::new(false),
             hardware_runtime,
             virtual_bus,
+            simulation_runtime,
             robot_static_scene_dirty: Cell::new(true),
             selected_scene_row_id: SCENE_ROW_ROBOT,
             collapsed_scene_section_ids: vec![SCENE_SECTION_LINKS, SCENE_SECTION_JOINTS],
@@ -3061,7 +2212,8 @@ impl AppController {
                 "Start virtual bus".to_string()
             },
             show_servo_controls: selected_servo(&live_hardware_runtime, self.selected_scene_row_id)
-                .is_some(),
+                .is_some()
+                && self.simulation_runtime.status() != SimulationStatus::Stopped,
             show_camera_controls: !camera_transform_controls.is_empty(),
             show_robot_controls: show_robot_controls(self.selected_scene_row_id),
             servo_target_controls: selected_servo_target_controls(
@@ -3095,14 +2247,36 @@ impl AppController {
         }
     }
 
-    pub(crate) fn play_simulation(&mut self) {}
+    pub(crate) fn play_simulation(&mut self) {
+        if self.virtual_bus.is_running() {
+            self.simulation_runtime
+                .set_status(SimulationStatus::Running);
+            return;
+        }
 
-    pub(crate) fn pause_simulation(&mut self) {}
+        if self.start_virtual_bus().is_ok() {
+            self.simulation_runtime
+                .set_status(SimulationStatus::Running);
+        }
+    }
 
-    pub(crate) fn stop_simulation(&mut self) {}
+    pub(crate) fn pause_simulation(&mut self) {
+        if self.simulation_runtime.status() == SimulationStatus::Running {
+            self.simulation_runtime.set_status(SimulationStatus::Paused);
+        }
+    }
+
+    pub(crate) fn stop_simulation(&mut self) {
+        self.stop_virtual_bus();
+        self.simulation_runtime
+            .set_status(SimulationStatus::Stopped);
+    }
 
     pub(crate) fn reset_simulation(&mut self) {
         self.virtual_bus.stop();
+        self.simulation_runtime
+            .set_status(SimulationStatus::Stopped);
+        self.simulation_runtime.reset_clock();
         reload_urdf_state(&mut self.urdf_state);
         let project_config = self.project_config.borrow();
         self.hardware_runtime =
@@ -3123,6 +2297,8 @@ impl AppController {
 
     fn refresh_from_virtual_bus(&mut self) {
         let snapshots = self.virtual_bus.snapshots();
+        self.simulation_runtime
+            .advance(0.02, servo_snapshots_json(&snapshots));
         apply_servo_snapshots_to_hardware(&mut self.hardware_runtime, &snapshots);
         apply_servo_snapshots_to_urdf(&mut self.urdf_state, &self.hardware_runtime, &snapshots);
     }
@@ -3207,6 +2383,8 @@ impl AppController {
         {
             log::info!("virtual servo bus listening at {path}");
             bus.device_path = Some(path);
+            self.simulation_runtime
+                .set_status(SimulationStatus::Running);
         }
     }
 
@@ -3231,6 +2409,8 @@ impl AppController {
                 target
             );
             self.virtual_bus.set_target_position(servo_id, target);
+            self.simulation_runtime
+                .record_servo_command(u32::from(servo_id), i32::from(target));
             self.refresh_from_virtual_bus();
         }
 
@@ -3248,6 +2428,8 @@ impl AppController {
             );
             self.virtual_bus
                 .set_target_position(servo_id, value.clamp(0, 4095) as i16);
+            self.simulation_runtime
+                .record_servo_command(u32::from(servo_id), value.clamp(0, 4095));
             self.refresh_from_virtual_bus();
         }
     }
@@ -3323,6 +2505,100 @@ impl AppController {
     }
 }
 
+#[wgui_controller(template = "viewport_controller")]
+impl ViewportController {
+    pub(crate) fn new(
+        urdf_path: Option<PathBuf>,
+        project_config: Option<ProjectConfig>,
+        virtual_bus: WorkbenchVirtualBusHandle,
+    ) -> Self {
+        let mut urdf_state = UrdfViewerState::new(urdf_path);
+        reload_urdf_state(&mut urdf_state);
+        let hardware_runtime = hardware_runtime_from_project(project_config.as_ref(), &urdf_state);
+        let project_config_modified = project_manifest_modified(project_config.as_ref());
+        virtual_bus.configure_from_hardware(&hardware_runtime);
+        Self {
+            urdf_state,
+            project_config: RefCell::new(project_config),
+            project_config_modified: Cell::new(project_config_modified),
+            hardware_runtime,
+            virtual_bus,
+            robot_static_scene_dirty: Cell::new(true),
+        }
+    }
+
+    fn reload_project_config_if_changed(&self) {
+        let manifest_path = self
+            .project_config
+            .borrow()
+            .as_ref()
+            .map(|project| project.manifest_path.clone());
+        let Some(manifest_path) = manifest_path else {
+            return;
+        };
+        let modified = manifest_path
+            .metadata()
+            .ok()
+            .and_then(|metadata| metadata.modified().ok());
+        if modified == self.project_config_modified.get() {
+            return;
+        }
+        let Some(project_config) = project_config_from_manifest(&manifest_path) else {
+            return;
+        };
+        *self.project_config.borrow_mut() = Some(project_config);
+        self.project_config_modified.set(modified);
+        self.robot_static_scene_dirty.set(true);
+    }
+
+    pub(crate) fn state(&self) -> ViewportModel {
+        self.reload_project_config_if_changed();
+        let project_config_borrow = self.project_config.borrow();
+        let project_config = project_config_borrow.as_ref();
+        let snapshots = self.virtual_bus.snapshots();
+        let mut live_hardware_runtime = self.hardware_runtime.clone();
+        apply_servo_snapshots_to_hardware(&mut live_hardware_runtime, &snapshots);
+
+        let mut live_urdf_state = self.urdf_state.clone();
+        apply_servo_snapshots_to_urdf(&mut live_urdf_state, &live_hardware_runtime, &snapshots);
+
+        let live_base_translation = [
+            urdf_slider_value_to_units(live_urdf_state.base_translation_values[0]),
+            urdf_slider_value_to_units(live_urdf_state.base_translation_values[1]),
+            urdf_slider_value_to_units(live_urdf_state.base_translation_values[2]),
+        ];
+        let live_base_rotation = [
+            urdf_slider_value_to_units(live_urdf_state.base_rotation_values[0]),
+            urdf_slider_value_to_units(live_urdf_state.base_rotation_values[1]),
+            urdf_slider_value_to_units(live_urdf_state.base_rotation_values[2]),
+        ];
+        let base_translation = add_vec3(
+            project_robot_base_translation(project_config),
+            live_base_translation,
+        );
+        let base_rotation = add_vec3(
+            project_robot_base_rotation(project_config),
+            live_base_rotation,
+        );
+        let include_static_scene = self.robot_static_scene_dirty.replace(false);
+        let robot_scene_props = robot_scene_props_with_static_scene(
+            &live_urdf_state,
+            project_config,
+            base_translation,
+            base_rotation,
+            include_static_scene,
+        );
+
+        ViewportModel {
+            robot_scene_props: serde_json_to_wui_value(&robot_scene_props),
+        }
+    }
+
+    pub(crate) fn title(&self) -> String {
+        "RobotDreams Viewport".to_string()
+    }
+}
+
 impl AppController {
     pub(crate) fn start_virtual_bus(&mut self) -> Result<Option<String>, String> {
         let Some(bus_index) = first_virtual_bus_index(&self.hardware_runtime) else {
@@ -3342,6 +2618,8 @@ impl AppController {
         if let Some(bus) = self.hardware_runtime.buses.get_mut(bus_index) {
             bus.device_path = Some(path.clone());
         }
+        self.simulation_runtime
+            .set_status(SimulationStatus::Running);
         Ok(Some(path))
     }
 
@@ -3367,6 +2645,8 @@ impl AppController {
                 bus.device_path = None;
             }
         }
+        self.simulation_runtime
+            .set_status(SimulationStatus::Stopped);
     }
 
     pub(crate) fn tick_headless(&mut self) {
@@ -3409,8 +2689,35 @@ impl AppController {
         self.refresh_from_virtual_bus();
         let project_config = self.project_config.borrow();
         let snapshots = self.virtual_bus.snapshots();
+        let bus_events = self.virtual_bus.recent_events();
+        let bus_events_json = bus_events_json(&bus_events);
         let mut live_hardware_runtime = self.hardware_runtime.clone();
         apply_servo_snapshots_to_hardware(&mut live_hardware_runtime, &snapshots);
+        let live_base_translation = [
+            urdf_slider_value_to_units(self.urdf_state.base_translation_values[0]),
+            urdf_slider_value_to_units(self.urdf_state.base_translation_values[1]),
+            urdf_slider_value_to_units(self.urdf_state.base_translation_values[2]),
+        ];
+        let live_base_rotation = [
+            urdf_slider_value_to_units(self.urdf_state.base_rotation_values[0]),
+            urdf_slider_value_to_units(self.urdf_state.base_rotation_values[1]),
+            urdf_slider_value_to_units(self.urdf_state.base_rotation_values[2]),
+        ];
+        let base_translation = add_vec3(
+            project_robot_base_translation(project_config.as_ref()),
+            live_base_translation,
+        );
+        let base_rotation = add_vec3(
+            project_robot_base_rotation(project_config.as_ref()),
+            live_base_rotation,
+        );
+        let robot_scene_props = robot_scene_props_with_static_scene(
+            &self.urdf_state,
+            project_config.as_ref(),
+            base_translation,
+            base_rotation,
+            false,
+        );
 
         let robots = project_config
             .as_ref()
@@ -3523,6 +2830,18 @@ impl AppController {
                 "running": self.virtual_bus.is_running(),
                 "path": self.virtual_bus.path(),
                 "snapshots": servo_snapshots_json(&snapshots),
+                "events": bus_events_json.clone(),
+            },
+            "simulation": {
+                "status": self.simulation_runtime.status().as_str(),
+                "clockSec": self.simulation_runtime.clock_sec(),
+                "virtualBus": {
+                    "running": self.virtual_bus.is_running(),
+                    "path": self.virtual_bus.path(),
+                },
+                "servoSnapshots": servo_snapshots_json(&snapshots),
+                "busEvents": bus_events_json,
+                "robotScene": robot_scene_props,
             },
         })
     }

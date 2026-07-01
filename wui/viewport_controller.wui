@@ -1,0 +1,15 @@
+<VStack
+  fill=true
+  grow=1
+  spacing=0
+  backgroundColor="#050a11"
+  overflow="hidden"
+>
+  <CustomComponent
+    id=39003
+    src="/project/robot-dreams/robot-scene"
+    props={state.robot_scene_props}
+    grow=1
+    minHeight=0
+  />
+</VStack>

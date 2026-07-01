@@ -8,6 +8,8 @@ The robot model owns links, joints, meshes, and limits. A bus owns transport, pr
 
 This keeps the scene tree honest and prepares the app for both virtual devices and real hardware.
 
+Board direction for PuppyBot prototype work on 2026-07-01: use RobotDreams to host a deterministic ball-to-bin scenario that proves PuppyBot arm control, virtual bus integration, simple perception, and explicit success/failure checks. Do not treat a visual arm motion demo as manipulation unless the scene contains a tracked ball object, a grasp or attach rule, and a bin containment assertion.
+
 ## Scene Tree
 
 Use separate top-level groups:

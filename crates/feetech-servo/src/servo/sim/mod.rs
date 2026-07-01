@@ -49,6 +49,28 @@ pub struct FeetechServoSnapshot {
 
 pub type FeetechServoState = FeetechServoSnapshot;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FeetechBusWriteEvent {
+    pub id: u8,
+    pub data: Vec<u8>,
+    pub target_position: Option<i16>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FeetechBusEvent {
+    pub instruction: String,
+    pub id: Option<u8>,
+    pub broadcast: bool,
+    pub address: Option<u8>,
+    pub length: Option<u8>,
+    pub ids: Vec<u8>,
+    pub writes: Vec<FeetechBusWriteEvent>,
+    pub data: Vec<u8>,
+    pub target_position: Option<i16>,
+    pub raw: Vec<u8>,
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct VirtualServo {
     angle_rad: f32,
@@ -416,7 +438,33 @@ impl FeetechBusSim {
     }
 
     pub fn handle_frame(&mut self, frame: &[u8]) -> Result<Option<Vec<u8>>, ProtocolError> {
-        let decoded = self.protocol.decode(frame)?;
+        self.handle_frame_with_event(frame).0
+    }
+
+    pub fn handle_frame_with_event(
+        &mut self,
+        frame: &[u8],
+    ) -> (Result<Option<Vec<u8>>, ProtocolError>, FeetechBusEvent) {
+        let decoded = match self.protocol.decode(frame) {
+            Ok(decoded) => decoded,
+            Err(err) => {
+                let event = FeetechBusEvent {
+                    instruction: "invalid".to_string(),
+                    id: None,
+                    broadcast: false,
+                    address: None,
+                    length: None,
+                    ids: Vec::new(),
+                    writes: Vec::new(),
+                    data: Vec::new(),
+                    target_position: None,
+                    raw: frame.to_vec(),
+                    error: Some(format!("{err:?}")),
+                };
+                return (Err(err), event);
+            }
+        };
+        let event = self.event_for_decoded(decoded.id, &decoded.instruction, frame);
 
         match &decoded.instruction {
             Instruction::SyncRead {
@@ -425,7 +473,7 @@ impl FeetechBusSim {
                 ids,
             } => {
                 if !self.protocol.is_broadcast(decoded.id) {
-                    return Ok(None);
+                    return (Ok(None), event);
                 }
                 let mut frames = Vec::new();
                 for id in ids {
@@ -434,7 +482,7 @@ impl FeetechBusSim {
                         frames.extend_from_slice(&self.protocol.encode_response(response));
                     }
                 }
-                return Ok(Some(frames));
+                return (Ok(Some(frames)), event);
             }
             Instruction::SyncWrite {
                 address,
@@ -442,7 +490,7 @@ impl FeetechBusSim {
                 writes,
             } => {
                 if !self.protocol.is_broadcast(decoded.id) {
-                    return Ok(None);
+                    return (Ok(None), event);
                 }
                 let data_len = *length as usize;
                 for (id, data) in writes {
@@ -453,14 +501,14 @@ impl FeetechBusSim {
                         let _ = servo.write(*address, data);
                     }
                 }
-                return Ok(None);
+                return (Ok(None), event);
             }
             Instruction::Action => {
                 if self.protocol.is_broadcast(decoded.id) {
                     for servo in self.servos.values_mut() {
                         servo.apply_pending();
                     }
-                    return Ok(None);
+                    return (Ok(None), event);
                 }
             }
             _ => {}
@@ -470,15 +518,88 @@ impl FeetechBusSim {
             for servo in self.servos.values_mut() {
                 Self::apply_instruction(decoded.id, servo, &decoded.instruction);
             }
-            return Ok(None);
+            return (Ok(None), event);
         }
 
         let Some(servo) = self.servos.get_mut(&decoded.id) else {
-            return Ok(None);
+            return (Ok(None), event);
         };
 
         let response = Self::apply_instruction(decoded.id, servo, &decoded.instruction);
-        Ok(response.map(|resp| self.protocol.encode_response(resp)))
+        (
+            Ok(response.map(|resp| self.protocol.encode_response(resp))),
+            event,
+        )
+    }
+
+    fn event_for_decoded(
+        &self,
+        id: u8,
+        instruction: &Instruction,
+        frame: &[u8],
+    ) -> FeetechBusEvent {
+        let broadcast = self.protocol.is_broadcast(id);
+        let mut event = FeetechBusEvent {
+            instruction: instruction_name(instruction).to_string(),
+            id: Some(id),
+            broadcast,
+            address: None,
+            length: None,
+            ids: Vec::new(),
+            writes: Vec::new(),
+            data: Vec::new(),
+            target_position: None,
+            raw: frame.to_vec(),
+            error: None,
+        };
+
+        match instruction {
+            Instruction::Ping | Instruction::Action => {}
+            Instruction::Read { address, length } => {
+                event.address = Some(*address);
+                event.length = Some(*length);
+                event.ids = vec![id];
+            }
+            Instruction::Write { address, data } | Instruction::RegWrite { address, data } => {
+                event.address = Some(*address);
+                event.length = u8::try_from(data.len()).ok();
+                event.data = data.clone();
+                event.target_position = target_position_from_write(*address, data);
+                event.writes.push(FeetechBusWriteEvent {
+                    id,
+                    data: data.clone(),
+                    target_position: event.target_position,
+                });
+            }
+            Instruction::SyncRead {
+                address,
+                length,
+                ids,
+            } => {
+                event.address = Some(*address);
+                event.length = Some(*length);
+                event.ids = ids.clone();
+            }
+            Instruction::SyncWrite {
+                address,
+                length,
+                writes,
+            } => {
+                event.address = Some(*address);
+                event.length = Some(*length);
+                event.ids = writes.iter().map(|(id, _)| *id).collect();
+                event.writes = writes
+                    .iter()
+                    .map(|(id, data)| FeetechBusWriteEvent {
+                        id: *id,
+                        data: data.clone(),
+                        target_position: target_position_from_write(*address, data),
+                    })
+                    .collect();
+            }
+        }
+
+        event
     }
 
     fn apply_instruction(
@@ -537,6 +658,31 @@ impl FeetechBusSim {
             },
         }
     }
+}
+
+fn instruction_name(instruction: &Instruction) -> &'static str {
+    match instruction {
+        Instruction::Ping => "ping",
+        Instruction::Read { .. } => "read",
+        Instruction::Write { .. } => "write",
+        Instruction::RegWrite { .. } => "regWrite",
+        Instruction::Action => "action",
+        Instruction::SyncRead { .. } => "syncRead",
+        Instruction::SyncWrite { .. } => "syncWrite",
+    }
+}
+
+fn target_position_from_write(address: u8, data: &[u8]) -> Option<i16> {
+    let start = REG_TARGET_POS.checked_sub(address as usize)?;
+    if start + 1 >= data.len() {
+        return None;
+    }
+    let raw = u16::from(data[start]) | (u16::from(data[start + 1]) << 8);
+    Some(if (raw & 0x8000) != 0 {
+        -((raw & 0x7FFF) as i16)
+    } else {
+        raw as i16
+    })
 }
 
 fn read_u16_word(registers: &[u8; REGISTER_COUNT], address: usize) -> u16 {
@@ -636,6 +782,55 @@ mod tests {
                 assert_eq!(params, vec![0x12, 0x34]);
             }
         }
+    }
+
+    #[test]
+    fn write_target_position_reports_bus_event() {
+        let mut sim = FeetechBusSim::new();
+        sim.add_servo(1);
+
+        let frame = sim.protocol.encode_instruction(
+            1,
+            Instruction::Write {
+                address: REG_TARGET_POS as u8,
+                data: vec![0x34, 0x12],
+            },
+        );
+
+        let (response, event) = sim.handle_frame_with_event(&frame);
+        assert!(response.expect("write").is_some());
+        assert_eq!(event.instruction, "write");
+        assert_eq!(event.id, Some(1));
+        assert_eq!(event.address, Some(REG_TARGET_POS as u8));
+        assert_eq!(event.target_position, Some(0x1234));
+        assert_eq!(event.writes.len(), 1);
+        assert_eq!(event.writes[0].id, 1);
+        assert_eq!(event.writes[0].target_position, Some(0x1234));
+    }
+
+    #[test]
+    fn sync_write_reports_all_bus_event_writes() {
+        let mut sim = FeetechBusSim::new();
+        sim.add_servo(1);
+        sim.add_servo(2);
+
+        let frame = sim.protocol.encode_instruction(
+            0xFE,
+            Instruction::SyncWrite {
+                address: REG_TARGET_POS as u8,
+                length: 2,
+                writes: vec![(1, vec![0x00, 0x08]), (2, vec![0x00, 0x09])],
+            },
+        );
+
+        let (response, event) = sim.handle_frame_with_event(&frame);
+        assert!(response.expect("sync write").is_none());
+        assert_eq!(event.instruction, "syncWrite");
+        assert!(event.broadcast);
+        assert_eq!(event.ids, vec![1, 2]);
+        assert_eq!(event.writes.len(), 2);
+        assert_eq!(event.writes[0].target_position, Some(2048));
+        assert_eq!(event.writes[1].target_position, Some(2304));
     }
 
     #[test]

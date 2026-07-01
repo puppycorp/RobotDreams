@@ -2,10 +2,14 @@
 #![allow(non_snake_case)]
 
 mod app_controller;
+mod hardware_runtime;
 mod physics;
 mod projects_controller;
-mod scenario;
+mod robot_scene_component;
+mod scene_transform;
+mod system_metrics;
 mod urdf;
+mod virtual_bus;
 
 use clap::{Args as ClapArgs, Parser, Subcommand};
 use std::collections::{HashMap, HashSet};
@@ -13,8 +17,12 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
-use crate::app_controller::{AppController, RobotSceneComponent, WorkbenchVirtualBusHandle};
+use crate::app_controller::{
+    AppController, SimulationRuntimeHandle, SimulationStatus, ViewportController,
+};
 use crate::projects_controller::ProjectsController;
+use crate::robot_scene_component::RobotSceneComponent;
+use crate::virtual_bus::WorkbenchVirtualBusHandle;
 use feetech_servo::servo::sim::FeetechServoSnapshot;
 use log::LevelFilter;
 use robotdreams_core::{VirtualServoSimConfig, run_virtual_servo_sim};
@@ -2560,12 +2568,20 @@ enum DaemonRequest {
     Status,
     ProjectList,
     ProjectState {
+        project: Option<String>,
         item: Option<String>,
     },
     ProjectCommand {
+        project: Option<String>,
+        simulation: Option<String>,
         target: String,
         action: String,
         payload: Option<serde_json::Value>,
+    },
+    SimulationCommand {
+        project: Option<String>,
+        simulation: Option<String>,
+        action: String,
     },
     BusStart,
     BusStop,
@@ -2586,31 +2602,52 @@ struct DaemonResponse {
     data: Option<serde_json::Value>,
 }
 
-struct DaemonState {
+const DEFAULT_SIMULATION_ID: &str = "default";
+
+struct SimulationSession {
+    simulation_id: String,
+    url: String,
+    viewport_url: String,
+    virtual_bus: WorkbenchVirtualBusHandle,
+    simulation_runtime: SimulationRuntimeHandle,
+}
+
+struct ProjectSession {
     source_path: PathBuf,
     urdf_path: PathBuf,
     project_config: Option<ProjectConfig>,
     project_id: String,
     url: String,
-    virtual_bus: WorkbenchVirtualBusHandle,
+    simulations: HashMap<String, SimulationSession>,
+}
+
+struct DaemonState {
+    bind_addr: SocketAddr,
+    projects: HashMap<String, ProjectSession>,
 }
 
 impl DaemonState {
-    fn response(&self, message: Option<String>, already_open: bool) -> DaemonResponse {
+    fn response_for_project(
+        project: &ProjectSession,
+        simulation: &SimulationSession,
+        message: Option<String>,
+        already_open: bool,
+    ) -> DaemonResponse {
         DaemonResponse {
             ok: true,
             message,
-            project_id: Some(self.project_id.clone()),
-            url: Some(self.url.clone()),
+            project_id: Some(project.project_id.clone()),
+            url: Some(project.url.clone()),
             already_open,
-            virtual_bus_running: self.virtual_bus.is_running(),
-            virtual_bus_path: self.virtual_bus.path(),
+            virtual_bus_running: simulation.virtual_bus.is_running(),
+            virtual_bus_path: simulation.virtual_bus.path(),
             data: None,
         }
     }
 
-    fn response_with_data(
-        &self,
+    fn response_with_data_for_project(
+        project: &ProjectSession,
+        simulation: &SimulationSession,
         message: Option<String>,
         already_open: bool,
         data: serde_json::Value,
@@ -2618,11 +2655,62 @@ impl DaemonState {
         DaemonResponse {
             ok: true,
             message,
-            project_id: Some(self.project_id.clone()),
-            url: Some(self.url.clone()),
+            project_id: Some(project.project_id.clone()),
+            url: Some(project.url.clone()),
             already_open,
-            virtual_bus_running: self.virtual_bus.is_running(),
-            virtual_bus_path: self.virtual_bus.path(),
+            virtual_bus_running: simulation.virtual_bus.is_running(),
+            virtual_bus_path: simulation.virtual_bus.path(),
+            data: Some(data),
+        }
+    }
+
+    fn status_response(&self) -> DaemonResponse {
+        let data = serde_json::json!({
+            "projects": self.projects.values().map(|project| {
+                serde_json::json!({
+                    "id": project.project_id,
+                    "path": project.source_path.display().to_string(),
+                    "url": project.url,
+                    "simulations": project.simulations.values().map(|simulation| {
+                        serde_json::json!({
+                            "id": simulation.simulation_id,
+                            "url": simulation.url,
+                            "viewportUrl": simulation.viewport_url,
+                            "status": simulation.simulation_runtime.status().as_str(),
+                            "clockSec": simulation.simulation_runtime.clock_sec(),
+                            "virtualBus": {
+                                "running": simulation.virtual_bus.is_running(),
+                                "path": simulation.virtual_bus.path(),
+                            },
+                        })
+                    }).collect::<Vec<_>>(),
+                })
+            }).collect::<Vec<_>>(),
+        });
+        let running_simulations = self
+            .single_project()
+            .map(|project| {
+                project
+                    .simulations
+                    .values()
+                    .filter(|simulation| simulation.virtual_bus.is_running())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        DaemonResponse {
+            ok: true,
+            message: None,
+            project_id: self
+                .single_project()
+                .map(|project| project.project_id.clone()),
+            url: self.single_project().map(|project| project.url.clone()),
+            already_open: true,
+            virtual_bus_running: !running_simulations.is_empty(),
+            virtual_bus_path: if running_simulations.len() == 1 {
+                running_simulations[0].virtual_bus.path()
+            } else {
+                None
+            },
             data: Some(data),
         }
     }
@@ -2640,22 +2728,206 @@ impl DaemonState {
         }
     }
 
-    fn controller(&self) -> AppController {
-        let project_config = self
+    fn single_project(&self) -> Option<&ProjectSession> {
+        if self.projects.len() == 1 {
+            self.projects.values().next()
+        } else {
+            None
+        }
+    }
+
+    fn project_ids(&self) -> Vec<String> {
+        let mut ids: Vec<_> = self.projects.keys().cloned().collect();
+        ids.sort();
+        ids
+    }
+
+    fn resolve_project_id(&self, selector: Option<&str>) -> Result<String, String> {
+        if let Some(selector) = selector.filter(|selector| !selector.trim().is_empty()) {
+            if self.projects.contains_key(selector) {
+                return Ok(selector.to_string());
+            }
+            let requested = canonical_input_path(Path::new(selector));
+            if let Some(project) = self
+                .projects
+                .values()
+                .find(|project| project.source_path == requested)
+            {
+                return Ok(project.project_id.clone());
+            }
+            return Err(format!("unknown project {selector}"));
+        }
+
+        if let Some(project) = self.single_project() {
+            return Ok(project.project_id.clone());
+        }
+
+        if self.projects.is_empty() {
+            return Err("no project is open; run robotdreams open <project> first".to_string());
+        }
+
+        Err(format!(
+            "multiple projects are open; pass --project <id>. Loaded projects: {}",
+            self.project_ids().join(", ")
+        ))
+    }
+
+    fn project(&self, selector: Option<&str>) -> Result<&ProjectSession, String> {
+        let project_id = self.resolve_project_id(selector)?;
+        self.projects
+            .get(&project_id)
+            .ok_or_else(|| format!("unknown project {project_id}"))
+    }
+
+    fn project_mut(&mut self, selector: Option<&str>) -> Result<&mut ProjectSession, String> {
+        let project_id = self.resolve_project_id(selector)?;
+        self.projects
+            .get_mut(&project_id)
+            .ok_or_else(|| format!("unknown project {project_id}"))
+    }
+
+    fn controller_for_project(
+        project: &ProjectSession,
+        simulation: &SimulationSession,
+    ) -> AppController {
+        let project_config = project
             .project_config
             .as_ref()
             .and_then(|project| project_config_from_manifest(&project.manifest_path))
-            .or_else(|| self.project_config.clone());
+            .or_else(|| project.project_config.clone());
         AppController::new(
-            Some(self.urdf_path.clone()),
+            Some(project.urdf_path.clone()),
             project_config,
-            self.virtual_bus.clone(),
+            simulation.virtual_bus.clone(),
+            simulation.simulation_runtime.clone(),
         )
+    }
+}
+
+impl ProjectSession {
+    fn simulation_id(selector: Option<&str>) -> Result<String, String> {
+        let id = selector.unwrap_or(DEFAULT_SIMULATION_ID).trim();
+        if id.is_empty() {
+            return Ok(DEFAULT_SIMULATION_ID.to_string());
+        }
+        if id
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+        {
+            Ok(id.to_string())
+        } else {
+            Err(format!(
+                "invalid simulation id {id}; use only ASCII letters, numbers, '-' or '_'"
+            ))
+        }
+    }
+
+    fn default_simulation(&self) -> Result<&SimulationSession, String> {
+        self.simulation(DEFAULT_SIMULATION_ID)
+    }
+
+    fn simulation(&self, selector: &str) -> Result<&SimulationSession, String> {
+        self.simulations
+            .get(selector)
+            .ok_or_else(|| format!("unknown simulation {selector}"))
+    }
+
+    fn ensure_simulation(&mut self, selector: Option<&str>) -> Result<String, String> {
+        let simulation_id = Self::simulation_id(selector)?;
+        if !self.simulations.contains_key(&simulation_id) {
+            let url = format!("{}/simulation/{}", self.url, simulation_id);
+            let viewport_url = format!("{url}/viewport");
+            self.simulations.insert(
+                simulation_id.clone(),
+                SimulationSession {
+                    simulation_id: simulation_id.clone(),
+                    url,
+                    viewport_url,
+                    virtual_bus: WorkbenchVirtualBusHandle::new(),
+                    simulation_runtime: SimulationRuntimeHandle::new(),
+                },
+            );
+        }
+        Ok(simulation_id)
     }
 }
 
 fn canonical_input_path(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn unique_project_id(base_slug: &str, projects: &HashMap<String, ProjectSession>) -> String {
+    if !projects.contains_key(base_slug) {
+        return base_slug.to_string();
+    }
+
+    for index in 2.. {
+        let candidate = format!("{base_slug}-{index}");
+        if !projects.contains_key(&candidate) {
+            return candidate;
+        }
+    }
+
+    unreachable!("unbounded project id suffix search should always find an id")
+}
+
+fn project_launch_for_session(path: &Path) -> Result<ProjectLaunch, String> {
+    project_launch_for_input_path(path)
+        .ok_or_else(|| format!("{} is not a RobotDreams project", path.display()))
+}
+
+fn make_project_session(
+    path: &Path,
+    bind_addr: SocketAddr,
+    projects: &HashMap<String, ProjectSession>,
+) -> Result<ProjectSession, String> {
+    let manifest_path = project_manifest_for_input_path(path)
+        .ok_or_else(|| format!("{} is not a RobotDreams project", path.display()))?;
+    let source_path = canonical_input_path(&manifest_path);
+    let project_launch = project_launch_for_session(&source_path)?;
+    let project_id = unique_project_id(&project_launch.slug, projects);
+    let project_config = project_config_from_manifest(&source_path);
+    let urdf_path = resolve_urdf_path(Some(source_path.clone())).map_err(|err| err.to_string())?;
+    let url = format!("{}/project/{}", ui_url(bind_addr), project_id);
+    let simulation_url = format!("{url}/simulation/{DEFAULT_SIMULATION_ID}");
+    let viewport_url = format!("{simulation_url}/viewport");
+    let mut simulations = HashMap::new();
+    simulations.insert(
+        DEFAULT_SIMULATION_ID.to_string(),
+        SimulationSession {
+            simulation_id: DEFAULT_SIMULATION_ID.to_string(),
+            url: simulation_url,
+            viewport_url,
+            virtual_bus: WorkbenchVirtualBusHandle::new(),
+            simulation_runtime: SimulationRuntimeHandle::new(),
+        },
+    );
+    Ok(ProjectSession {
+        source_path,
+        urdf_path,
+        project_config,
+        project_id,
+        url,
+        simulations,
+    })
+}
+
+fn open_project_session(state: &mut DaemonState, path: &str) -> Result<(String, bool), String> {
+    let manifest_path = project_manifest_for_input_path(Path::new(path))
+        .ok_or_else(|| format!("{path} is not a RobotDreams project"))?;
+    let requested = canonical_input_path(&manifest_path);
+    if let Some(project) = state
+        .projects
+        .values()
+        .find(|project| project.source_path == requested)
+    {
+        return Ok((project.project_id.clone(), true));
+    }
+
+    let project = make_project_session(&requested, state.bind_addr, &state.projects)?;
+    let project_id = project.project_id.clone();
+    state.projects.insert(project_id.clone(), project);
+    Ok((project_id, false))
 }
 
 fn project_state_item(state: &serde_json::Value, item: &str) -> Option<serde_json::Value> {
@@ -2665,6 +2937,7 @@ fn project_state_item(state: &serde_json::Value, item: &str) -> Option<serde_jso
         "robots" => state.get("robots").cloned(),
         "hardware" => state.get("hardware").cloned(),
         "controls" => state.get("controls").cloned(),
+        "simulation" => state.get("simulation").cloned(),
         "virtual-bus" | "virtualBus" => state.get("virtualBus").cloned(),
         "snapshots" => state
             .get("virtualBus")
@@ -2756,31 +3029,77 @@ async fn handle_daemon_request(
 ) -> DaemonResponse {
     match request {
         DaemonRequest::Open { path } => {
-            let requested = canonical_input_path(Path::new(&path));
-            let state = state.lock().await;
-            if requested == state.source_path {
-                state.response(Some("project already open".to_string()), true)
-            } else {
-                DaemonState::error(format!(
-                    "daemon is already hosting {}; restart daemon to open {}",
-                    state.source_path.display(),
-                    requested.display()
-                ))
+            let mut state = state.lock().await;
+            match open_project_session(&mut state, &path) {
+                Ok((project_id, already_open)) => {
+                    let project = state.projects.get(&project_id).expect("project inserted");
+                    let simulation = match project.default_simulation() {
+                        Ok(simulation) => simulation,
+                        Err(err) => return DaemonState::error(err),
+                    };
+                    let message = if already_open {
+                        "project already open".to_string()
+                    } else {
+                        "project opened".to_string()
+                    };
+                    DaemonState::response_for_project(
+                        project,
+                        simulation,
+                        Some(message),
+                        already_open,
+                    )
+                }
+                Err(err) => DaemonState::error(err),
             }
         }
         DaemonRequest::Status => {
             let state = state.lock().await;
-            state.response(None, true)
+            state.status_response()
         }
         DaemonRequest::ProjectList => {
             let state = state.lock().await;
-            let mut controller = state.controller();
+            let Ok(project) = state.project(None) else {
+                let projects = state
+                    .projects
+                    .values()
+                    .map(|project| {
+                        serde_json::json!({
+                            "id": project.project_id,
+                            "path": project.source_path.display().to_string(),
+                            "url": project.url,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                return DaemonResponse {
+                    ok: true,
+                    message: None,
+                    project_id: None,
+                    url: None,
+                    already_open: true,
+                    virtual_bus_running: false,
+                    virtual_bus_path: None,
+                    data: Some(serde_json::Value::Array(projects)),
+                };
+            };
+            let simulation = match project.default_simulation() {
+                Ok(simulation) => simulation,
+                Err(err) => return DaemonState::error(err),
+            };
+            let mut controller = DaemonState::controller_for_project(project, simulation);
             let data = controller.project_items_json();
-            state.response_with_data(None, true, data)
+            DaemonState::response_with_data_for_project(project, simulation, None, true, data)
         }
-        DaemonRequest::ProjectState { item } => {
+        DaemonRequest::ProjectState { project, item } => {
             let state = state.lock().await;
-            let mut controller = state.controller();
+            let project = match state.project(project.as_deref()) {
+                Ok(project) => project,
+                Err(err) => return DaemonState::error(err),
+            };
+            let simulation = match project.default_simulation() {
+                Ok(simulation) => simulation,
+                Err(err) => return DaemonState::error(err),
+            };
+            let mut controller = DaemonState::controller_for_project(project, simulation);
             let project_state = controller.project_state_json();
             let data = if let Some(item) = item {
                 match project_state_item(&project_state, &item) {
@@ -2790,15 +3109,39 @@ async fn handle_daemon_request(
             } else {
                 project_state
             };
-            state.response_with_data(None, true, data)
+            DaemonState::response_with_data_for_project(project, simulation, None, true, data)
         }
         DaemonRequest::ProjectCommand {
+            project,
+            simulation,
             target,
             action,
             payload,
         } => {
-            let state = state.lock().await;
-            let mut controller = state.controller();
+            let mut state = state.lock().await;
+            let project_id = match state.resolve_project_id(project.as_deref()) {
+                Ok(project_id) => project_id,
+                Err(err) => return DaemonState::error(err),
+            };
+            let simulation_id = {
+                let project = state
+                    .projects
+                    .get_mut(&project_id)
+                    .expect("project resolved");
+                match project.ensure_simulation(simulation.as_deref()) {
+                    Ok(simulation_id) => simulation_id,
+                    Err(err) => return DaemonState::error(err),
+                }
+            };
+            let project = state.projects.get(&project_id).expect("project resolved");
+            let simulation = match project.default_simulation() {
+                Ok(_) => match project.simulation(&simulation_id) {
+                    Ok(simulation) => simulation,
+                    Err(err) => return DaemonState::error(err),
+                },
+                Err(err) => return DaemonState::error(err),
+            };
+            let mut controller = DaemonState::controller_for_project(project, simulation);
             let result = match (target.as_str(), action.as_str()) {
                 ("virtual-bus" | "virtualBus", "start") => controller.start_virtual_bus(),
                 ("virtual-bus" | "virtualBus", "stop") => {
@@ -2813,6 +3156,11 @@ async fn handle_daemon_request(
                     Ok(None)
                 }
                 (target, "set-target" | "setTarget") => {
+                    if simulation.simulation_runtime.status() == SimulationStatus::Stopped {
+                        return DaemonState::error(
+                            "simulation is stopped; run robotdreams simulation start first",
+                        );
+                    }
                     if let Some((servo_id, target_position)) =
                         servo_target_from_command(target, payload.as_ref())
                     {
@@ -2829,7 +3177,8 @@ async fn handle_daemon_request(
 
             match result {
                 Ok(path) => {
-                    let mut data_controller = state.controller();
+                    let mut data_controller =
+                        DaemonState::controller_for_project(project, simulation);
                     let project_state = data_controller.project_state_json();
                     let data_item = if target.starts_with("servo:") {
                         "snapshots".to_string()
@@ -2843,33 +3192,147 @@ async fn handle_daemon_request(
                     let message = path
                         .map(|path| format!("virtual bus listening at {path}"))
                         .or_else(|| Some(format!("project command {action} applied to {target}")));
-                    state.response_with_data(message, true, data)
+                    DaemonState::response_with_data_for_project(
+                        project, simulation, message, true, data,
+                    )
+                }
+                Err(err) => DaemonState::error(err),
+            }
+        }
+        DaemonRequest::SimulationCommand {
+            project,
+            simulation,
+            action,
+        } => {
+            let mut state = state.lock().await;
+            let project_id = match state.resolve_project_id(project.as_deref()) {
+                Ok(project_id) => project_id,
+                Err(err) => return DaemonState::error(err),
+            };
+            let simulation_id = {
+                let project = state
+                    .projects
+                    .get_mut(&project_id)
+                    .expect("project resolved");
+                match project.ensure_simulation(simulation.as_deref()) {
+                    Ok(simulation_id) => simulation_id,
+                    Err(err) => return DaemonState::error(err),
+                }
+            };
+            let project = state.projects.get(&project_id).expect("project resolved");
+            let simulation = match project.simulation(&simulation_id) {
+                Ok(simulation) => simulation,
+                Err(err) => return DaemonState::error(err),
+            };
+            let mut controller = DaemonState::controller_for_project(project, simulation);
+            let result = match action.as_str() {
+                "start" | "play" => {
+                    controller.play_simulation();
+                    Ok("simulation running".to_string())
+                }
+                "pause" => {
+                    controller.pause_simulation();
+                    Ok("simulation paused".to_string())
+                }
+                "stop" => {
+                    controller.stop_simulation();
+                    Ok("simulation stopped".to_string())
+                }
+                "reset" => {
+                    controller.reset_simulation();
+                    Ok("simulation reset".to_string())
+                }
+                "state" => Ok("simulation state".to_string()),
+                _ => Err(format!("unsupported simulation command {action}")),
+            };
+
+            match result {
+                Ok(message) => {
+                    let mut data_controller =
+                        DaemonState::controller_for_project(project, simulation);
+                    let state_json = data_controller.project_state_json();
+                    let mut data = state_json.get("simulation").cloned().unwrap_or(state_json);
+                    if let Some(object) = data.as_object_mut() {
+                        object.insert(
+                            "id".to_string(),
+                            serde_json::Value::String(simulation.simulation_id.clone()),
+                        );
+                        object.insert(
+                            "url".to_string(),
+                            serde_json::Value::String(simulation.url.clone()),
+                        );
+                        object.insert(
+                            "viewportUrl".to_string(),
+                            serde_json::Value::String(simulation.viewport_url.clone()),
+                        );
+                    }
+                    DaemonState::response_with_data_for_project(
+                        project,
+                        simulation,
+                        Some(message),
+                        true,
+                        data,
+                    )
                 }
                 Err(err) => DaemonState::error(err),
             }
         }
         DaemonRequest::BusStart => {
             let state = state.lock().await;
-            let mut controller = state.controller();
+            let project = match state.project(None) {
+                Ok(project) => project,
+                Err(err) => return DaemonState::error(err),
+            };
+            let simulation = match project.default_simulation() {
+                Ok(simulation) => simulation,
+                Err(err) => return DaemonState::error(err),
+            };
+            let mut controller = DaemonState::controller_for_project(project, simulation);
             match controller.start_virtual_bus() {
                 Ok(path) => {
                     let message = path
                         .map(|path| format!("virtual bus listening at {path}"))
                         .unwrap_or_else(|| "no virtual bus configured".to_string());
-                    state.response(Some(message), true)
+                    DaemonState::response_for_project(project, simulation, Some(message), true)
                 }
                 Err(err) => DaemonState::error(err),
             }
         }
         DaemonRequest::BusStop | DaemonRequest::Close => {
             let state = state.lock().await;
-            state.virtual_bus.stop();
-            state.response(Some("virtual bus stopped".to_string()), true)
+            for project in state.projects.values() {
+                for simulation in project.simulations.values() {
+                    simulation.virtual_bus.stop();
+                    simulation
+                        .simulation_runtime
+                        .set_status(SimulationStatus::Stopped);
+                }
+            }
+            DaemonResponse {
+                ok: true,
+                message: Some("virtual bus stopped".to_string()),
+                project_id: state
+                    .single_project()
+                    .map(|project| project.project_id.clone()),
+                url: state.single_project().map(|project| project.url.clone()),
+                already_open: true,
+                virtual_bus_running: false,
+                virtual_bus_path: None,
+                data: None,
+            }
         }
         DaemonRequest::Shutdown => {
             let state = state.lock().await;
-            state.virtual_bus.stop();
-            let response = state.response(Some("daemon shutting down".to_string()), true);
+            for project in state.projects.values() {
+                for simulation in project.simulations.values() {
+                    simulation.virtual_bus.stop();
+                    simulation
+                        .simulation_runtime
+                        .set_status(SimulationStatus::Stopped);
+                }
+            }
+            let mut response = state.status_response();
+            response.message = Some("daemon shutting down".to_string());
             tokio::spawn(async {
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 std::process::exit(0);
@@ -2940,41 +3403,72 @@ async fn run_app(
     bind_addr: SocketAddr,
     socket_path: PathBuf,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let project_launch = path.as_deref().and_then(project_launch_for_input_path);
-    let source_path = canonical_input_path(path.as_deref().unwrap_or_else(|| Path::new(".")));
-    let project_config = project_config_for_input_path(path.as_deref());
-    let urdf_path = resolve_urdf_path(path)?;
     ensure_ui_bind_available(bind_addr)?;
+    let project_path = path.as_deref().and_then(project_manifest_for_input_path);
+    let mut projects = HashMap::new();
+    let initial_project = if let Some(project_path) = project_path.as_ref() {
+        let project = make_project_session(project_path, bind_addr, &projects)?;
+        let project_id = project.project_id.clone();
+        projects.insert(project_id.clone(), project);
+        Some(project_id)
+    } else {
+        None
+    };
+    let project_config = project_config_for_input_path(path.as_deref());
+    let urdf_path = resolve_urdf_path(path.clone())?;
 
     let browser_url = ui_url(bind_addr);
     println!("RobotDreams app listening on {}", browser_url);
-    log_project_url(bind_addr, project_launch.as_ref());
+    if let Some(project_id) = initial_project.as_ref()
+        && let Some(project) = projects.get(project_id)
+    {
+        println!("Project URL: {} ({})", project.url, project.project_id);
+    }
     println!("URDF file: {}", urdf_path.display());
     println!("Press Ctrl-C to stop.");
 
     let mut wgui = Wgui::new(bind_addr);
     wgui.set_css(ROBOT_DREAMS_CSS);
-    let virtual_bus = WorkbenchVirtualBusHandle::new();
-    let project_id = project_launch
-        .as_ref()
-        .map(|project| project.slug.clone())
-        .unwrap_or_else(|| "workbench".to_string());
-    let url = project_launch
-        .as_ref()
-        .map(|project| project_url(bind_addr, project))
-        .unwrap_or_else(|| format!("{}/workbench", ui_url(bind_addr)));
+    let fallback_virtual_bus = WorkbenchVirtualBusHandle::new();
+    let fallback_simulation_runtime = SimulationRuntimeHandle::new();
+    let (route_virtual_bus, route_simulation_runtime, route_urdf_path, route_project_config) =
+        if let Some(project_id) = initial_project.as_ref() {
+            if let Some(project) = projects.get(project_id) {
+                let simulation = project.default_simulation().ok();
+                (
+                    simulation
+                        .map(|simulation| simulation.virtual_bus.clone())
+                        .unwrap_or_else(|| fallback_virtual_bus.clone()),
+                    simulation
+                        .map(|simulation| simulation.simulation_runtime.clone())
+                        .unwrap_or_else(|| fallback_simulation_runtime.clone()),
+                    project.urdf_path.clone(),
+                    project.project_config.clone(),
+                )
+            } else {
+                (
+                    fallback_virtual_bus.clone(),
+                    fallback_simulation_runtime.clone(),
+                    urdf_path.clone(),
+                    project_config.clone(),
+                )
+            }
+        } else {
+            (
+                fallback_virtual_bus.clone(),
+                fallback_simulation_runtime.clone(),
+                urdf_path.clone(),
+                project_config.clone(),
+            )
+        };
     let daemon_state = Arc::new(AsyncMutex::new(DaemonState {
-        source_path,
-        urdf_path: urdf_path.clone(),
-        project_config: project_config.clone(),
-        project_id,
-        url,
-        virtual_bus: virtual_bus.clone(),
+        bind_addr,
+        projects,
     }));
-    tokio::spawn(run_daemon_socket(socket_path, daemon_state));
-    let robot_scene_virtual_bus = virtual_bus.clone();
-    let robot_scene_urdf_path = urdf_path.clone();
-    let robot_scene_project_config = project_config.clone();
+    tokio::spawn(run_daemon_socket(socket_path, daemon_state.clone()));
+    let robot_scene_virtual_bus = route_virtual_bus.clone();
+    let robot_scene_urdf_path = route_urdf_path.clone();
+    let robot_scene_project_config = route_project_config.clone();
     wgui.add_custom_component("/project/robot-dreams/robot-scene", move || {
         RobotSceneComponent::new(
             robot_scene_virtual_bus.clone(),
@@ -2987,22 +3481,136 @@ async fn run_app(
 
     let workbench_urdf_path = urdf_path.clone();
     let workbench_project_config = project_config.clone();
-    let workbench_virtual_bus = virtual_bus.clone();
+    let workbench_virtual_bus = fallback_virtual_bus.clone();
+    let workbench_simulation_runtime = fallback_simulation_runtime.clone();
     wgui.add_page_with("/workbench", move || {
         let urdf_path = workbench_urdf_path.clone();
         let project_config = workbench_project_config.clone();
         let virtual_bus = workbench_virtual_bus.clone();
-        async move { AppController::new(Some(urdf_path), project_config, virtual_bus) }
+        let simulation_runtime = workbench_simulation_runtime.clone();
+        async move {
+            AppController::new(
+                Some(urdf_path),
+                project_config,
+                virtual_bus,
+                simulation_runtime,
+            )
+        }
     });
 
-    if let Some(project_launch) = project_launch {
-        let route = project_route(&project_launch);
-        let launched_virtual_bus = virtual_bus.clone();
+    let default_viewport_state = daemon_state.clone();
+    let default_viewport_fallback_urdf_path = urdf_path.clone();
+    let default_viewport_fallback_project_config = project_config.clone();
+    let default_viewport_fallback_virtual_bus = fallback_virtual_bus.clone();
+    wgui.add_page_with_route("/project/{projectId}/viewport", move |route| {
+        let state = default_viewport_state.clone();
+        let fallback_urdf_path = default_viewport_fallback_urdf_path.clone();
+        let fallback_project_config = default_viewport_fallback_project_config.clone();
+        let fallback_virtual_bus = default_viewport_fallback_virtual_bus.clone();
+        async move {
+            let project_id = route.params.get("projectId").cloned().unwrap_or_default();
+            let (urdf_path, project_config, virtual_bus) = {
+                let state = state.lock().await;
+                state
+                    .projects
+                    .get(&project_id)
+                    .and_then(|project| {
+                        let simulation = project.default_simulation().ok()?;
+                        let project_config = project
+                            .project_config
+                            .as_ref()
+                            .and_then(|project| {
+                                project_config_from_manifest(&project.manifest_path)
+                            })
+                            .or_else(|| project.project_config.clone());
+                        Some((
+                            project.urdf_path.clone(),
+                            project_config,
+                            simulation.virtual_bus.clone(),
+                        ))
+                    })
+                    .unwrap_or_else(|| {
+                        (
+                            fallback_urdf_path.clone(),
+                            fallback_project_config.clone(),
+                            fallback_virtual_bus.clone(),
+                        )
+                    })
+            };
+            ViewportController::new(Some(urdf_path), project_config, virtual_bus)
+        }
+    });
+
+    let simulation_viewport_state = daemon_state.clone();
+    let simulation_viewport_fallback_urdf_path = urdf_path.clone();
+    let simulation_viewport_fallback_project_config = project_config.clone();
+    let simulation_viewport_fallback_virtual_bus = fallback_virtual_bus.clone();
+    wgui.add_page_with_route(
+        "/project/{projectId}/simulation/{simulationId}/viewport",
+        move |route| {
+            let state = simulation_viewport_state.clone();
+            let fallback_urdf_path = simulation_viewport_fallback_urdf_path.clone();
+            let fallback_project_config = simulation_viewport_fallback_project_config.clone();
+            let fallback_virtual_bus = simulation_viewport_fallback_virtual_bus.clone();
+            async move {
+                let project_id = route.params.get("projectId").cloned().unwrap_or_default();
+                let simulation_id = route
+                    .params
+                    .get("simulationId")
+                    .cloned()
+                    .unwrap_or_else(|| DEFAULT_SIMULATION_ID.to_string());
+                let (urdf_path, project_config, virtual_bus) = {
+                    let state = state.lock().await;
+                    state
+                        .projects
+                        .get(&project_id)
+                        .and_then(|project| {
+                            let simulation = project.simulation(&simulation_id).ok()?;
+                            let project_config = project
+                                .project_config
+                                .as_ref()
+                                .and_then(|project| {
+                                    project_config_from_manifest(&project.manifest_path)
+                                })
+                                .or_else(|| project.project_config.clone());
+                            Some((
+                                project.urdf_path.clone(),
+                                project_config,
+                                simulation.virtual_bus.clone(),
+                            ))
+                        })
+                        .unwrap_or_else(|| {
+                            (
+                                fallback_urdf_path.clone(),
+                                fallback_project_config.clone(),
+                                fallback_virtual_bus.clone(),
+                            )
+                        })
+                };
+                ViewportController::new(Some(urdf_path), project_config, virtual_bus)
+            }
+        },
+    );
+
+    if let Some(project_id) = initial_project {
+        let route = format!("/project/{project_id}");
+        let launched_virtual_bus = route_virtual_bus.clone();
+        let launched_simulation_runtime = route_simulation_runtime.clone();
+        let launched_urdf_path = route_urdf_path.clone();
+        let launched_project_config = route_project_config.clone();
         wgui.add_page_with(&route, move || {
-            let urdf_path = urdf_path.clone();
-            let project_config = project_config.clone();
+            let urdf_path = launched_urdf_path.clone();
+            let project_config = launched_project_config.clone();
             let virtual_bus = launched_virtual_bus.clone();
-            async move { AppController::new(Some(urdf_path), project_config, virtual_bus) }
+            let simulation_runtime = launched_simulation_runtime.clone();
+            async move {
+                AppController::new(
+                    Some(urdf_path),
+                    project_config,
+                    virtual_bus,
+                    simulation_runtime,
+                )
+            }
         });
     }
 
@@ -3015,7 +3623,13 @@ async fn run_headless(args: HeadlessArgs) -> Result<(), Box<dyn std::error::Erro
     let project_config = project_config_for_input_path(args.path.as_deref());
     let urdf_path = resolve_urdf_path(args.path)?;
     let virtual_bus = WorkbenchVirtualBusHandle::new();
-    let mut controller = AppController::new(Some(urdf_path), project_config, virtual_bus);
+    let simulation_runtime = SimulationRuntimeHandle::new();
+    let mut controller = AppController::new(
+        Some(urdf_path),
+        project_config,
+        virtual_bus,
+        simulation_runtime,
+    );
 
     if args.start_virtual_bus {
         match controller.start_virtual_bus()? {
@@ -3096,5 +3710,159 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             run_app(path, bind_addr, socket).await?;
             return Ok(());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_bind_addr() -> SocketAddr {
+        "127.0.0.1:0".parse().unwrap()
+    }
+
+    fn test_state() -> DaemonState {
+        DaemonState {
+            bind_addr: test_bind_addr(),
+            projects: HashMap::new(),
+        }
+    }
+
+    fn repo_path(relative: &str) -> String {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join(relative)
+            .display()
+            .to_string()
+    }
+
+    #[test]
+    fn opening_project_does_not_start_virtual_bus() {
+        let mut state = test_state();
+        let (project_id, already_open) =
+            open_project_session(&mut state, &repo_path("examples/puppyarm/project.json")).unwrap();
+        let project = state.projects.get(&project_id).unwrap();
+        let simulation = project.default_simulation().unwrap();
+
+        assert!(!already_open);
+        assert_eq!(
+            simulation.simulation_runtime.status(),
+            SimulationStatus::Stopped
+        );
+        assert!(!simulation.virtual_bus.is_running());
+        assert!(simulation.virtual_bus.path().is_none());
+    }
+
+    #[test]
+    fn multiple_projects_require_selector() {
+        let mut state = test_state();
+        open_project_session(&mut state, &repo_path("examples/puppyarm/project.json")).unwrap();
+        open_project_session(&mut state, &repo_path("project.json")).unwrap();
+
+        let err = state.resolve_project_id(None).unwrap_err();
+        assert!(err.contains("multiple projects are open"));
+        assert!(err.contains("puppyarm"));
+    }
+
+    #[test]
+    fn simulation_runtime_is_scoped_to_one_project() {
+        let mut state = test_state();
+        let (first_id, _) =
+            open_project_session(&mut state, &repo_path("examples/puppyarm/project.json")).unwrap();
+        let (second_id, _) = open_project_session(&mut state, &repo_path("project.json")).unwrap();
+
+        {
+            let first = state.projects.get(&first_id).unwrap();
+            let simulation = first.default_simulation().unwrap();
+            let mut controller = DaemonState::controller_for_project(first, simulation);
+            controller.play_simulation();
+        }
+
+        let first = state.projects.get(&first_id).unwrap();
+        let second = state.projects.get(&second_id).unwrap();
+        let first_simulation = first.default_simulation().unwrap();
+        let second_simulation = second.default_simulation().unwrap();
+        assert_eq!(
+            first_simulation.simulation_runtime.status(),
+            SimulationStatus::Running
+        );
+        assert!(first_simulation.virtual_bus.is_running());
+        assert_eq!(
+            second_simulation.simulation_runtime.status(),
+            SimulationStatus::Stopped
+        );
+        assert!(!second_simulation.virtual_bus.is_running());
+
+        first_simulation.virtual_bus.stop();
+        first_simulation
+            .simulation_runtime
+            .set_status(SimulationStatus::Stopped);
+    }
+
+    #[test]
+    fn simulation_runtime_is_scoped_to_one_simulation_in_project() {
+        let mut state = test_state();
+        let (project_id, _) =
+            open_project_session(&mut state, &repo_path("examples/puppyarm/project.json")).unwrap();
+
+        {
+            let project = state.projects.get_mut(&project_id).unwrap();
+            project.ensure_simulation(Some("sim-a")).unwrap();
+            project.ensure_simulation(Some("sim-b")).unwrap();
+        }
+
+        {
+            let project = state.projects.get(&project_id).unwrap();
+            let sim_a = project.simulation("sim-a").unwrap();
+            let mut controller = DaemonState::controller_for_project(project, sim_a);
+            controller.play_simulation();
+        }
+
+        let project = state.projects.get(&project_id).unwrap();
+        let sim_a = project.simulation("sim-a").unwrap();
+        let sim_b = project.simulation("sim-b").unwrap();
+        assert_eq!(sim_a.simulation_runtime.status(), SimulationStatus::Running);
+        assert!(sim_a.virtual_bus.is_running());
+        assert_eq!(sim_b.simulation_runtime.status(), SimulationStatus::Stopped);
+        assert!(!sim_b.virtual_bus.is_running());
+
+        sim_a.virtual_bus.stop();
+        sim_a
+            .simulation_runtime
+            .set_status(SimulationStatus::Stopped);
+    }
+
+    #[test]
+    fn puppyarm_project_preserves_puppybot_servo_mapping() {
+        let project =
+            project_config_from_manifest(Path::new(&repo_path("examples/puppyarm/project.json")))
+                .unwrap();
+        let robot = project
+            .robots
+            .iter()
+            .find(|robot| robot.id == "puppyarm")
+            .unwrap();
+        let bus = project
+            .hardware
+            .buses
+            .iter()
+            .find(|bus| bus.id == "main_bus")
+            .unwrap();
+
+        let mut servo_mappings = HashMap::new();
+        for device in &bus.devices {
+            let DeviceConfig::Servo(servo) = device else {
+                continue;
+            };
+            let drives = servo.drives.as_ref().unwrap();
+            let semantic_joint = robot.joint_names.get(&drives.target).unwrap();
+            servo_mappings.insert(servo.id, semantic_joint.as_str());
+        }
+
+        assert_eq!(servo_mappings.get(&1), Some(&"yaw"));
+        assert_eq!(servo_mappings.get(&2), Some(&"shoulder"));
+        assert_eq!(servo_mappings.get(&3), Some(&"elbow"));
+        assert_eq!(servo_mappings.get(&4), Some(&"wrist"));
     }
 }
