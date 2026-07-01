@@ -4,6 +4,7 @@
 mod app_controller;
 mod physics;
 mod projects_controller;
+mod scenario;
 mod urdf;
 
 use clap::{Args as ClapArgs, Parser, Subcommand};
