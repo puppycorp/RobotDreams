@@ -49,18 +49,17 @@
           <Text value="Projects" color="#f4f8ff" />
           <Text value="Open a RobotDreams project or model harness." color="#8996aa" />
         </VStack>
-        <Button text="New Project" backgroundColor="#1267c8" border="1px solid #2a8dff" color="#f4f8ff" height=34 />
-        <Button text="Import" backgroundColor="#111c2b" border="1px solid #26364d" color="#dce7f3" height=34 />
       </HStack>
 
+      <If test={state.has_projects}>
       <HStack
         spacing=12
         wrap=true
       >
-        <For each={state.projects} itemAs="project" key={project.name}>
+        <For each={state.projects} itemAs="project" key={project.id}>
           <VStack
             width=300
-            height=168
+            height=150
             spacing=8
             padding=12
             backgroundColor="#111c2b"
@@ -79,34 +78,29 @@
                 <Text value={project.name} color="#f4f8ff" />
                 <Text value={project.kind} color="#8996aa" />
               </VStack>
-              <Text value={project.status} color="#43d17a" />
+              <Text value={project.status} color="#8996aa" />
             </HStack>
             <Text value={project.path} color="#8996aa" breakWords=true grow=1 />
             <HStack>
-              <Text value={project.updated} color="#8996aa" grow=1 />
-              <Link href="/workbench" text="Open" />
+              <Text value="" grow=1 />
+              <Link href={project.url} text="Open" />
             </HStack>
           </VStack>
         </For>
       </HStack>
+      </If>
 
+      <If test={state.has_no_projects}>
       <VStack
         spacing=8
         padding=12
         backgroundColor="#0e1622"
         border="1px solid #1d2a3b"
       >
-        <Text value="RECENT ACTIVITY" color="#f4f8ff" />
-        <For each={state.activity} itemAs="item" key={item.time}>
-          <HStack spacing=10>
-            <Text value={item.time} color="#7f8b9b" minWidth=46 />
-            <VStack grow=1 spacing=3>
-              <Text value={item.title} color="#dce7f3" />
-              <Text value={item.detail} color="#8996aa" breakWords=true />
-            </VStack>
-          </HStack>
-        </For>
+        <Text value="NO PROJECT OPEN" color="#f4f8ff" />
+        <Text value={state.empty_message} color="#8996aa" breakWords=true />
       </VStack>
+      </If>
     </VStack>
   </HStack>
 
@@ -119,8 +113,5 @@
     border="1px solid #172030"
   >
     <Text value="" grow=1 />
-    <Text value="ROS 2 Humble" color="#43d17a" />
-    <Text value="DDS" color="#43d17a" />
-    <Text value="Connected" color="#43d17a" />
   </HStack>
 </VStack>

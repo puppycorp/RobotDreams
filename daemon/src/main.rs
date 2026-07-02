@@ -1385,12 +1385,8 @@ fn parse_robot(urdf_path: &Path, workspace_root: &Path) -> Result<RobotModel, St
 }
 
 fn reload_urdf_state(state: &mut UrdfViewerState) {
-    if state.urdf_path.is_none() {
-        state.urdf_path = resolve_urdf_path(None).ok();
-    }
-
     let Some(path) = state.urdf_path.as_ref() else {
-        state.status = "No URDF found in ./models, ./examples, or ./model".to_string();
+        state.status = "No model loaded".to_string();
         state.robot = None;
         return;
     };
@@ -2535,7 +2531,7 @@ fn project_launch_for_input_path(path: &Path) -> Option<ProjectLaunch> {
 }
 
 fn project_route(project_launch: &ProjectLaunch) -> String {
-    format!("/project/{}", project_launch.slug)
+    format!("/project/{}/workbench", project_launch.slug)
 }
 
 fn project_url(bind_addr: SocketAddr, project_launch: &ProjectLaunch) -> String {
@@ -2613,26 +2609,27 @@ struct DaemonResponse {
 
 const DEFAULT_SIMULATION_ID: &str = "default";
 
-struct SimulationSession {
-    simulation_id: String,
-    url: String,
-    viewport_url: String,
-    virtual_bus: WorkbenchVirtualBusHandle,
-    simulation_runtime: SimulationRuntimeHandle,
+pub(crate) struct SimulationSession {
+    pub(crate) simulation_id: String,
+    pub(crate) url: String,
+    pub(crate) viewport_url: String,
+    pub(crate) virtual_bus: WorkbenchVirtualBusHandle,
+    pub(crate) simulation_runtime: SimulationRuntimeHandle,
 }
 
-struct ProjectSession {
-    source_path: PathBuf,
-    urdf_path: PathBuf,
-    project_config: Option<ProjectConfig>,
-    project_id: String,
-    url: String,
-    simulations: HashMap<String, SimulationSession>,
+pub(crate) struct ProjectSession {
+    pub(crate) source_path: PathBuf,
+    pub(crate) urdf_path: PathBuf,
+    pub(crate) project_config: Option<ProjectConfig>,
+    pub(crate) project_id: String,
+    pub(crate) url: String,
+    pub(crate) workbench_url: String,
+    pub(crate) simulations: HashMap<String, SimulationSession>,
 }
 
-struct DaemonState {
-    bind_addr: SocketAddr,
-    projects: HashMap<String, ProjectSession>,
+pub(crate) struct DaemonState {
+    pub(crate) bind_addr: SocketAddr,
+    pub(crate) projects: HashMap<String, ProjectSession>,
     scenario_sessions: HashMap<String, scenario::BallToBinScenarioSession>,
     active_scenarios: HashMap<String, String>,
 }
@@ -2648,7 +2645,7 @@ impl DaemonState {
             ok: true,
             message,
             project_id: Some(project.project_id.clone()),
-            url: Some(project.url.clone()),
+            url: Some(project.workbench_url.clone()),
             already_open,
             virtual_bus_running: simulation.virtual_bus.is_running(),
             virtual_bus_path: simulation.virtual_bus.path(),
@@ -2667,7 +2664,7 @@ impl DaemonState {
             ok: true,
             message,
             project_id: Some(project.project_id.clone()),
-            url: Some(project.url.clone()),
+            url: Some(project.workbench_url.clone()),
             already_open,
             virtual_bus_running: simulation.virtual_bus.is_running(),
             virtual_bus_path: simulation.virtual_bus.path(),
@@ -2681,7 +2678,7 @@ impl DaemonState {
                 serde_json::json!({
                     "id": project.project_id,
                     "path": project.source_path.display().to_string(),
-                    "url": project.url,
+                    "url": project.workbench_url,
                     "simulations": project.simulations.values().map(|simulation| {
                         serde_json::json!({
                             "id": simulation.simulation_id,
@@ -2714,7 +2711,9 @@ impl DaemonState {
             project_id: self
                 .single_project()
                 .map(|project| project.project_id.clone()),
-            url: self.single_project().map(|project| project.url.clone()),
+            url: self
+                .single_project()
+                .map(|project| project.workbench_url.clone()),
             already_open: true,
             virtual_bus_running: !running_simulations.is_empty(),
             virtual_bus_path: if running_simulations.len() == 1 {
@@ -2833,7 +2832,7 @@ impl ProjectSession {
         }
     }
 
-    fn default_simulation(&self) -> Result<&SimulationSession, String> {
+    pub(crate) fn default_simulation(&self) -> Result<&SimulationSession, String> {
         self.simulation(DEFAULT_SIMULATION_ID)
     }
 
@@ -2900,6 +2899,7 @@ fn make_project_session(
     let project_config = project_config_from_manifest(&source_path);
     let urdf_path = resolve_urdf_path(Some(source_path.clone())).map_err(|err| err.to_string())?;
     let url = format!("{}/project/{}", ui_url(bind_addr), project_id);
+    let workbench_url = format!("{url}/workbench");
     let simulation_url = format!("{url}/simulation/{DEFAULT_SIMULATION_ID}");
     let viewport_url = format!("{simulation_url}/viewport");
     let mut simulations = HashMap::new();
@@ -2919,6 +2919,7 @@ fn make_project_session(
         project_config,
         project_id,
         url,
+        workbench_url,
         simulations,
     })
 }
@@ -3277,7 +3278,7 @@ async fn handle_daemon_request(
                         serde_json::json!({
                             "id": project.project_id,
                             "path": project.source_path.display().to_string(),
-                            "url": project.url,
+                            "url": project.workbench_url,
                         })
                     })
                     .collect::<Vec<_>>();
@@ -3611,7 +3612,9 @@ async fn handle_daemon_request(
                 project_id: state
                     .single_project()
                     .map(|project| project.project_id.clone()),
-                url: state.single_project().map(|project| project.url.clone()),
+                url: state
+                    .single_project()
+                    .map(|project| project.workbench_url.clone()),
                 already_open: true,
                 virtual_bus_running: false,
                 virtual_bus_path: None,
@@ -3712,23 +3715,34 @@ async fn run_app(
         None
     };
     let project_config = project_config_for_input_path(path.as_deref());
-    let urdf_path = resolve_urdf_path(path.clone())?;
+    let urdf_path = if path.is_some() {
+        Some(resolve_urdf_path(path.clone())?)
+    } else {
+        None
+    };
 
     let browser_url = ui_url(bind_addr);
     println!("RobotDreams app listening on {}", browser_url);
     if let Some(project_id) = initial_project.as_ref()
         && let Some(project) = projects.get(project_id)
     {
-        println!("Project URL: {} ({})", project.url, project.project_id);
+        println!(
+            "Project URL: {} ({})",
+            project.workbench_url, project.project_id
+        );
     }
-    println!("URDF file: {}", urdf_path.display());
+    if let Some(urdf_path) = urdf_path.as_ref() {
+        println!("URDF file: {}", urdf_path.display());
+    } else {
+        println!("URDF file: none");
+    }
     println!("Press Ctrl-C to stop.");
 
     let mut wgui = Wgui::new(bind_addr);
     wgui.set_css(ROBOT_DREAMS_CSS);
     let fallback_virtual_bus = WorkbenchVirtualBusHandle::new();
     let fallback_simulation_runtime = SimulationRuntimeHandle::new();
-    let (route_virtual_bus, route_simulation_runtime, route_urdf_path, route_project_config) =
+    let (route_virtual_bus, route_urdf_path, route_project_config) =
         if let Some(project_id) = initial_project.as_ref() {
             if let Some(project) = projects.get(project_id) {
                 let simulation = project.default_simulation().ok();
@@ -3736,16 +3750,12 @@ async fn run_app(
                     simulation
                         .map(|simulation| simulation.virtual_bus.clone())
                         .unwrap_or_else(|| fallback_virtual_bus.clone()),
-                    simulation
-                        .map(|simulation| simulation.simulation_runtime.clone())
-                        .unwrap_or_else(|| fallback_simulation_runtime.clone()),
-                    project.urdf_path.clone(),
+                    Some(project.urdf_path.clone()),
                     project.project_config.clone(),
                 )
             } else {
                 (
                     fallback_virtual_bus.clone(),
-                    fallback_simulation_runtime.clone(),
                     urdf_path.clone(),
                     project_config.clone(),
                 )
@@ -3753,7 +3763,6 @@ async fn run_app(
         } else {
             (
                 fallback_virtual_bus.clone(),
-                fallback_simulation_runtime.clone(),
                 urdf_path.clone(),
                 project_config.clone(),
             )
@@ -3771,12 +3780,20 @@ async fn run_app(
     wgui.add_custom_component("/project/robot-dreams/robot-scene", move || {
         RobotSceneComponent::new(
             robot_scene_virtual_bus.clone(),
-            Some(robot_scene_urdf_path.clone()),
+            robot_scene_urdf_path.clone(),
             robot_scene_project_config.clone(),
         )
     });
-    wgui.add_page_with("/", || async { ProjectsController::new() });
-    wgui.add_page_with("/projects", || async { ProjectsController::new() });
+    let projects_index_state = daemon_state.clone();
+    wgui.add_page_with("/", move || {
+        let state = projects_index_state.clone();
+        async move { ProjectsController::new(state) }
+    });
+    let projects_page_state = daemon_state.clone();
+    wgui.add_page_with("/projects", move || {
+        let state = projects_page_state.clone();
+        async move { ProjectsController::new(state) }
+    });
 
     let workbench_urdf_path = urdf_path.clone();
     let workbench_project_config = project_config.clone();
@@ -3788,23 +3805,57 @@ async fn run_app(
         let virtual_bus = workbench_virtual_bus.clone();
         let simulation_runtime = workbench_simulation_runtime.clone();
         async move {
-            AppController::new(
-                Some(urdf_path),
-                project_config,
-                virtual_bus,
-                simulation_runtime,
-            )
+            AppController::new(urdf_path, project_config, virtual_bus, simulation_runtime)
+        }
+    });
+
+    let project_workbench_state = daemon_state.clone();
+    let project_workbench_fallback_virtual_bus = fallback_virtual_bus.clone();
+    let project_workbench_fallback_simulation_runtime = fallback_simulation_runtime.clone();
+    wgui.add_page_with_route("/project/{projectId}/workbench", move |route| {
+        let state = project_workbench_state.clone();
+        let fallback_virtual_bus = project_workbench_fallback_virtual_bus.clone();
+        let fallback_simulation_runtime = project_workbench_fallback_simulation_runtime.clone();
+        async move {
+            let project_id = route.params.get("projectId").cloned().unwrap_or_default();
+            let (urdf_path, project_config, virtual_bus, simulation_runtime) = {
+                let state = state.lock().await;
+                state
+                    .projects
+                    .get(&project_id)
+                    .and_then(|project| {
+                        let simulation = project.default_simulation().ok()?;
+                        let project_config = project
+                            .project_config
+                            .as_ref()
+                            .and_then(|project| {
+                                project_config_from_manifest(&project.manifest_path)
+                            })
+                            .or_else(|| project.project_config.clone());
+                        Some((
+                            Some(project.urdf_path.clone()),
+                            project_config,
+                            simulation.virtual_bus.clone(),
+                            simulation.simulation_runtime.clone(),
+                        ))
+                    })
+                    .unwrap_or_else(|| {
+                        (
+                            None,
+                            None,
+                            fallback_virtual_bus.clone(),
+                            fallback_simulation_runtime.clone(),
+                        )
+                    })
+            };
+            AppController::new(urdf_path, project_config, virtual_bus, simulation_runtime)
         }
     });
 
     let default_viewport_state = daemon_state.clone();
-    let default_viewport_fallback_urdf_path = urdf_path.clone();
-    let default_viewport_fallback_project_config = project_config.clone();
     let default_viewport_fallback_virtual_bus = fallback_virtual_bus.clone();
     wgui.add_page_with_route("/project/{projectId}/viewport", move |route| {
         let state = default_viewport_state.clone();
-        let fallback_urdf_path = default_viewport_fallback_urdf_path.clone();
-        let fallback_project_config = default_viewport_fallback_project_config.clone();
         let fallback_virtual_bus = default_viewport_fallback_virtual_bus.clone();
         async move {
             let project_id = route.params.get("projectId").cloned().unwrap_or_default();
@@ -3823,33 +3874,23 @@ async fn run_app(
                             })
                             .or_else(|| project.project_config.clone());
                         Some((
-                            project.urdf_path.clone(),
+                            Some(project.urdf_path.clone()),
                             project_config,
                             simulation.virtual_bus.clone(),
                         ))
                     })
-                    .unwrap_or_else(|| {
-                        (
-                            fallback_urdf_path.clone(),
-                            fallback_project_config.clone(),
-                            fallback_virtual_bus.clone(),
-                        )
-                    })
+                    .unwrap_or_else(|| (None, None, fallback_virtual_bus.clone()))
             };
-            ViewportController::new(Some(urdf_path), project_config, virtual_bus)
+            ViewportController::new(urdf_path, project_config, virtual_bus)
         }
     });
 
     let simulation_viewport_state = daemon_state.clone();
-    let simulation_viewport_fallback_urdf_path = urdf_path.clone();
-    let simulation_viewport_fallback_project_config = project_config.clone();
     let simulation_viewport_fallback_virtual_bus = fallback_virtual_bus.clone();
     wgui.add_page_with_route(
         "/project/{projectId}/simulation/{simulationId}/viewport",
         move |route| {
             let state = simulation_viewport_state.clone();
-            let fallback_urdf_path = simulation_viewport_fallback_urdf_path.clone();
-            let fallback_project_config = simulation_viewport_fallback_project_config.clone();
             let fallback_virtual_bus = simulation_viewport_fallback_virtual_bus.clone();
             async move {
                 let project_id = route.params.get("projectId").cloned().unwrap_or_default();
@@ -3873,45 +3914,17 @@ async fn run_app(
                                 })
                                 .or_else(|| project.project_config.clone());
                             Some((
-                                project.urdf_path.clone(),
+                                Some(project.urdf_path.clone()),
                                 project_config,
                                 simulation.virtual_bus.clone(),
                             ))
                         })
-                        .unwrap_or_else(|| {
-                            (
-                                fallback_urdf_path.clone(),
-                                fallback_project_config.clone(),
-                                fallback_virtual_bus.clone(),
-                            )
-                        })
+                        .unwrap_or_else(|| (None, None, fallback_virtual_bus.clone()))
                 };
-                ViewportController::new(Some(urdf_path), project_config, virtual_bus)
+                ViewportController::new(urdf_path, project_config, virtual_bus)
             }
         },
     );
-
-    if let Some(project_id) = initial_project {
-        let route = format!("/project/{project_id}");
-        let launched_virtual_bus = route_virtual_bus.clone();
-        let launched_simulation_runtime = route_simulation_runtime.clone();
-        let launched_urdf_path = route_urdf_path.clone();
-        let launched_project_config = route_project_config.clone();
-        wgui.add_page_with(&route, move || {
-            let urdf_path = launched_urdf_path.clone();
-            let project_config = launched_project_config.clone();
-            let virtual_bus = launched_virtual_bus.clone();
-            let simulation_runtime = launched_simulation_runtime.clone();
-            async move {
-                AppController::new(
-                    Some(urdf_path),
-                    project_config,
-                    virtual_bus,
-                    simulation_runtime,
-                )
-            }
-        });
-    }
 
     wgui.run().await;
 
@@ -4040,6 +4053,50 @@ mod tests {
 
     fn temp_path(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("robotdreams-{}-{name}", std::process::id()))
+    }
+
+    #[test]
+    fn project_session_exposes_workbench_url_and_simulation_viewport_url() {
+        let mut state = test_state();
+        let (project_id, already_open) =
+            open_project_session(&mut state, &repo_path("examples/puppyarm/project.json")).unwrap();
+        let project = state.projects.get(&project_id).unwrap();
+        let simulation = project.default_simulation().unwrap();
+        let response = DaemonState::response_for_project(
+            project,
+            simulation,
+            Some("opened".to_string()),
+            already_open,
+        );
+
+        assert!(!already_open);
+        assert!(project.url.ends_with(&format!("/project/{project_id}")));
+        assert!(
+            project
+                .workbench_url
+                .ends_with(&format!("/project/{project_id}/workbench"))
+        );
+        assert_eq!(
+            response.url.as_deref(),
+            Some(project.workbench_url.as_str())
+        );
+        assert!(simulation.viewport_url.ends_with(&format!(
+            "/project/{project_id}/simulation/default/viewport"
+        )));
+
+        let status = state.status_response();
+        let status_project_url = status
+            .data
+            .as_ref()
+            .and_then(|data| data.pointer("/projects/0/url"))
+            .and_then(|url| url.as_str());
+        let status_viewport_url = status
+            .data
+            .as_ref()
+            .and_then(|data| data.pointer("/projects/0/simulations/0/viewportUrl"))
+            .and_then(|url| url.as_str());
+        assert_eq!(status_project_url, Some(project.workbench_url.as_str()));
+        assert_eq!(status_viewport_url, Some(simulation.viewport_url.as_str()));
     }
 
     #[test]

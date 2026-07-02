@@ -29,24 +29,13 @@ use crate::{
     urdf_joint_type_name, urdf_slider_value_to_units, urdf_value_to_joint_units,
 };
 
-const SCENE_SECTION_ENVIRONMENT: u32 = 1;
 const SCENE_SECTION_ROBOTS: u32 = 2;
 const SCENE_SECTION_LINKS: u32 = 1_003;
 const SCENE_SECTION_JOINTS: u32 = 1_004;
 const SCENE_SECTION_HARDWARE: u32 = 5;
 const SCENE_SECTION_OBJECTS: u32 = 6;
 const SCENE_SECTION_SENSORS: u32 = 7;
-const SCENE_ROW_WAREHOUSE: u32 = 1;
-const SCENE_ROW_FLOOR: u32 = 2;
-const SCENE_ROW_LIGHTS: u32 = 3;
 const SCENE_ROW_ROBOT: u32 = 100;
-const SCENE_ROW_OBJECT_WORKTABLE: u32 = 200;
-const SCENE_ROW_OBJECT_BIN: u32 = 201;
-const SCENE_ROW_OBJECT_FIXTURE: u32 = 202;
-const SCENE_ROW_OBJECT_TAG: u32 = 203;
-const SCENE_ROW_SENSOR_JOINT_STATES: u32 = 300;
-const SCENE_ROW_SENSOR_LIDAR: u32 = 302;
-const SCENE_ROW_SENSOR_CAMERA: u32 = 303;
 const SCENE_ROW_LINK_BASE: u32 = 10_000;
 const SCENE_ROW_JOINT_BASE: u32 = 20_000;
 const SCENE_ROW_BUS_BASE: u32 = 30_000;
@@ -103,13 +92,6 @@ pub(crate) struct WorkbenchPropertyModel {
 }
 
 #[derive(Debug, Clone, WguiModel)]
-pub(crate) struct WorkbenchSensorModel {
-    name: String,
-    target: String,
-    rate: String,
-}
-
-#[derive(Debug, Clone, WguiModel)]
 pub(crate) struct WorkbenchSensorPreviewModel {
     id: String,
     component_id: u32,
@@ -127,10 +109,6 @@ pub(crate) struct WorkbenchModel {
     project_save_label: String,
     project_dirty: bool,
     robot_scene_props: WuiValue,
-    lidar_preview_name: String,
-    lidar_preview_props: WuiValue,
-    camera_preview_name: String,
-    camera_preview_props: WuiValue,
     has_sensor_previews: bool,
     sensor_previews: Vec<WorkbenchSensorPreviewModel>,
     viewport_title: String,
@@ -156,7 +134,6 @@ pub(crate) struct WorkbenchModel {
     physics_properties: Vec<WorkbenchPropertyModel>,
     base_controls: Vec<WorkbenchSliderModel>,
     joint_controls: Vec<WorkbenchSliderModel>,
-    sensors: Vec<WorkbenchSensorModel>,
 }
 
 #[derive(Debug, Clone, WguiModel)]
@@ -478,14 +455,6 @@ fn workbench_property(name: &str, value: impl Into<String>) -> WorkbenchProperty
     }
 }
 
-fn workbench_sensor(name: &str, target: &str, rate: &str) -> WorkbenchSensorModel {
-    WorkbenchSensorModel {
-        name: name.to_string(),
-        target: target.to_string(),
-        rate: rate.to_string(),
-    }
-}
-
 fn bus_write_event_json(
     write: &feetech_servo::servo::sim::FeetechBusWriteEvent,
 ) -> serde_json::Value {
@@ -541,9 +510,7 @@ fn file_label(state: &UrdfViewerState) -> String {
         .urdf_path
         .as_ref()
         .map(|path| path.display().to_string())
-        .unwrap_or_else(|| {
-            "(auto-discovery failed: place a .urdf in ./models, ./examples, or ./model)".to_string()
-        })
+        .unwrap_or_else(|| "No model loaded".to_string())
 }
 
 fn base_controls(state: &UrdfViewerState) -> Vec<WorkbenchSliderModel> {
@@ -671,8 +638,8 @@ fn joint_controls(
                 max,
                 value,
                 display_value: format!("{:.3}", urdf_value_to_joint_units(joint, value)),
-                velocity_display: format!("{:.1}", (slider_slot as f64 + 1.0) * 1.7),
-                torque_display: format!("{:.1}", (slider_slot as f64 + 1.0) * 0.8 + 2.4),
+                velocity_display: String::new(),
+                torque_display: String::new(),
             })
         })
         .collect()
@@ -796,10 +763,14 @@ fn robot_rows(
     selected_scene_row_id: u32,
     collapsed_scene_section_ids: &[u32],
 ) -> Vec<WorkbenchRowModel> {
+    if state.robot.is_none() {
+        return Vec::new();
+    }
+
     let mut rows = vec![select_robot_row(workbench_row(
         SCENE_ROW_ROBOT,
         "ARM",
-        "PuppyArm",
+        &robot_display_name(project_config),
         "URDF",
         "ok",
         selected_row(selected_scene_row_id, SCENE_ROW_ROBOT),
@@ -975,6 +946,19 @@ fn project_camera_rows(
         .unwrap_or_default()
 }
 
+fn robot_display_name(project_config: Option<&ProjectConfig>) -> String {
+    project_config
+        .and_then(|config| config.robots.first())
+        .map(|robot| {
+            if robot.name.trim().is_empty() {
+                robot.id.clone()
+            } else {
+                robot.name.clone()
+            }
+        })
+        .unwrap_or_else(|| "Robot".to_string())
+}
+
 fn scene_sections(
     state: &UrdfViewerState,
     hardware_runtime: &HardwareRuntime,
@@ -982,157 +966,52 @@ fn scene_sections(
     selected_scene_row_id: u32,
     collapsed_scene_section_ids: &[u32],
 ) -> Vec<WorkbenchSectionModel> {
-    let mut sections = vec![
-        workbench_section(
-            SCENE_SECTION_ENVIRONMENT,
-            "Environment",
-            vec![
-                select_static_row(
-                    workbench_row(
-                        SCENE_ROW_WAREHOUSE,
-                        "ENV",
-                        "Warehouse",
-                        "world",
-                        "ok",
-                        selected_row(selected_scene_row_id, SCENE_ROW_WAREHOUSE),
-                    ),
-                    SCENE_ROW_WAREHOUSE,
-                ),
-                select_static_row(
-                    workbench_row(
-                        SCENE_ROW_FLOOR,
-                        "PLN",
-                        "Floor",
-                        "plane",
-                        "ok",
-                        selected_row(selected_scene_row_id, SCENE_ROW_FLOOR),
-                    ),
-                    SCENE_ROW_FLOOR,
-                ),
-                select_static_row(
-                    workbench_row(
-                        SCENE_ROW_LIGHTS,
-                        "LGT",
-                        "Lights",
-                        "3 sources",
-                        "ok",
-                        selected_row(selected_scene_row_id, SCENE_ROW_LIGHTS),
-                    ),
-                    SCENE_ROW_LIGHTS,
-                ),
-            ],
-            collapsed_scene_section_ids,
-        ),
-        workbench_section(
-            SCENE_SECTION_ROBOTS,
-            "Robots",
-            robot_rows(
-                state,
-                project_config,
-                selected_scene_row_id,
-                collapsed_scene_section_ids,
-            ),
-            collapsed_scene_section_ids,
-        ),
-    ];
+    let mut sections = Vec::new();
 
-    sections.push(workbench_section(
-        SCENE_SECTION_HARDWARE,
-        "Hardware",
-        hardware_rows(hardware_runtime, project_config, selected_scene_row_id),
-        collapsed_scene_section_ids,
-    ));
-
-    let mut object_rows = vec![
-        select_static_row(
-            workbench_row(
-                SCENE_ROW_OBJECT_WORKTABLE,
-                "TBL",
-                "Worktable",
-                "fixture",
-                "ok",
-                selected_row(selected_scene_row_id, SCENE_ROW_OBJECT_WORKTABLE),
-            ),
-            SCENE_ROW_OBJECT_WORKTABLE,
-        ),
-        select_static_row(
-            workbench_row(
-                SCENE_ROW_OBJECT_BIN,
-                "BIN",
-                "Bin Blue",
-                "container",
-                "ok",
-                selected_row(selected_scene_row_id, SCENE_ROW_OBJECT_BIN),
-            ),
-            SCENE_ROW_OBJECT_BIN,
-        ),
-        select_static_row(
-            workbench_row(
-                SCENE_ROW_OBJECT_FIXTURE,
-                "FIX",
-                "Fixture Plate",
-                "tooling",
-                "ok",
-                selected_row(selected_scene_row_id, SCENE_ROW_OBJECT_FIXTURE),
-            ),
-            SCENE_ROW_OBJECT_FIXTURE,
-        ),
-        select_static_row(
-            workbench_row(
-                SCENE_ROW_OBJECT_TAG,
-                "TAG",
-                "Calibration Tag",
-                "marker",
-                "--",
-                selected_row(selected_scene_row_id, SCENE_ROW_OBJECT_TAG),
-            ),
-            SCENE_ROW_OBJECT_TAG,
-        ),
-    ];
-    object_rows.extend(project_scene_object_rows(
+    let robot_rows = robot_rows(
+        state,
         project_config,
         selected_scene_row_id,
-    ));
-
-    sections.push(workbench_section(
-        SCENE_SECTION_OBJECTS,
-        "Objects",
-        object_rows,
         collapsed_scene_section_ids,
-    ));
+    );
+    if !robot_rows.is_empty() {
+        sections.push(workbench_section(
+            SCENE_SECTION_ROBOTS,
+            "Robots",
+            robot_rows,
+            collapsed_scene_section_ids,
+        ));
+    }
 
-    let mut sensor_rows = vec![
-        select_static_row(
-            workbench_row(
-                SCENE_ROW_SENSOR_JOINT_STATES,
-                "JS",
-                "Joint States",
-                "100 Hz",
-                "ok",
-                selected_row(selected_scene_row_id, SCENE_ROW_SENSOR_JOINT_STATES),
-            ),
-            SCENE_ROW_SENSOR_JOINT_STATES,
-        ),
-        select_static_row(
-            workbench_row(
-                SCENE_ROW_SENSOR_LIDAR,
-                "LDR",
-                "Lidar_1",
-                "10 Hz",
-                "ok",
-                selected_row(selected_scene_row_id, SCENE_ROW_SENSOR_LIDAR),
-            ),
-            SCENE_ROW_SENSOR_LIDAR,
-        ),
-    ];
-    sensor_rows.extend(project_camera_rows(project_config, selected_scene_row_id));
+    let hardware_rows = hardware_rows(hardware_runtime, project_config, selected_scene_row_id);
+    if !hardware_rows.is_empty() {
+        sections.push(workbench_section(
+            SCENE_SECTION_HARDWARE,
+            "Hardware",
+            hardware_rows,
+            collapsed_scene_section_ids,
+        ));
+    }
 
-    sections.push(workbench_section(
-        SCENE_SECTION_SENSORS,
-        "Sensors",
-        sensor_rows,
-        collapsed_scene_section_ids,
-    ));
+    let object_rows = project_scene_object_rows(project_config, selected_scene_row_id);
+    if !object_rows.is_empty() {
+        sections.push(workbench_section(
+            SCENE_SECTION_OBJECTS,
+            "Objects",
+            object_rows,
+            collapsed_scene_section_ids,
+        ));
+    }
+
+    let sensor_rows = project_camera_rows(project_config, selected_scene_row_id);
+    if !sensor_rows.is_empty() {
+        sections.push(workbench_section(
+            SCENE_SECTION_SENSORS,
+            "Sensors",
+            sensor_rows,
+            collapsed_scene_section_ids,
+        ));
+    }
 
     sections
 }
@@ -1229,6 +1108,10 @@ fn robot_scene_info(
     state: &UrdfViewerState,
     project_config: Option<&ProjectConfig>,
 ) -> SelectedSceneInfo {
+    if state.robot.is_none() {
+        return no_project_scene_info();
+    }
+
     let status = if state.robot.is_some() {
         "OK".to_string()
     } else {
@@ -1236,13 +1119,25 @@ fn robot_scene_info(
     };
 
     SelectedSceneInfo {
-        name: "PuppyArm".to_string(),
+        name: robot_display_name(project_config),
         selected_type: "URDF robot".to_string(),
         status,
         badge: "ARM".to_string(),
         accent: "#1c6ea4".to_string(),
         transform_properties: robot_transform_properties(project_config),
         physics_properties: physics_properties(),
+    }
+}
+
+fn no_project_scene_info() -> SelectedSceneInfo {
+    SelectedSceneInfo {
+        name: "No project".to_string(),
+        selected_type: "No model loaded".to_string(),
+        status: "Idle".to_string(),
+        badge: "--".to_string(),
+        accent: "#4b5f6f".to_string(),
+        transform_properties: vec![workbench_property("State", "No project is open")],
+        physics_properties: vec![workbench_property("Simulation", "not running")],
     }
 }
 
@@ -1470,9 +1365,9 @@ fn selected_imu_info(imu: &HardwareImuRuntime) -> SelectedSceneInfo {
             ),
         ],
         physics_properties: vec![
-            workbench_property("Orientation", "0.000, 0.000, 0.000"),
-            workbench_property("Angular velocity", "0.000, 0.000, 0.000"),
-            workbench_property("Linear acceleration", "0.000, 0.000, 0.000"),
+            workbench_property("Orientation", "-"),
+            workbench_property("Angular velocity", "-"),
+            workbench_property("Linear acceleration", "-"),
         ],
     }
 }
@@ -1646,111 +1541,9 @@ fn project_scene_object_geometry_label(geometry: &ProjectSceneObjectGeometry) ->
 fn selected_static_scene_info(
     state: &UrdfViewerState,
     project_config: Option<&ProjectConfig>,
-    selected_scene_row_id: u32,
+    _selected_scene_row_id: u32,
 ) -> SelectedSceneInfo {
-    match selected_scene_row_id {
-        SCENE_ROW_WAREHOUSE => static_scene_info(
-            "Warehouse",
-            "environment",
-            "ENV",
-            "#4b5f6f",
-            vec![
-                workbench_property("Frame", "World"),
-                workbench_property("Size", "demo layout"),
-                workbench_property("Origin", "0, 0, 0"),
-            ],
-        ),
-        SCENE_ROW_FLOOR => static_scene_info(
-            "Floor",
-            "collision plane",
-            "PLN",
-            "#4b5f6f",
-            vec![
-                workbench_property("Frame", "World"),
-                workbench_property("Normal", "Z+"),
-                workbench_property("Height", "0.000 m"),
-            ],
-        ),
-        SCENE_ROW_LIGHTS => static_scene_info(
-            "Lights",
-            "scene lighting",
-            "LGT",
-            "#4b5f6f",
-            vec![
-                workbench_property("Sources", "3"),
-                workbench_property("Mode", "viewport"),
-            ],
-        ),
-        SCENE_ROW_OBJECT_WORKTABLE => static_scene_info(
-            "Worktable",
-            "fixture",
-            "TBL",
-            "#5e6c7c",
-            vec![workbench_property("Frame", "World")],
-        ),
-        SCENE_ROW_OBJECT_BIN => static_scene_info(
-            "Bin Blue",
-            "container",
-            "BIN",
-            "#5e6c7c",
-            vec![workbench_property("Frame", "World")],
-        ),
-        SCENE_ROW_OBJECT_FIXTURE => static_scene_info(
-            "Fixture Plate",
-            "tooling",
-            "FIX",
-            "#5e6c7c",
-            vec![workbench_property("Frame", "Worktable")],
-        ),
-        SCENE_ROW_OBJECT_TAG => static_scene_info(
-            "Calibration Tag",
-            "marker",
-            "TAG",
-            "#5e6c7c",
-            vec![workbench_property("Frame", "Fixture")],
-        ),
-        SCENE_ROW_SENSOR_JOINT_STATES => selected_sensor_info(
-            "Joint States",
-            "joint telemetry",
-            "JS",
-            vec![
-                workbench_property("Source", "backend joint state"),
-                workbench_property("Rate", "100 Hz"),
-            ],
-            vec![
-                workbench_property("Position", "authoritative"),
-                workbench_property("Velocity", "estimated"),
-                workbench_property("Effort", "not connected"),
-            ],
-        ),
-        SCENE_ROW_SENSOR_LIDAR => selected_sensor_info(
-            "Lidar_1",
-            "lidar sensor",
-            "LDR",
-            vec![
-                workbench_property("Frame", "World"),
-                workbench_property("Rate", "10 Hz"),
-            ],
-            vec![
-                workbench_property("Points", "124567"),
-                workbench_property("Status", "simulated"),
-            ],
-        ),
-        SCENE_ROW_SENSOR_CAMERA => selected_sensor_info(
-            "Camera_1",
-            "camera sensor",
-            "CAM",
-            vec![
-                workbench_property("Frame", "World"),
-                workbench_property("Rate", "30 Hz"),
-            ],
-            vec![
-                workbench_property("Stream", "preview"),
-                workbench_property("Status", "simulated"),
-            ],
-        ),
-        _ => robot_scene_info(state, project_config),
-    }
+    robot_scene_info(state, project_config)
 }
 
 fn selected_scene_info(
@@ -1892,32 +1685,6 @@ fn servo_target_controls(
         .collect()
 }
 
-fn sensors() -> Vec<WorkbenchSensorModel> {
-    vec![
-        workbench_sensor("Joint States", "JS_1", "100 Hz"),
-        workbench_sensor("Camera", "Camera_1", "30 Hz"),
-    ]
-}
-
-fn dashboard_preview_props(mode: &str) -> WuiValue {
-    let value = match mode {
-        "lidar" => serde_json::json!({
-            "mode": "lidar",
-            "title": "LIDAR_1",
-            "points": 124567,
-            "rate": "10 Hz"
-        }),
-        "camera" => serde_json::json!({
-            "mode": "camera",
-            "title": "CAMERA_1",
-            "subtitle": "Camera_1",
-            "rate": "30 Hz"
-        }),
-        _ => serde_json::json!({ "mode": mode }),
-    };
-    serde_json_to_wui_value(&value)
-}
-
 fn camera_preview_props(
     base_scene_props: &serde_json::Value,
     camera: &ProjectCameraConfig,
@@ -1967,7 +1734,7 @@ fn sensor_preview_models(
 fn project_name(project_config: Option<&ProjectConfig>) -> String {
     project_config
         .map(|config| config.name.clone())
-        .unwrap_or_else(|| "PuppyArm".to_string())
+        .unwrap_or_else(|| "No project".to_string())
 }
 
 fn joint_slider_servo_target(
@@ -2184,10 +1951,6 @@ impl AppController {
             },
             project_dirty: self.project_config_dirty.get(),
             robot_scene_props: serde_json_to_wui_value(&robot_scene_props),
-            lidar_preview_name: "lidar-preview".to_string(),
-            lidar_preview_props: dashboard_preview_props("lidar"),
-            camera_preview_name: "camera-preview".to_string(),
-            camera_preview_props: dashboard_preview_props("camera"),
             has_sensor_previews: !sensor_previews.is_empty(),
             sensor_previews,
             viewport_title: "Viewport 1".to_string(),
@@ -2215,7 +1978,8 @@ impl AppController {
                 .is_some()
                 && self.simulation_runtime.status() != SimulationStatus::Stopped,
             show_camera_controls: !camera_transform_controls.is_empty(),
-            show_robot_controls: show_robot_controls(self.selected_scene_row_id),
+            show_robot_controls: live_urdf_state.robot.is_some()
+                && show_robot_controls(self.selected_scene_row_id),
             servo_target_controls: selected_servo_target_controls(
                 &live_hardware_runtime,
                 self.selected_scene_row_id,
@@ -2232,7 +1996,6 @@ impl AppController {
             physics_properties: selected_info.physics_properties,
             base_controls: base_controls(&live_urdf_state),
             joint_controls: joint_controls(&live_urdf_state, project_config),
-            sensors: sensors(),
         }
     }
 
@@ -2886,5 +2649,63 @@ impl AppController {
         }
 
         serde_json::Value::Array(items)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_project_workbench_has_neutral_empty_state() {
+        let controller = AppController::new(
+            None,
+            None,
+            WorkbenchVirtualBusHandle::new(),
+            SimulationRuntimeHandle::new(),
+        );
+        let state = controller.state();
+
+        assert_eq!(state.project_name, "No project");
+        assert_eq!(state.file_label, "No model loaded");
+        assert_eq!(state.status, "No model loaded");
+        assert_eq!(state.selected_name, "No project");
+        assert!(!state.has_robot);
+        assert!(!state.show_robot_controls);
+        assert!(state.joint_controls.is_empty());
+        assert!(!state.has_sensor_previews);
+        assert!(state.sensor_previews.is_empty());
+    }
+
+    #[test]
+    fn no_project_workbench_does_not_expose_demo_scene_rows() {
+        let controller = AppController::new(
+            None,
+            None,
+            WorkbenchVirtualBusHandle::new(),
+            SimulationRuntimeHandle::new(),
+        );
+        let labels = controller
+            .state()
+            .scene_sections
+            .into_iter()
+            .flat_map(|section| section.rows)
+            .map(|row| row.label)
+            .collect::<Vec<_>>();
+
+        for fake_label in [
+            "Warehouse",
+            "Floor",
+            "Lights",
+            "Worktable",
+            "Bin Blue",
+            "Fixture Plate",
+            "Calibration Tag",
+            "Lidar_1",
+            "Joint States",
+            "Camera_1",
+        ] {
+            assert!(!labels.iter().any(|label| label == fake_label));
+        }
     }
 }

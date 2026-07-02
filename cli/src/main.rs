@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine;
 use clap::{Args, Parser, Subcommand};
 use futures_util::{SinkExt, StreamExt};
@@ -1500,9 +1500,6 @@ async fn record_simulation(
                 .unwrap_or_else(|| "project state failed".to_string())
         );
     }
-    let Some(url) = state_response.url.clone() else {
-        bail!("daemon did not return a project URL");
-    };
     let simulation_id = args
         .simulation
         .as_deref()
@@ -1513,11 +1510,19 @@ async fn record_simulation(
     } else {
         simulation_id
     };
-    let record_url = format!(
-        "{}/simulation/{}/viewport",
-        url.trim_end_matches('/'),
-        simulation_id
-    );
+    let record_url = state_response
+        .data
+        .as_ref()
+        .and_then(|data| data.get("viewportUrl"))
+        .and_then(|value| value.as_str())
+        .map(|url| url.to_string())
+        .or_else(|| {
+            state_response.url.as_ref().map(|url| {
+                let project_base_url = url.trim_end_matches('/').trim_end_matches("/workbench");
+                format!("{project_base_url}/simulation/{simulation_id}/viewport")
+            })
+        })
+        .ok_or_else(|| anyhow!("daemon did not return a simulation viewport URL"))?;
     let stop_response = send_request(
         socket,
         &DaemonRequest::SimulationCommand {
