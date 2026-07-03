@@ -8,16 +8,15 @@ examples/puppyarm/model/robotdreams.json
 examples/puppyarm/model/final/urdf/final.urdf
 ```
 
-Run the RobotDreams workbench with auto-discovery:
-
-```bash
-cargo run
-```
-
-Or point at the project/model explicitly:
+Run the RobotDreams workbench with the bundled demo project:
 
 ```bash
 cargo run -- examples/puppyarm/project.json
+```
+
+Or point at the project/model profile explicitly:
+
+```bash
 cargo run -- examples/puppyarm/model/robotdreams.json
 cargo run -- examples/puppyarm/model/final/urdf/final.urdf
 ```

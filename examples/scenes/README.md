@@ -2,4 +2,5 @@
 
 Scene examples combine reusable assets with task-specific objects, cameras, and virtual hardware mappings.
 
-Scenes should keep robot model exports under `examples/assets/` and reference them from `project.json` by relative path.
+Product-specific scenes should live in the owning product repository. For example,
+PuppyBot owns its RobotDreams scene at `../PuppyBot/robotdreams/project.json`.

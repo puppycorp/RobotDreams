@@ -1691,6 +1691,8 @@ fn camera_preview_props(
 ) -> WuiValue {
     let mut value = base_scene_props.clone();
     if let Some(object) = value.as_object_mut() {
+        object.remove("staticScene");
+        object.remove("staticSceneKey");
         object.insert("preview".to_string(), serde_json::Value::Bool(true));
         object.insert(
             "previewCameraId".to_string(),

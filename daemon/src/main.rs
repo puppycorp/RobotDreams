@@ -46,6 +46,7 @@ const URDF_TO_VIEW_ROT_X: f32 = -std::f32::consts::FRAC_PI_2;
 const SERVO_FULL_ROTATION_TICKS: f32 = 4096.0;
 const SERVO_DEFAULT_ZERO_OFFSET: i16 = 2048;
 const SERVO_DEFAULT_DIRECTION: i8 = 1;
+const MODEL_FILES_ROUTE_PREFIX: &str = "/model-files";
 const STATIC_SCENE_ROOT_ID: u32 = 89;
 const ROBOT_BASE_GROUP_ID: u32 = 90;
 const PROJECT_SCENE_OBJECT_ID_BASE: u32 = 50_000;
@@ -121,6 +122,7 @@ struct HeadlessArgs {
 struct UrdfViewerState {
     urdf_path: Option<PathBuf>,
     workspace_root: PathBuf,
+    model_files_root: Option<PathBuf>,
     status: String,
     robot: Option<RobotModel>,
     joint_values: Vec<i32>,
@@ -130,9 +132,14 @@ struct UrdfViewerState {
 
 impl UrdfViewerState {
     fn new(urdf_path: Option<PathBuf>) -> Self {
+        let model_files_root = urdf_path
+            .as_ref()
+            .and_then(|path| urdf_package_root(path))
+            .map(|path| canonical_input_path(&path));
         Self {
             urdf_path,
             workspace_root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            model_files_root,
             status: "Waiting to load URDF".to_string(),
             robot: None,
             joint_values: Vec::new(),
@@ -1145,7 +1152,70 @@ fn path_to_workspace_url(path: &Path, workspace_root: &Path) -> Option<String> {
     }
 }
 
-fn parse_mesh_src(urdf_dir: &Path, workspace_root: &Path, filename: &str) -> Option<String> {
+fn urdf_package_root(path: &Path) -> Option<PathBuf> {
+    path.parent()?.parent().map(Path::to_path_buf)
+}
+
+fn path_to_model_files_url(path: &Path, model_files_root: Option<&Path>) -> Option<String> {
+    let relative = path.strip_prefix(model_files_root?).ok()?;
+    let mut rest = Vec::<String>::new();
+    for component in relative.components() {
+        match component {
+            Component::Normal(part) => rest.push(part.to_string_lossy().to_string()),
+            Component::CurDir => {}
+            Component::ParentDir => return None,
+            Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+
+    if rest.is_empty() {
+        None
+    } else {
+        Some(format!("{MODEL_FILES_ROUTE_PREFIX}/{}", rest.join("/")))
+    }
+}
+
+fn model_files_content_type(path: &Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "gltf" => "model/gltf+json",
+        "glb" => "model/gltf-binary",
+        "stl" => "model/stl",
+        "bin" => "application/octet-stream",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        _ => "application/octet-stream",
+    }
+}
+
+fn model_files_relative_path(uri_path: &str) -> Option<PathBuf> {
+    let relative = uri_path.strip_prefix(&format!("{MODEL_FILES_ROUTE_PREFIX}/"))?;
+    if relative.is_empty() {
+        return None;
+    }
+
+    let mut out = PathBuf::new();
+    for part in relative.split('/') {
+        if part.is_empty() || part == "." || part == ".." || part.contains('\\') {
+            return None;
+        }
+        out.push(part);
+    }
+    Some(out)
+}
+
+fn parse_mesh_src(
+    urdf_dir: &Path,
+    workspace_root: &Path,
+    model_files_root: Option<&Path>,
+    filename: &str,
+) -> Option<String> {
     let mut package_path: Option<PathBuf> = None;
     let trimmed = if let Some(without_scheme) = filename.strip_prefix("package://") {
         let mut parts = without_scheme.splitn(2, '/');
@@ -1190,11 +1260,17 @@ fn parse_mesh_src(urdf_dir: &Path, workspace_root: &Path, filename: &str) -> Opt
             if let Some(url) = path_to_assets_url(&canonical) {
                 return Some(url);
             }
+            if let Some(url) = path_to_model_files_url(&canonical, model_files_root) {
+                return Some(url);
+            }
             if let Some(url) = path_to_workspace_url(&canonical, workspace_root) {
                 return Some(url);
             }
         } else if candidate.exists() {
             if let Some(url) = path_to_assets_url(&candidate) {
+                return Some(url);
+            }
+            if let Some(url) = path_to_model_files_url(&candidate, model_files_root) {
                 return Some(url);
             }
             if let Some(url) = path_to_workspace_url(&candidate, workspace_root) {
@@ -1210,6 +1286,7 @@ fn parse_robot_from_xml(
     xml: &str,
     urdf_dir: &Path,
     workspace_root: &Path,
+    model_files_root: Option<&Path>,
 ) -> Result<RobotModel, String> {
     let doc = Document::parse(xml).map_err(|err| format!("failed to parse URDF XML: {err}"))?;
 
@@ -1238,7 +1315,9 @@ fn parse_robot_from_xml(
                     continue;
                 };
                 let mesh_scale = parse_vec3_or(mesh_node.attribute("scale"), [1.0, 1.0, 1.0]);
-                let Some(mesh_src) = parse_mesh_src(urdf_dir, workspace_root, mesh_filename) else {
+                let Some(mesh_src) =
+                    parse_mesh_src(urdf_dir, workspace_root, model_files_root, mesh_filename)
+                else {
                     continue;
                 };
                 VisualGeometry::Mesh {
@@ -1384,7 +1463,8 @@ fn parse_robot(urdf_path: &Path, workspace_root: &Path) -> Result<RobotModel, St
     let xml = std::fs::read_to_string(urdf_path)
         .map_err(|err| format!("failed to read URDF {}: {err}", urdf_path.display()))?;
     let urdf_dir = urdf_path.parent().unwrap_or(Path::new("."));
-    parse_robot_from_xml(&xml, urdf_dir, workspace_root)
+    let model_files_root = urdf_package_root(urdf_path).map(|path| canonical_input_path(&path));
+    parse_robot_from_xml(&xml, urdf_dir, workspace_root, model_files_root.as_deref())
 }
 
 fn reload_urdf_state(state: &mut UrdfViewerState) {
@@ -2426,7 +2506,15 @@ pub(crate) fn robot_scene_props_with_static_scene(
     let model_src = state.urdf_path.as_ref().and_then(|path| {
         std::fs::canonicalize(path)
             .ok()
-            .and_then(|canonical| path_to_workspace_url(&canonical, &state.workspace_root))
+            .and_then(|canonical| {
+                path_to_model_files_url(&canonical, state.model_files_root.as_deref())
+            })
+            .or_else(|| path_to_model_files_url(path, state.model_files_root.as_deref()))
+            .or_else(|| {
+                std::fs::canonicalize(path)
+                    .ok()
+                    .and_then(|canonical| path_to_workspace_url(&canonical, &state.workspace_root))
+            })
             .or_else(|| path_to_workspace_url(path, &state.workspace_root))
     });
 
@@ -2436,7 +2524,15 @@ pub(crate) fn robot_scene_props_with_static_scene(
         let name = package_root.file_name()?.to_string_lossy().to_string();
         let url = std::fs::canonicalize(package_root)
             .ok()
-            .and_then(|canonical| path_to_workspace_url(&canonical, &state.workspace_root))
+            .and_then(|canonical| {
+                path_to_model_files_url(&canonical, state.model_files_root.as_deref())
+            })
+            .or_else(|| path_to_model_files_url(package_root, state.model_files_root.as_deref()))
+            .or_else(|| {
+                std::fs::canonicalize(package_root)
+                    .ok()
+                    .and_then(|canonical| path_to_workspace_url(&canonical, &state.workspace_root))
+            })
             .or_else(|| path_to_workspace_url(package_root, &state.workspace_root))?;
         Some(serde_json::json!({ name: url }))
     });
@@ -3002,6 +3098,56 @@ fn open_project_session(state: &mut DaemonState, path: &str) -> Result<(String, 
     let project_id = project.project_id.clone();
     state.projects.insert(project_id.clone(), project);
     Ok((project_id, false))
+}
+
+async fn model_files_http_response(
+    request_path: String,
+    state: Arc<AsyncMutex<DaemonState>>,
+    fallback_model_files_root: Option<PathBuf>,
+) -> Option<HttpResponse> {
+    if !request_path.starts_with(&format!("{MODEL_FILES_ROUTE_PREFIX}/")) {
+        return None;
+    }
+
+    let Some(relative) = model_files_relative_path(&request_path) else {
+        return Some(HttpResponse::new(400, "bad model file path"));
+    };
+
+    let mut roots = {
+        let state = state.lock().await;
+        state
+            .projects
+            .values()
+            .filter_map(|project| urdf_package_root(&project.urdf_path))
+            .map(|path| canonical_input_path(&path))
+            .collect::<Vec<_>>()
+    };
+    if let Some(root) = fallback_model_files_root {
+        roots.push(root);
+    }
+
+    roots.sort();
+    roots.dedup();
+
+    for root in roots {
+        let file = root.join(&relative);
+        let Ok(canonical_file) = std::fs::canonicalize(&file) else {
+            continue;
+        };
+        if !canonical_file.starts_with(&root) {
+            continue;
+        }
+        let Ok(bytes) = tokio::fs::read(&canonical_file).await else {
+            continue;
+        };
+        return Some(
+            HttpResponse::new(200, bytes)
+                .header("content-type", model_files_content_type(&canonical_file))
+                .header("cache-control", "public, max-age=86400"),
+        );
+    }
+
+    Some(HttpResponse::new(404, "model file not found"))
 }
 
 fn project_state_item(state: &serde_json::Value, item: &str) -> Option<serde_json::Value> {
@@ -3802,6 +3948,13 @@ async fn run_app(
 
     let mut wgui = Wgui::new(bind_addr);
     wgui.set_css(ROBOT_DREAMS_CSS);
+    let fallback_model_files_root = urdf_path
+        .as_ref()
+        .and_then(|path| urdf_package_root(path))
+        .map(|path| canonical_input_path(&path));
+    if let Some(model_files_root) = fallback_model_files_root.clone() {
+        wgui.mount_static_dir(MODEL_FILES_ROUTE_PREFIX, model_files_root);
+    }
     let fallback_virtual_bus = WorkbenchVirtualBusHandle::new();
     let fallback_simulation_runtime = SimulationRuntimeHandle::new();
     let (route_virtual_bus, route_urdf_path, route_project_config) =
@@ -3835,6 +3988,14 @@ async fn run_app(
         scenario_sessions: HashMap::new(),
         active_scenarios: HashMap::new(),
     }));
+    let model_files_state = daemon_state.clone();
+    wgui.set_http_handler(move |request| {
+        model_files_http_response(
+            request.path,
+            model_files_state.clone(),
+            fallback_model_files_root.clone(),
+        )
+    });
     tokio::spawn(run_daemon_socket(socket_path, daemon_state.clone()));
     let robot_scene_virtual_bus = route_virtual_bus.clone();
     let robot_scene_urdf_path = route_urdf_path.clone();
@@ -4118,6 +4279,61 @@ mod tests {
     }
 
     #[test]
+    fn moved_puppybot_urdf_meshes_resolve_through_model_files_mount() {
+        let urdf_path = PathBuf::from(repo_path(
+            "../PuppyBot/models/puppybot/final2/urdf/final2.urdf",
+        ));
+        let robot = parse_robot(
+            &urdf_path,
+            &std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        )
+        .expect("parse moved PuppyBot URDF");
+
+        let mesh_src = robot
+            .links
+            .values()
+            .flat_map(|link| link.visuals.iter())
+            .find_map(|visual| match &visual.geometry {
+                VisualGeometry::Mesh { src, .. } => Some(src.as_str()),
+                _ => None,
+            })
+            .expect("resolved PuppyBot mesh");
+
+        assert!(
+            mesh_src.starts_with(MODEL_FILES_ROUTE_PREFIX),
+            "mesh src should be served through model files mount: {mesh_src}"
+        );
+        assert!(
+            mesh_src.ends_with(".gltf"),
+            "PuppyBot mesh src should preserve GLTF file extension: {mesh_src}"
+        );
+    }
+
+    #[tokio::test]
+    async fn model_files_handler_serves_meshes_for_project_opened_after_startup() {
+        let mut state = test_state();
+        open_project_session(
+            &mut state,
+            &repo_path("../PuppyBot/robotdreams/project.json"),
+        )
+        .expect("open PuppyBot project");
+
+        let response = model_files_http_response(
+            "/model-files/meshes/bolt.gltf".to_string(),
+            Arc::new(AsyncMutex::new(state)),
+            None,
+        )
+        .await
+        .expect("model-files response");
+
+        assert_eq!(response.status, 200);
+        assert!(response.body.starts_with(b"{"));
+        assert!(response.headers.iter().any(|(name, value)| {
+            name.eq_ignore_ascii_case("content-type") && value == "model/gltf+json"
+        }));
+    }
+
+    #[test]
     fn servo_ticks_map_to_full_rotation_not_joint_range_fraction() {
         let min = (-2.0 * URDF_VALUE_SCALE) as i32;
         let max = (2.0 * URDF_VALUE_SCALE) as i32;
@@ -4333,7 +4549,11 @@ mod tests {
     fn multiple_projects_require_selector() {
         let mut state = test_state();
         open_project_session(&mut state, &repo_path("examples/puppyarm/project.json")).unwrap();
-        open_project_session(&mut state, &repo_path("project.json")).unwrap();
+        open_project_session(
+            &mut state,
+            &repo_path("examples/puppyarm/robotdreams.example.json"),
+        )
+        .unwrap();
 
         let err = state.resolve_project_id(None).unwrap_err();
         assert!(err.contains("multiple projects are open"));
@@ -4345,7 +4565,11 @@ mod tests {
         let mut state = test_state();
         let (first_id, _) =
             open_project_session(&mut state, &repo_path("examples/puppyarm/project.json")).unwrap();
-        let (second_id, _) = open_project_session(&mut state, &repo_path("project.json")).unwrap();
+        let (second_id, _) = open_project_session(
+            &mut state,
+            &repo_path("examples/puppyarm/robotdreams.example.json"),
+        )
+        .unwrap();
 
         {
             let first = state.projects.get(&first_id).unwrap();

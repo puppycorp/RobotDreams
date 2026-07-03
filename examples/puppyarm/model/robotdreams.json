@@ -16,6 +16,16 @@
       "rotation": [0.0, 0.0, 0.0]
     }
   },
+  "tcp": {
+    "link": "part_1_1",
+    "offset": [-0.043, 0.0, 0.02]
+  },
+  "jointNames": {
+    "revolute_1_1": "wrist",
+    "revolute_1_2": "shoulder",
+    "revolute_1_3": "elbow",
+    "revolute_2_1": "yaw"
+  },
   "motorProfiles": {
     "ST3215": {
       "protocol": "feetech-sts",

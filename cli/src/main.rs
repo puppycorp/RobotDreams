@@ -28,7 +28,7 @@ struct Cli {
 
     #[arg(
         long,
-        default_value = "project.json",
+        default_value = "examples/puppyarm/project.json",
         help = "Project to open if a CLI request needs to auto-start the daemon"
     )]
     project: PathBuf,
@@ -1927,16 +1927,31 @@ impl CdpClient {
 
 async fn wait_for_rendered_scene(client: &mut CdpClient, wait_ms: u64) -> Result<()> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(wait_ms.max(1));
+    let initial_delay_ms = (wait_ms / 4).min(15_000);
+    if initial_delay_ms > 0 {
+        tokio::time::sleep(std::time::Duration::from_millis(initial_delay_ms)).await;
+    }
     loop {
         let state = client
             .evaluate(
                 r#"(() => {
                     const body = document.body?.innerText ?? "";
-                    const canvas = document.querySelector("canvas");
+                    const canvases = [];
+                    const visit = (root) => {
+                        if (!root) return;
+                        for (const canvas of root.querySelectorAll?.("canvas") ?? []) {
+                            canvases.push(canvas);
+                        }
+                        for (const element of root.querySelectorAll?.("*") ?? []) {
+                            if (element.shadowRoot) visit(element.shadowRoot);
+                        }
+                    };
+                    visit(document);
+                    const canvas = canvases[0];
                     const rect = canvas?.getBoundingClientRect();
                     return {
                         failed: body.includes("Failed to load component"),
-                        canvasCount: document.querySelectorAll("canvas").length,
+                        canvasCount: canvases.length,
                         canvasWidth: rect?.width ?? 0,
                         canvasHeight: rect?.height ?? 0
                     };

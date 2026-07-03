@@ -60,14 +60,14 @@ Draft JSON:
 {
   "format": "robotdreams.project.v1",
   "name": "PuppyBot Bin And Ball",
-  "modelProfile": "examples/assets/robots/puppybot/robotdreams.json",
+  "modelProfile": "../models/puppybot/robotdreams.json",
   "robots": [
     {
       "id": "puppybot",
       "name": "PuppyBot",
       "model": {
         "type": "urdf",
-        "path": "examples/assets/robots/puppybot/final2/urdf/final2.urdf"
+        "path": "../models/puppybot/final2/urdf/final2.urdf"
       }
     }
   ],

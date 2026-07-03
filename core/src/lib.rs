@@ -11,10 +11,18 @@ use crate::physics::PhysicsWorld;
 use crate::urdf::{UrdfModel, load_urdf};
 
 pub mod physics;
+pub mod project;
+pub mod scene_harness;
 pub mod urdf;
+
+pub use project::{
+    FrameState, JointState, LinkState, ModelEntityKind, RobotDreamsEntity, RobotDreamsModel,
+    RobotState, SceneLocation,
+};
 
 pub struct RobotDreams {
     physics: PhysicsWorld,
+    model: Option<RobotDreamsModel>,
     models: Vec<UrdfModel>,
     dt: f32,
 }
@@ -23,9 +31,17 @@ impl RobotDreams {
     pub fn new() -> Self {
         Self {
             physics: PhysicsWorld::new(),
+            model: None,
             models: Vec::new(),
             dt: 1.0 / 200.0,
         }
+    }
+
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, Box<dyn Error>> {
+        Ok(Self {
+            model: Some(RobotDreamsModel::open(path)?),
+            ..Self::new()
+        })
     }
 
     pub fn set_time_step(&mut self, dt: f32) {
@@ -41,6 +57,29 @@ impl RobotDreams {
         Ok(self.models.len() - 1)
     }
 
+    pub fn named(&self, name: &str) -> Option<RobotDreamsEntity> {
+        self.model.as_ref()?.named(name)
+    }
+
+    pub fn location_of(&self, name: &str) -> Option<SceneLocation> {
+        self.model.as_ref()?.location_of(name)
+    }
+
+    pub fn robot_state(&self, robot_id_or_name: &str) -> Option<RobotState> {
+        self.model.as_ref()?.robot_state(robot_id_or_name)
+    }
+
+    pub fn set_joint_angle(
+        &mut self,
+        name: impl AsRef<str>,
+        radians: f64,
+    ) -> Result<(), Box<dyn Error>> {
+        self.model
+            .as_mut()
+            .ok_or_else(|| "No RobotDreams model is open".into())
+            .and_then(|model| model.set_joint_angle(name, radians))
+    }
+
     pub fn step(&mut self, steps: usize) {
         for _ in 0..steps {
             self.physics.step();
@@ -51,6 +90,14 @@ impl RobotDreams {
         &self.models
     }
 
+    pub fn model(&self) -> Option<&RobotDreamsModel> {
+        self.model.as_ref()
+    }
+
+    pub fn physics(&self) -> &PhysicsWorld {
+        &self.physics
+    }
+
     pub fn physics_mut(&mut self) -> &mut PhysicsWorld {
         &mut self.physics
     }
@@ -59,6 +106,81 @@ impl RobotDreams {
 impl Default for RobotDreams {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod robotdreams_tests {
+    use std::path::{Path, PathBuf};
+
+    use super::{ModelEntityKind, RobotDreams};
+
+    fn project_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("core crate has workspace parent")
+            .to_path_buf()
+    }
+
+    fn puppyarm_project_path() -> PathBuf {
+        project_root().join("examples/puppyarm/project.json")
+    }
+
+    fn distance(left: [f64; 3], right: [f64; 3]) -> f64 {
+        let dx = left[0] - right[0];
+        let dy = left[1] - right[1];
+        let dz = left[2] - right[2];
+        (dx * dx + dy * dy + dz * dz).sqrt()
+    }
+
+    #[test]
+    fn opens_project_and_reads_scene_state() {
+        let dreams = RobotDreams::open(puppyarm_project_path()).expect("open PuppyArm project");
+
+        let trashbin = dreams.named("trashbin").expect("trashbin entity");
+        assert_eq!(trashbin.kind, ModelEntityKind::SceneObject);
+        let trashbin_location = dreams.location_of("trashbin").expect("trashbin location");
+        assert!((trashbin_location.position[0] - 0.38).abs() < 1.0e-6);
+        assert!((trashbin_location.position[1] - 0.0).abs() < 1.0e-6);
+        assert!((trashbin_location.position[2] + 0.28).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn reads_robot_state_and_updates_joint_dependent_tcp() {
+        let mut dreams = RobotDreams::open(puppyarm_project_path()).expect("open PuppyArm project");
+
+        let first_state = dreams.robot_state("puppyarm").expect("puppyarm state");
+        assert_eq!(first_state.id, "puppyarm");
+        assert!(first_state.joints.contains_key("wrist"));
+        assert!(first_state.joints.contains_key("yaw"));
+        assert!(first_state.links.contains_key("part_1_1"));
+        assert_eq!(
+            first_state.tcp.as_ref().map(|tcp| tcp.link.as_str()),
+            Some("part_1_1")
+        );
+        let first_tcp = first_state
+            .tcp
+            .and_then(|tcp| tcp.location)
+            .expect("tcp location")
+            .position;
+
+        dreams
+            .set_joint_angle("yaw", 0.5)
+            .expect("set semantic yaw joint");
+        let moved_state = dreams
+            .robot_state("PuppyArm")
+            .expect("puppyarm state after joint update");
+        assert!((moved_state.joints["yaw"].position_rad - 0.5).abs() < 1.0e-9);
+        let moved_tcp = moved_state
+            .tcp
+            .and_then(|tcp| tcp.location)
+            .expect("moved tcp location")
+            .position;
+
+        assert!(
+            distance(first_tcp, moved_tcp) > 1.0e-6,
+            "expected TCP location to change after yaw joint update"
+        );
     }
 }
 

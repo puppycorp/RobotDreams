@@ -61,6 +61,18 @@ impl PhysicsWorld {
         );
     }
 
+    pub fn bodies(&self) -> &RigidBodySet {
+        &self.bodies
+    }
+
+    pub fn colliders(&self) -> &ColliderSet {
+        &self.colliders
+    }
+
+    pub fn body(&self, handle: RigidBodyHandle) -> Option<&RigidBody> {
+        self.bodies.get(handle)
+    }
+
     pub fn bodies_mut(&mut self) -> &mut RigidBodySet {
         &mut self.bodies
     }
@@ -79,5 +91,31 @@ impl PhysicsWorld {
 
     pub fn query_pipeline(&self) -> &QueryPipeline {
         &self.query_pipeline
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rapier3d::prelude::*;
+
+    use super::PhysicsWorld;
+
+    #[test]
+    fn read_only_accessors_inspect_inserted_body() {
+        let mut world = PhysicsWorld::new();
+        let body = RigidBodyBuilder::fixed()
+            .translation(vector![1.0, 2.0, 3.0])
+            .build();
+        let handle = world.bodies_mut().insert(body);
+        world
+            .colliders_mut()
+            .insert(ColliderBuilder::ball(0.1).build());
+
+        assert_eq!(world.bodies().len(), 1);
+        assert_eq!(world.colliders().len(), 1);
+        let inserted = world.body(handle).expect("inserted body");
+        assert_eq!(inserted.translation().x, 1.0);
+        assert_eq!(inserted.translation().y, 2.0);
+        assert_eq!(inserted.translation().z, 3.0);
     }
 }
