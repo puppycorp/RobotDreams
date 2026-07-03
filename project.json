@@ -1,17 +1,17 @@
 {
   "format": "robotdreams.project.v1",
-  "name": "PuppyArm Demo",
-  "modelProfile": "examples/puppyarm/model/robotdreams.json",
+  "name": "PuppyBot Bin And Ball",
+  "modelProfile": "examples/assets/robots/puppybot/robotdreams.json",
   "robots": [
     {
-      "id": "puppyarm",
-      "name": "PuppyArm",
+      "id": "puppybot",
+      "name": "PuppyBot",
       "model": {
         "type": "urdf",
-        "path": "examples/puppyarm/model/final/urdf/final.urdf"
+        "path": "examples/assets/robots/puppybot/final2/urdf/final2.urdf"
       },
       "base": {
-        "translation": [0.0, 0.154023, 0.0]
+        "translation": [0.0, 0.0, 0.0]
       },
       "jointNames": {
         "revolute_2_1": "yaw",
@@ -44,19 +44,8 @@
         "rotation": [-1.5707964, 0.0, 0.0]
       },
       {
-        "id": "demo_box",
-        "name": "Demo Box",
-        "type": "box",
-        "icon": "BOX",
-        "shape": "box",
-        "size": [0.18, 0.12, 0.08],
-        "position": [-0.32, 0.04, -0.2],
-        "rotation": [0.0, 0.0, 0.0],
-        "color": "#43d17a"
-      },
-      {
-        "id": "demo_marker",
-        "name": "Demo Marker",
+        "id": "ball",
+        "name": "Ball",
         "type": "sphere",
         "icon": "SPH",
         "shape": "sphere",
@@ -72,7 +61,7 @@
         "type": "camera",
         "icon": "CAM",
         "mountedOn": {
-          "robot": "puppyarm",
+          "robot": "puppybot",
           "link": "root"
         },
         "position": [0.0, 0.0, 0.65],
@@ -87,7 +76,7 @@
         "type": "camera",
         "icon": "CAM",
         "mountedOn": {
-          "robot": "puppyarm",
+          "robot": "puppybot",
           "link": "part_1_1"
         },
         "position": [0.0, 0.0, -0.2],
@@ -115,7 +104,7 @@
             "name": "Yaw Servo",
             "profile": "ST3215",
             "drives": {
-              "robot": "puppyarm",
+              "robot": "puppybot",
               "joint": "revolute_2_1"
             },
             "calibration": {
@@ -129,7 +118,7 @@
             "name": "Shoulder Servo",
             "profile": "ST3215",
             "drives": {
-              "robot": "puppyarm",
+              "robot": "puppybot",
               "joint": "revolute_1_2"
             },
             "calibration": {
@@ -143,7 +132,7 @@
             "name": "Elbow Servo",
             "profile": "ST3215",
             "drives": {
-              "robot": "puppyarm",
+              "robot": "puppybot",
               "joint": "revolute_1_3"
             },
             "calibration": {
@@ -157,7 +146,7 @@
             "name": "Wrist Servo",
             "profile": "ST3215",
             "drives": {
-              "robot": "puppyarm",
+              "robot": "puppybot",
               "joint": "revolute_1_1"
             },
             "calibration": {
@@ -169,5 +158,5 @@
       }
     ]
   },
-  "notes": "Convenience project manifest for launching the demo from the RobotDreams crate root."
+  "notes": "Convenience project manifest for launching the PuppyBot bin-and-ball example from the RobotDreams crate root."
 }

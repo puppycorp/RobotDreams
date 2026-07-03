@@ -43,6 +43,9 @@ const URDF_BASE_ROTATION_MIN: i32 = (-std::f32::consts::PI * URDF_VALUE_SCALE) a
 const URDF_BASE_ROTATION_MAX: i32 = (std::f32::consts::PI * URDF_VALUE_SCALE) as i32;
 const URDF_ROTATION_ORDER: &str = "ZYX";
 const URDF_TO_VIEW_ROT_X: f32 = -std::f32::consts::FRAC_PI_2;
+const SERVO_FULL_ROTATION_TICKS: f32 = 4096.0;
+const SERVO_DEFAULT_ZERO_OFFSET: i16 = 2048;
+const SERVO_DEFAULT_DIRECTION: i8 = 1;
 const STATIC_SCENE_ROOT_ID: u32 = 89;
 const ROBOT_BASE_GROUP_ID: u32 = 90;
 const PROJECT_SCENE_OBJECT_ID_BASE: u32 = 50_000;
@@ -1496,24 +1499,52 @@ fn urdf_joint_type_name(joint_type: UrdfJointType) -> &'static str {
     }
 }
 
-fn servo_ticks_to_radians(ticks: i16) -> f32 {
-    let ticks = ticks.clamp(0, 4095) as f32;
-    (ticks - 2048.0) * (std::f32::consts::TAU / 4096.0)
+fn servo_direction(direction: i8) -> f32 {
+    if direction < 0 { -1.0 } else { 1.0 }
 }
 
-pub(crate) fn servo_ticks_to_slider_value(ticks: i16, min: i32, max: i32) -> i32 {
+fn servo_ticks_to_radians(ticks: i16, zero_offset: i16, direction: i8) -> f32 {
     let ticks = ticks.clamp(0, 4095) as f32;
-    let t = ticks / 4095.0;
-    (min as f32 + (max - min) as f32 * t).round() as i32
+    let zero_offset = zero_offset.clamp(0, 4095) as f32;
+    servo_direction(direction)
+        * (ticks - zero_offset)
+        * (std::f32::consts::TAU / SERVO_FULL_ROTATION_TICKS)
 }
 
-pub(crate) fn slider_value_to_servo_ticks(slider_value: i32, min: i32, max: i32) -> i16 {
+pub(crate) fn servo_ticks_to_slider_value(
+    ticks: i16,
+    min: i32,
+    max: i32,
+    zero_offset: i16,
+    direction: i8,
+) -> i32 {
     if max <= min {
-        return 0;
+        return min;
     }
 
-    let t = (slider_value - min) as f32 / (max - min) as f32;
-    (t.clamp(0.0, 1.0) * 4095.0).round() as i16
+    let radians = servo_ticks_to_radians(ticks, zero_offset, direction);
+    let value = (radians * URDF_VALUE_SCALE).round() as i32;
+    value.clamp(min, max)
+}
+
+pub(crate) fn slider_value_to_servo_ticks(
+    slider_value: i32,
+    min: i32,
+    max: i32,
+    zero_offset: i16,
+    direction: i8,
+) -> i16 {
+    if max <= min {
+        return zero_offset.clamp(0, 4095);
+    }
+
+    let slider_value = slider_value.clamp(min, max);
+    let radians = urdf_slider_value_to_units(slider_value);
+    let ticks = zero_offset as f32
+        + servo_direction(direction)
+            * radians
+            * (SERVO_FULL_ROTATION_TICKS / std::f32::consts::TAU);
+    ticks.round().clamp(0.0, 4095.0) as i16
 }
 
 fn urdf_slider_servo_target(
@@ -1530,7 +1561,16 @@ fn urdf_slider_servo_target(
     let joint_index = robot.movable_joint_indices.get(slot)?;
     let (min, max) = urdf_joint_slider_range(&robot.joints[*joint_index]);
     let servo_id = u8::try_from(slot + 1).ok()?;
-    Some((servo_id, slider_value_to_servo_ticks(value, min, max)))
+    Some((
+        servo_id,
+        slider_value_to_servo_ticks(
+            value,
+            min,
+            max,
+            SERVO_DEFAULT_ZERO_OFFSET,
+            SERVO_DEFAULT_DIRECTION,
+        ),
+    ))
 }
 
 fn sync_urdf_with_servo_snapshots(state: &mut UrdfViewerState, snapshots: &[FeetechServoSnapshot]) {
@@ -1556,7 +1596,13 @@ fn sync_urdf_with_servo_snapshots(state: &mut UrdfViewerState, snapshots: &[Feet
         for slot in 0..count {
             let (joint_index, min, max) = ranges[slot];
             if let Some(value) = state.joint_values.get_mut(joint_index) {
-                *value = servo_ticks_to_slider_value(snapshots[slot].present_position, min, max);
+                *value = servo_ticks_to_slider_value(
+                    snapshots[slot].present_position,
+                    min,
+                    max,
+                    SERVO_DEFAULT_ZERO_OFFSET,
+                    SERVO_DEFAULT_DIRECTION,
+                );
             }
         }
         return;
@@ -1564,19 +1610,35 @@ fn sync_urdf_with_servo_snapshots(state: &mut UrdfViewerState, snapshots: &[Feet
 
     // Fallback for fixed-joint URDFs: mirror the first servo positions to model pose.
     if let Some(s1) = snapshots.get(0) {
-        state.base_rotation_values[2] =
-            (servo_ticks_to_radians(s1.present_position) * URDF_VALUE_SCALE).round() as i32;
+        state.base_rotation_values[2] = (servo_ticks_to_radians(
+            s1.present_position,
+            SERVO_DEFAULT_ZERO_OFFSET,
+            SERVO_DEFAULT_DIRECTION,
+        ) * URDF_VALUE_SCALE)
+            .round() as i32;
     }
     if let Some(s2) = snapshots.get(1) {
-        state.base_rotation_values[1] =
-            (servo_ticks_to_radians(s2.present_position) * URDF_VALUE_SCALE).round() as i32;
+        state.base_rotation_values[1] = (servo_ticks_to_radians(
+            s2.present_position,
+            SERVO_DEFAULT_ZERO_OFFSET,
+            SERVO_DEFAULT_DIRECTION,
+        ) * URDF_VALUE_SCALE)
+            .round() as i32;
     }
     if let Some(s3) = snapshots.get(2) {
-        state.base_rotation_values[0] =
-            (servo_ticks_to_radians(s3.present_position) * URDF_VALUE_SCALE).round() as i32;
+        state.base_rotation_values[0] = (servo_ticks_to_radians(
+            s3.present_position,
+            SERVO_DEFAULT_ZERO_OFFSET,
+            SERVO_DEFAULT_DIRECTION,
+        ) * URDF_VALUE_SCALE)
+            .round() as i32;
     }
     if let Some(s4) = snapshots.get(3) {
-        let z = (servo_ticks_to_radians(s4.present_position) / std::f32::consts::PI
+        let z = (servo_ticks_to_radians(
+            s4.present_position,
+            SERVO_DEFAULT_ZERO_OFFSET,
+            SERVO_DEFAULT_DIRECTION,
+        ) / std::f32::consts::PI
             * URDF_BASE_POSITION_RANGE as f32
             * 0.25)
             .round() as i32;
@@ -4053,6 +4115,48 @@ mod tests {
 
     fn temp_path(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("robotdreams-{}-{name}", std::process::id()))
+    }
+
+    #[test]
+    fn servo_ticks_map_to_full_rotation_not_joint_range_fraction() {
+        let min = (-2.0 * URDF_VALUE_SCALE) as i32;
+        let max = (2.0 * URDF_VALUE_SCALE) as i32;
+
+        assert_eq!(servo_ticks_to_slider_value(2048, min, max, 2048, 1), 0);
+        assert_eq!(
+            servo_ticks_to_slider_value(3072, min, max, 2048, 1),
+            (std::f32::consts::FRAC_PI_2 * URDF_VALUE_SCALE).round() as i32
+        );
+        assert_eq!(
+            servo_ticks_to_slider_value(1024, min, max, 2048, 1),
+            (-std::f32::consts::FRAC_PI_2 * URDF_VALUE_SCALE).round() as i32
+        );
+    }
+
+    #[test]
+    fn servo_tick_mapping_honors_direction_and_clamps_to_joint_range() {
+        let min = (-0.5 * URDF_VALUE_SCALE) as i32;
+        let max = (0.5 * URDF_VALUE_SCALE) as i32;
+
+        assert_eq!(servo_ticks_to_slider_value(3072, min, max, 2048, 1), max);
+        assert_eq!(servo_ticks_to_slider_value(3072, min, max, 2048, -1), min);
+    }
+
+    #[test]
+    fn slider_values_map_to_servo_ticks_by_radians() {
+        let min = (-2.0 * URDF_VALUE_SCALE) as i32;
+        let max = (2.0 * URDF_VALUE_SCALE) as i32;
+        let quarter_turn = (std::f32::consts::FRAC_PI_2 * URDF_VALUE_SCALE).round() as i32;
+
+        assert_eq!(slider_value_to_servo_ticks(0, min, max, 2048, 1), 2048);
+        assert_eq!(
+            slider_value_to_servo_ticks(quarter_turn, min, max, 2048, 1),
+            3072
+        );
+        assert_eq!(
+            slider_value_to_servo_ticks(quarter_turn, min, max, 2048, -1),
+            1024
+        );
     }
 
     #[test]

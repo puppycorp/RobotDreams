@@ -391,7 +391,13 @@ pub(crate) fn apply_servo_snapshots_to_urdf(
             let (min, max) = urdf_joint_slider_range(joint);
             updates.push((
                 joint_index,
-                servo_ticks_to_slider_value(snapshot.present_position, min, max),
+                servo_ticks_to_slider_value(
+                    snapshot.present_position,
+                    min,
+                    max,
+                    servo.zero_offset,
+                    servo.direction,
+                ),
             ));
         }
     }

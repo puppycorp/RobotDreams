@@ -16,7 +16,7 @@ Use separate top-level groups:
 
 ```text
 Robots
-  PuppyArm
+  PuppyBot
     Links
     Joints
 
@@ -59,14 +59,15 @@ Draft JSON:
 ```json
 {
   "format": "robotdreams.project.v1",
-  "name": "PuppyArm",
+  "name": "PuppyBot Bin And Ball",
+  "modelProfile": "examples/assets/robots/puppybot/robotdreams.json",
   "robots": [
     {
-      "id": "puppyarm",
-      "name": "PuppyArm",
+      "id": "puppybot",
+      "name": "PuppyBot",
       "model": {
         "type": "urdf",
-        "path": "model/final/urdf/final.urdf"
+        "path": "examples/assets/robots/puppybot/final2/urdf/final2.urdf"
       }
     }
   ],
@@ -87,8 +88,8 @@ Draft JSON:
             "name": "Base Servo",
             "profile": "ST3215",
             "drives": {
-              "robot": "puppyarm",
-              "joint": "revolute_1"
+              "robot": "puppybot",
+              "joint": "revolute_2_1"
             },
             "calibration": {
               "zeroOffset": 2048,
@@ -101,8 +102,8 @@ Draft JSON:
             "name": "Shoulder Servo",
             "profile": "ST3215",
             "drives": {
-              "robot": "puppyarm",
-              "joint": "revolute_1_1"
+              "robot": "puppybot",
+              "joint": "revolute_1_2"
             },
             "calibration": {
               "zeroOffset": 2048,
@@ -121,7 +122,7 @@ Draft JSON:
             "name": "Wrist IMU",
             "profile": "custom_imu",
             "mountedOn": {
-              "robot": "puppyarm",
+              "robot": "puppybot",
               "link": "wrist_link"
             }
           }

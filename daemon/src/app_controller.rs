@@ -1747,8 +1747,8 @@ fn joint_slider_servo_target(
     let joint_index = *robot.movable_joint_indices.get(slider_slot)?;
     let joint = robot.joints.get(joint_index)?;
     let (min, max) = urdf_joint_slider_range(joint);
-    let target = slider_value_to_servo_ticks(value, min, max);
     let servo = mapped_servo_for_joint(hardware_runtime, &joint.name)?;
+    let target = slider_value_to_servo_ticks(value, min, max, servo.zero_offset, servo.direction);
     Some((u8::try_from(servo.id).ok()?, target, joint.name.clone()))
 }
 

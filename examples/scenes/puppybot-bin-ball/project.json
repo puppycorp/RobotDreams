@@ -1,0 +1,162 @@
+{
+  "format": "robotdreams.project.v1",
+  "name": "PuppyBot Bin And Ball",
+  "modelProfile": "../../assets/robots/puppybot/robotdreams.json",
+  "robots": [
+    {
+      "id": "puppybot",
+      "name": "PuppyBot",
+      "model": {
+        "type": "urdf",
+        "path": "../../assets/robots/puppybot/final2/urdf/final2.urdf"
+      },
+      "base": {
+        "translation": [0.0, 0.0, 0.0]
+      },
+      "jointNames": {
+        "revolute_2_1": "yaw",
+        "revolute_1_1": "wrist",
+        "revolute_1_2": "shoulder",
+        "revolute_1_3": "elbow"
+      }
+    }
+  ],
+  "scene": {
+    "objects": [
+      {
+        "id": "floor_5m",
+        "name": "Floor 5m",
+        "type": "floor",
+        "icon": "PLN",
+        "shape": "box",
+        "size": [5.0, 0.02, 5.0],
+        "position": [0.0, -0.011, 0.0],
+        "color": "#162331",
+        "includeInFit": false
+      },
+      {
+        "id": "trashbin",
+        "name": "Trash Bin",
+        "type": "container",
+        "icon": "BIN",
+        "asset": "../../trashbin.gltf",
+        "position": [0.38, 0.0, -0.28],
+        "rotation": [-1.5707964, 0.0, 0.0]
+      },
+      {
+        "id": "ball",
+        "name": "Ball",
+        "type": "sphere",
+        "icon": "SPH",
+        "shape": "sphere",
+        "radius": 0.055,
+        "position": [-0.18, 0.055, -0.34],
+        "color": "#d6b24a"
+      }
+    ],
+    "cameras": [
+      {
+        "id": "overhead_camera",
+        "name": "Overhead Camera",
+        "type": "camera",
+        "icon": "CAM",
+        "mountedOn": {
+          "robot": "puppybot",
+          "link": "root"
+        },
+        "position": [0.0, 0.0, 0.65],
+        "rotation": [0.0, 0.0, 0.0],
+        "fov": 62.0,
+        "rate": "30 Hz",
+        "resolution": [640, 480]
+      },
+      {
+        "id": "wrist_camera",
+        "name": "TCP Camera",
+        "type": "camera",
+        "icon": "CAM",
+        "mountedOn": {
+          "robot": "puppybot",
+          "link": "part_1_1"
+        },
+        "position": [0.0, 0.0, -0.2],
+        "rotation": [0.0, 0.0, 0.0],
+        "fov": 70.0,
+        "rate": "30 Hz",
+        "resolution": [640, 480]
+      }
+    ]
+  },
+  "hardware": {
+    "buses": [
+      {
+        "id": "main_bus",
+        "name": "Main Serial Bus",
+        "transport": {
+          "type": "virtual",
+          "baud": 1000000
+        },
+        "protocol": "feetech",
+        "devices": [
+          {
+            "type": "servo",
+            "id": 1,
+            "name": "Yaw Servo",
+            "profile": "ST3215",
+            "drives": {
+              "robot": "puppybot",
+              "joint": "revolute_2_1"
+            },
+            "calibration": {
+              "zeroOffset": 2048,
+              "direction": 1
+            }
+          },
+          {
+            "type": "servo",
+            "id": 2,
+            "name": "Shoulder Servo",
+            "profile": "ST3215",
+            "drives": {
+              "robot": "puppybot",
+              "joint": "revolute_1_2"
+            },
+            "calibration": {
+              "zeroOffset": 2048,
+              "direction": -1
+            }
+          },
+          {
+            "type": "servo",
+            "id": 3,
+            "name": "Elbow Servo",
+            "profile": "ST3215",
+            "drives": {
+              "robot": "puppybot",
+              "joint": "revolute_1_3"
+            },
+            "calibration": {
+              "zeroOffset": 2048,
+              "direction": 1
+            }
+          },
+          {
+            "type": "servo",
+            "id": 4,
+            "name": "Wrist Servo",
+            "profile": "ST3215",
+            "drives": {
+              "robot": "puppybot",
+              "joint": "revolute_1_1"
+            },
+            "calibration": {
+              "zeroOffset": 2048,
+              "direction": 1
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "notes": "Scene manifest for the reusable PuppyBot robot asset with bin and ball task objects."
+}

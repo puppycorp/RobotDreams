@@ -3,7 +3,7 @@ use base64::Engine;
 use clap::{Args, Parser, Subcommand};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead, ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 #[cfg(unix)]
@@ -180,6 +180,7 @@ enum SimulationCommand {
 #[derive(Debug, Subcommand)]
 enum RecordingCommand {
     Inspect(RecordingInspectArgs),
+    Assert(RecordingAssertArgs),
 }
 
 #[derive(Debug, Args)]
@@ -378,6 +379,36 @@ struct RecordingInspectArgs {
     json: bool,
 }
 
+#[derive(Debug, Args)]
+struct RecordingAssertArgs {
+    #[arg(long)]
+    trace: PathBuf,
+
+    #[arg(long)]
+    ready: PathBuf,
+
+    #[arg(long = "expect-servo-moved", value_delimiter = ',')]
+    expect_servo_moved: Vec<u8>,
+
+    #[arg(long = "expect-target-write", value_delimiter = ',')]
+    expect_target_write: Vec<u8>,
+
+    #[arg(long = "allow-servo-id", value_delimiter = ',')]
+    allow_servo_id: Vec<u8>,
+
+    #[arg(long, default_value_t = 1)]
+    min_present_delta: i32,
+
+    #[arg(long, default_value_t = 1)]
+    min_target_delta: i32,
+
+    #[arg(long)]
+    require_transform_change: bool,
+
+    #[arg(long)]
+    json: bool,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(tag = "command", rename_all = "camelCase")]
 enum DaemonRequest {
@@ -439,11 +470,92 @@ struct RecordingInspectSummary {
     sample_count: u64,
     sample_error_count: u64,
     command_count: u64,
+    bus_event_count: u64,
     servo_ids: Vec<u8>,
+    virtual_bus_path: Option<String>,
+    virtual_bus_paths: Vec<String>,
+    virtual_bus_running_sample_count: u64,
+    running_sample_count: u64,
+    bus_command_events_by_servo: Vec<ServoCommandEvidence>,
+    servo_snapshot_count_by_servo: Vec<ServoSnapshotCount>,
+    servo_movement_by_servo: Vec<ServoMovementEvidence>,
     first_status: Option<String>,
     last_status: Option<String>,
+    transform_change_count: u64,
+    changed_transform_ids: Vec<String>,
     first_transform_change_sec: Option<f64>,
     last_transform_change_sec: Option<f64>,
+    scenario: Option<ScenarioTraceSummary>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+struct ServoCommandEvidence {
+    id: u8,
+    count: u64,
+    first_elapsed_sec: Option<f64>,
+    last_elapsed_sec: Option<f64>,
+    target_positions: Vec<i16>,
+    min_target_position: Option<i16>,
+    max_target_position: Option<i16>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+struct ServoSnapshotCount {
+    id: u8,
+    count: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+struct ServoMovementEvidence {
+    id: u8,
+    sample_count: u64,
+    moving_sample_count: u64,
+    first_present_position: Option<i16>,
+    last_present_position: Option<i16>,
+    min_present_position: Option<i16>,
+    max_present_position: Option<i16>,
+    max_present_delta: i32,
+    first_target_position: Option<i16>,
+    last_target_position: Option<i16>,
+    min_target_position: Option<i16>,
+    max_target_position: Option<i16>,
+    max_target_delta: i32,
+}
+
+#[derive(Debug, Clone, Default, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+struct ScenarioTraceSummary {
+    scenario_id: Option<String>,
+    first_status: Option<String>,
+    last_status: Option<String>,
+    first_progress: Option<String>,
+    last_progress: Option<String>,
+    sample_count: u64,
+    source: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RecordingAssertResult {
+    schema: &'static str,
+    ok: bool,
+    trace: String,
+    ready: String,
+    summary: RecordingInspectSummary,
+    cases: Vec<RecordingAssertionCase>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RecordingAssertionCase {
+    name: String,
+    ok: bool,
+    severity: &'static str,
+    details: serde_json::Value,
+    first_elapsed_sec: Option<f64>,
 }
 
 #[cfg(unix)]
@@ -558,6 +670,86 @@ mod tests {
     }
 
     #[test]
+    fn assert_recording_accepts_bus_movement_and_transform_evidence() {
+        let (trace, ready) = write_assertion_artifacts(
+            "valid",
+            r#"{"type":"recordingStart","schema":"robotdreams.recording.trace.v1","startedUnixMs":1}
+{"type":"sample","index":0,"elapsedSec":0.0,"virtualBusRunning":true,"virtualBusPath":"/dev/pts/4","data":{"status":"running","virtualBus":{"running":true,"path":"/dev/pts/4"},"servoSnapshots":[{"id":1,"targetPosition":2048,"presentPosition":2048,"moving":false}],"busEvents":[],"robotScene":{"dynamicState":{"transforms":{"tool":{"axisAngle":[0,0,1,0.0]}}}}}}
+{"type":"sample","index":1,"elapsedSec":0.1,"virtualBusRunning":true,"virtualBusPath":"/dev/pts/4","data":{"status":"running","virtualBus":{"running":true,"path":"/dev/pts/4"},"servoSnapshots":[{"id":1,"targetPosition":2100,"presentPosition":2060,"moving":true}],"busEvents":[{"sequence":1,"instruction":"write","id":1,"ids":[1],"writes":[{"id":1,"targetPosition":2100}]}],"robotScene":{"dynamicState":{"transforms":{"tool":{"axisAngle":[0,0,1,0.5]}}}}}}
+{"type":"recordingEnd","endedUnixMs":2,"elapsedSec":0.2,"samples":2}
+"#,
+        );
+        let result = assert_recording(&assert_args(trace, ready)).expect("assert");
+        assert!(result.ok);
+        assert_case(&result, "busTargetWrites", true);
+        assert_case(&result, "presentPositionMovement", true);
+        assert_case(&result, "transformChanges", true);
+    }
+
+    #[test]
+    fn assert_recording_rejects_scenario_success_without_physical_evidence() {
+        let (trace, ready) = write_assertion_artifacts(
+            "scenario-only",
+            r#"{"type":"recordingStart","schema":"robotdreams.recording.trace.v1","startedUnixMs":1}
+{"type":"sample","index":0,"elapsedSec":0.0,"virtualBusRunning":true,"virtualBusPath":"/dev/pts/4","data":{"status":"running","virtualBus":{"running":true,"path":"/dev/pts/4"},"servoSnapshots":[{"id":1,"targetPosition":2048,"presentPosition":2048,"moving":false}],"busEvents":[],"scenario":{"scenarioId":"puppybot-ball-to-bin","status":"complete","progress":"complete"},"robotScene":{"dynamicState":{"transforms":{"tool":{"axisAngle":[0,0,1,0.0]}}}}}}
+{"type":"sample","index":1,"elapsedSec":0.1,"virtualBusRunning":true,"virtualBusPath":"/dev/pts/4","data":{"status":"running","virtualBus":{"running":true,"path":"/dev/pts/4"},"servoSnapshots":[{"id":1,"targetPosition":2048,"presentPosition":2048,"moving":false}],"busEvents":[],"scenario":{"scenarioId":"puppybot-ball-to-bin","status":"complete","progress":"complete"},"robotScene":{"dynamicState":{"transforms":{"tool":{"axisAngle":[0,0,1,0.0]}}}}}}
+{"type":"recordingEnd","endedUnixMs":2,"elapsedSec":0.2,"samples":2}
+"#,
+        );
+        let result = assert_recording(&assert_args(trace, ready)).expect("assert");
+        assert!(!result.ok);
+        assert_case(&result, "busTargetWrites", false);
+        assert_case(&result, "presentPositionMovement", false);
+    }
+
+    #[test]
+    fn assert_recording_rejects_bus_command_without_present_position_movement() {
+        let (trace, ready) = write_assertion_artifacts(
+            "command-only",
+            r#"{"type":"recordingStart","schema":"robotdreams.recording.trace.v1","startedUnixMs":1}
+{"type":"sample","index":0,"elapsedSec":0.0,"virtualBusRunning":true,"virtualBusPath":"/dev/pts/4","data":{"status":"running","virtualBus":{"running":true,"path":"/dev/pts/4"},"servoSnapshots":[{"id":1,"targetPosition":2048,"presentPosition":2048,"moving":false}],"busEvents":[],"robotScene":{"dynamicState":{"transforms":{"tool":{"axisAngle":[0,0,1,0.0]}}}}}}
+{"type":"sample","index":1,"elapsedSec":0.1,"virtualBusRunning":true,"virtualBusPath":"/dev/pts/4","data":{"status":"running","virtualBus":{"running":true,"path":"/dev/pts/4"},"servoSnapshots":[{"id":1,"targetPosition":2100,"presentPosition":2048,"moving":false}],"busEvents":[{"sequence":1,"instruction":"write","id":1,"ids":[1],"writes":[{"id":1,"targetPosition":2100}]}],"robotScene":{"dynamicState":{"transforms":{"tool":{"axisAngle":[0,0,1,0.0]}}}}}}
+{"type":"recordingEnd","endedUnixMs":2,"elapsedSec":0.2,"samples":2}
+"#,
+        );
+        let result = assert_recording(&assert_args(trace, ready)).expect("assert");
+        assert!(!result.ok);
+        assert_case(&result, "busTargetWrites", true);
+        assert_case(&result, "presentPositionMovement", false);
+    }
+
+    #[test]
+    fn assert_recording_rejects_present_position_movement_without_bus_command() {
+        let (trace, ready) = write_assertion_artifacts(
+            "movement-only",
+            r#"{"type":"recordingStart","schema":"robotdreams.recording.trace.v1","startedUnixMs":1}
+{"type":"sample","index":0,"elapsedSec":0.0,"virtualBusRunning":true,"virtualBusPath":"/dev/pts/4","data":{"status":"running","virtualBus":{"running":true,"path":"/dev/pts/4"},"servoSnapshots":[{"id":1,"targetPosition":2048,"presentPosition":2048,"moving":false}],"busEvents":[],"robotScene":{"dynamicState":{"transforms":{"tool":{"axisAngle":[0,0,1,0.0]}}}}}}
+{"type":"sample","index":1,"elapsedSec":0.1,"virtualBusRunning":true,"virtualBusPath":"/dev/pts/4","data":{"status":"running","virtualBus":{"running":true,"path":"/dev/pts/4"},"servoSnapshots":[{"id":1,"targetPosition":2048,"presentPosition":2060,"moving":true}],"busEvents":[],"robotScene":{"dynamicState":{"transforms":{"tool":{"axisAngle":[0,0,1,0.5]}}}}}}
+{"type":"recordingEnd","endedUnixMs":2,"elapsedSec":0.2,"samples":2}
+"#,
+        );
+        let result = assert_recording(&assert_args(trace, ready)).expect("assert");
+        assert!(!result.ok);
+        assert_case(&result, "busTargetWrites", false);
+    }
+
+    #[test]
+    fn assert_recording_rejects_sample_errors() {
+        let (trace, ready) = write_assertion_artifacts(
+            "sample-error",
+            r#"{"type":"recordingStart","schema":"robotdreams.recording.trace.v1","startedUnixMs":1}
+{"type":"sample","index":0,"elapsedSec":0.0,"virtualBusRunning":true,"virtualBusPath":"/dev/pts/4","data":{"status":"running","virtualBus":{"running":true,"path":"/dev/pts/4"},"servoSnapshots":[{"id":1,"targetPosition":2048,"presentPosition":2048,"moving":false}],"busEvents":[],"robotScene":{"dynamicState":{"transforms":{"tool":{"axisAngle":[0,0,1,0.0]}}}}}}
+{"type":"sampleError","index":1,"elapsedSec":0.1,"error":"socket closed"}
+{"type":"sample","index":2,"elapsedSec":0.2,"virtualBusRunning":true,"virtualBusPath":"/dev/pts/4","data":{"status":"running","virtualBus":{"running":true,"path":"/dev/pts/4"},"servoSnapshots":[{"id":1,"targetPosition":2100,"presentPosition":2060,"moving":true}],"busEvents":[{"sequence":1,"instruction":"write","id":1,"ids":[1],"writes":[{"id":1,"targetPosition":2100}]}],"robotScene":{"dynamicState":{"transforms":{"tool":{"axisAngle":[0,0,1,0.5]}}}}}}
+{"type":"recordingEnd","endedUnixMs":2,"elapsedSec":0.3,"samples":3}
+"#,
+        );
+        let result = assert_recording(&assert_args(trace, ready)).expect("assert");
+        assert!(!result.ok);
+        assert_case(&result, "noSampleErrors", false);
+    }
+
+    #[test]
     fn filter_new_bus_events_removes_previously_seen_sequences() {
         let data = serde_json::json!({
             "status": "running",
@@ -617,6 +809,46 @@ mod tests {
             PathBuf::from("scenarios/place_ball_to_bin.robotdreams.json")
         );
         assert!(args.json);
+    }
+
+    fn assert_args(trace: PathBuf, ready: PathBuf) -> RecordingAssertArgs {
+        RecordingAssertArgs {
+            trace,
+            ready,
+            expect_servo_moved: vec![1],
+            expect_target_write: vec![1],
+            allow_servo_id: vec![1],
+            min_present_delta: 1,
+            min_target_delta: 1,
+            require_transform_change: true,
+            json: true,
+        }
+    }
+
+    fn assert_case(result: &RecordingAssertResult, name: &str, expected: bool) {
+        let case = result
+            .cases
+            .iter()
+            .find(|case| case.name == name)
+            .unwrap_or_else(|| panic!("missing case {name}"));
+        assert_eq!(case.ok, expected, "case {name}");
+    }
+
+    fn write_assertion_artifacts(name: &str, trace: &str) -> (PathBuf, PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "robotdreams-recording-assert-test-{}-{name}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let trace_path = dir.join("trace.jsonl");
+        let ready_path = dir.join("ready.json");
+        std::fs::write(&trace_path, trace).expect("write trace");
+        std::fs::write(
+            &ready_path,
+            r#"{"type":"recordingReady","virtualBusRunning":true,"virtualBusPath":"/dev/pts/4"}"#,
+        )
+        .expect("write ready");
+        (trace_path, ready_path)
     }
 }
 
@@ -738,6 +970,45 @@ fn recording_bus_events(data: &serde_json::Value) -> &[serde_json::Value] {
         .unwrap_or(&[])
 }
 
+fn recording_servo_snapshots(data: &serde_json::Value) -> &[serde_json::Value] {
+    data.get("servoSnapshots")
+        .or_else(|| data.pointer("/virtualBus/snapshots"))
+        .and_then(|snapshots| snapshots.as_array())
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+}
+
+fn read_i16(value: &serde_json::Value, key: &str) -> Option<i16> {
+    value
+        .get(key)
+        .and_then(|value| value.as_i64())
+        .and_then(|value| i16::try_from(value).ok())
+}
+
+fn read_u8(value: &serde_json::Value, key: &str) -> Option<u8> {
+    value
+        .get(key)
+        .and_then(|value| value.as_u64())
+        .and_then(|value| u8::try_from(value).ok())
+}
+
+fn insert_path(paths: &mut BTreeSet<String>, path: Option<&str>) {
+    let Some(path) = path else {
+        return;
+    };
+    let path = path.trim();
+    if !path.is_empty() {
+        paths.insert(path.to_string());
+    }
+}
+
+fn is_write_like_instruction(instruction: Option<&str>) -> bool {
+    matches!(
+        instruction,
+        Some("write" | "regWrite" | "syncWrite" | "action" | "syncWritePos")
+    )
+}
+
 fn collect_bus_event_servo_ids(event: &serde_json::Value, ids: &mut BTreeSet<u8>) {
     for id in event
         .get("ids")
@@ -772,9 +1043,293 @@ fn collect_bus_event_servo_ids(event: &serde_json::Value, ids: &mut BTreeSet<u8>
     }
 }
 
+fn collect_bus_event_target_writes(
+    event: &serde_json::Value,
+    elapsed_sec: Option<f64>,
+    targets: &mut BTreeMap<u8, ServoCommandAccumulator>,
+) {
+    let instruction = event.get("instruction").and_then(|value| value.as_str());
+    if !is_write_like_instruction(instruction) {
+        return;
+    }
+
+    for write in event
+        .get("writes")
+        .and_then(|value| value.as_array())
+        .into_iter()
+        .flatten()
+    {
+        let Some(id) = read_u8(write, "id") else {
+            continue;
+        };
+        let Some(target_position) = read_i16(write, "targetPosition") else {
+            continue;
+        };
+        targets
+            .entry(id)
+            .or_insert_with(|| ServoCommandAccumulator::new(id))
+            .record(target_position, elapsed_sec);
+    }
+
+    if let Some(id) = read_u8(event, "id")
+        && let Some(target_position) = read_i16(event, "targetPosition")
+    {
+        targets
+            .entry(id)
+            .or_insert_with(|| ServoCommandAccumulator::new(id))
+            .record(target_position, elapsed_sec);
+    }
+}
+
+fn collect_servo_snapshot(
+    snapshot: &serde_json::Value,
+    movement: &mut BTreeMap<u8, ServoMovementAccumulator>,
+) {
+    let Some(id) = read_u8(snapshot, "id") else {
+        return;
+    };
+    let present_position = read_i16(snapshot, "presentPosition");
+    let target_position = read_i16(snapshot, "targetPosition");
+    let moving = snapshot
+        .get("moving")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    movement
+        .entry(id)
+        .or_insert_with(|| ServoMovementAccumulator::new(id))
+        .record(present_position, target_position, moving);
+}
+
+fn transform_ids_changed_between(
+    previous: &serde_json::Value,
+    current: &serde_json::Value,
+) -> BTreeSet<String> {
+    let mut ids = BTreeSet::new();
+    let Some(current_map) = current.as_object() else {
+        if previous != current {
+            ids.insert("*".to_string());
+        }
+        return ids;
+    };
+    let previous_map = previous.as_object();
+    for (id, value) in current_map {
+        if previous_map.and_then(|map| map.get(id)) != Some(value) {
+            ids.insert(id.clone());
+        }
+    }
+    if let Some(previous_map) = previous_map {
+        for id in previous_map.keys() {
+            if !current_map.contains_key(id) {
+                ids.insert(id.clone());
+            }
+        }
+    }
+    ids
+}
+
+fn update_scenario_summary(summary: &mut Option<ScenarioTraceSummary>, data: &serde_json::Value) {
+    let Some(scenario) = data.get("scenario") else {
+        return;
+    };
+    let entry = summary.get_or_insert_with(|| ScenarioTraceSummary {
+        source: "tracePayloadOrDaemonState".to_string(),
+        ..ScenarioTraceSummary::default()
+    });
+    entry.sample_count += 1;
+    if entry.scenario_id.is_none() {
+        entry.scenario_id = scenario
+            .get("scenarioId")
+            .or_else(|| scenario.get("id"))
+            .and_then(|value| value.as_str())
+            .map(str::to_string);
+    }
+    if let Some(status) = scenario.get("status").and_then(|value| value.as_str()) {
+        if entry.first_status.is_none() {
+            entry.first_status = Some(status.to_string());
+        }
+        entry.last_status = Some(status.to_string());
+    }
+    if let Some(progress) = scenario.get("progress").and_then(|value| value.as_str()) {
+        if entry.first_progress.is_none() {
+            entry.first_progress = Some(progress.to_string());
+        }
+        entry.last_progress = Some(progress.to_string());
+    }
+}
+
+#[derive(Debug)]
+struct ServoCommandAccumulator {
+    id: u8,
+    count: u64,
+    first_elapsed_sec: Option<f64>,
+    last_elapsed_sec: Option<f64>,
+    target_positions: BTreeSet<i16>,
+    min_target_position: Option<i16>,
+    max_target_position: Option<i16>,
+}
+
+impl ServoCommandAccumulator {
+    fn new(id: u8) -> Self {
+        Self {
+            id,
+            count: 0,
+            first_elapsed_sec: None,
+            last_elapsed_sec: None,
+            target_positions: BTreeSet::new(),
+            min_target_position: None,
+            max_target_position: None,
+        }
+    }
+
+    fn record(&mut self, target_position: i16, elapsed_sec: Option<f64>) {
+        self.count += 1;
+        if self.first_elapsed_sec.is_none() {
+            self.first_elapsed_sec = elapsed_sec;
+        }
+        self.last_elapsed_sec = elapsed_sec;
+        self.target_positions.insert(target_position);
+        self.min_target_position = Some(
+            self.min_target_position
+                .map(|current| current.min(target_position))
+                .unwrap_or(target_position),
+        );
+        self.max_target_position = Some(
+            self.max_target_position
+                .map(|current| current.max(target_position))
+                .unwrap_or(target_position),
+        );
+    }
+
+    fn finish(self) -> ServoCommandEvidence {
+        ServoCommandEvidence {
+            id: self.id,
+            count: self.count,
+            first_elapsed_sec: self.first_elapsed_sec,
+            last_elapsed_sec: self.last_elapsed_sec,
+            target_positions: self.target_positions.into_iter().collect(),
+            min_target_position: self.min_target_position,
+            max_target_position: self.max_target_position,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ServoMovementAccumulator {
+    id: u8,
+    sample_count: u64,
+    moving_sample_count: u64,
+    first_present_position: Option<i16>,
+    last_present_position: Option<i16>,
+    min_present_position: Option<i16>,
+    max_present_position: Option<i16>,
+    first_target_position: Option<i16>,
+    last_target_position: Option<i16>,
+    min_target_position: Option<i16>,
+    max_target_position: Option<i16>,
+}
+
+impl ServoMovementAccumulator {
+    fn new(id: u8) -> Self {
+        Self {
+            id,
+            sample_count: 0,
+            moving_sample_count: 0,
+            first_present_position: None,
+            last_present_position: None,
+            min_present_position: None,
+            max_present_position: None,
+            first_target_position: None,
+            last_target_position: None,
+            min_target_position: None,
+            max_target_position: None,
+        }
+    }
+
+    fn record(
+        &mut self,
+        present_position: Option<i16>,
+        target_position: Option<i16>,
+        moving: bool,
+    ) {
+        self.sample_count += 1;
+        if moving {
+            self.moving_sample_count += 1;
+        }
+        if let Some(present_position) = present_position {
+            if self.first_present_position.is_none() {
+                self.first_present_position = Some(present_position);
+            }
+            self.last_present_position = Some(present_position);
+            self.min_present_position = Some(
+                self.min_present_position
+                    .map(|current| current.min(present_position))
+                    .unwrap_or(present_position),
+            );
+            self.max_present_position = Some(
+                self.max_present_position
+                    .map(|current| current.max(present_position))
+                    .unwrap_or(present_position),
+            );
+        }
+        if let Some(target_position) = target_position {
+            if self.first_target_position.is_none() {
+                self.first_target_position = Some(target_position);
+            }
+            self.last_target_position = Some(target_position);
+            self.min_target_position = Some(
+                self.min_target_position
+                    .map(|current| current.min(target_position))
+                    .unwrap_or(target_position),
+            );
+            self.max_target_position = Some(
+                self.max_target_position
+                    .map(|current| current.max(target_position))
+                    .unwrap_or(target_position),
+            );
+        }
+    }
+
+    fn snapshot_count(&self) -> ServoSnapshotCount {
+        ServoSnapshotCount {
+            id: self.id,
+            count: self.sample_count,
+        }
+    }
+
+    fn finish(self) -> ServoMovementEvidence {
+        let max_present_delta = match (self.min_present_position, self.max_present_position) {
+            (Some(min), Some(max)) => i32::from(max) - i32::from(min),
+            _ => 0,
+        };
+        let max_target_delta = match (self.min_target_position, self.max_target_position) {
+            (Some(min), Some(max)) => i32::from(max) - i32::from(min),
+            _ => 0,
+        };
+        ServoMovementEvidence {
+            id: self.id,
+            sample_count: self.sample_count,
+            moving_sample_count: self.moving_sample_count,
+            first_present_position: self.first_present_position,
+            last_present_position: self.last_present_position,
+            min_present_position: self.min_present_position,
+            max_present_position: self.max_present_position,
+            max_present_delta,
+            first_target_position: self.first_target_position,
+            last_target_position: self.last_target_position,
+            min_target_position: self.min_target_position,
+            max_target_position: self.max_target_position,
+            max_target_delta,
+        }
+    }
+}
+
 fn inspect_recording_reader(reader: impl BufRead) -> Result<RecordingInspectSummary> {
     let mut summary = RecordingInspectSummary::default();
     let mut servo_ids = BTreeSet::new();
+    let mut virtual_bus_paths = BTreeSet::new();
+    let mut target_writes = BTreeMap::new();
+    let mut servo_movement = BTreeMap::new();
+    let mut changed_transform_ids = BTreeSet::new();
     let mut previous_transforms: Option<serde_json::Value> = None;
 
     for (line_index, line) in reader.lines().enumerate() {
@@ -807,26 +1362,65 @@ fn inspect_recording_reader(reader: impl BufRead) -> Result<RecordingInspectSumm
             Some("sample") => {
                 summary.sample_count += 1;
                 let elapsed_sec = row.get("elapsedSec").and_then(|value| value.as_f64());
+                let top_level_bus_running = row
+                    .get("virtualBusRunning")
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false);
+                insert_path(
+                    &mut virtual_bus_paths,
+                    row.get("virtualBusPath").and_then(|value| value.as_str()),
+                );
                 let Some(data) = row.get("data") else {
+                    if top_level_bus_running {
+                        summary.virtual_bus_running_sample_count += 1;
+                    }
                     continue;
                 };
+                insert_path(
+                    &mut virtual_bus_paths,
+                    data.pointer("/virtualBus/path")
+                        .and_then(|value| value.as_str()),
+                );
 
                 if let Some(status) = data.get("status").and_then(|value| value.as_str()) {
                     if summary.first_status.is_none() {
                         summary.first_status = Some(status.to_string());
                     }
                     summary.last_status = Some(status.to_string());
+                    if status == "running" {
+                        summary.running_sample_count += 1;
+                    }
+                }
+                if top_level_bus_running
+                    || data
+                        .pointer("/virtualBus/running")
+                        .and_then(|value| value.as_bool())
+                        .unwrap_or(false)
+                {
+                    summary.virtual_bus_running_sample_count += 1;
                 }
 
                 let bus_events = recording_bus_events(data);
                 summary.command_count += bus_events.len() as u64;
+                summary.bus_event_count += bus_events.len() as u64;
                 for event in bus_events {
                     collect_bus_event_servo_ids(event, &mut servo_ids);
+                    collect_bus_event_target_writes(event, elapsed_sec, &mut target_writes);
+                }
+
+                for snapshot in recording_servo_snapshots(data) {
+                    if let Some(id) = read_u8(snapshot, "id") {
+                        servo_ids.insert(id);
+                    }
+                    collect_servo_snapshot(snapshot, &mut servo_movement);
                 }
 
                 if let Some(transforms) = data.pointer("/robotScene/dynamicState/transforms") {
                     match previous_transforms.as_ref() {
                         Some(previous) if previous != transforms => {
+                            summary.transform_change_count += 1;
+                            changed_transform_ids
+                                .extend(transform_ids_changed_between(previous, transforms));
                             if summary.first_transform_change_sec.is_none() {
                                 summary.first_transform_change_sec = elapsed_sec;
                             }
@@ -836,12 +1430,31 @@ fn inspect_recording_reader(reader: impl BufRead) -> Result<RecordingInspectSumm
                     }
                     previous_transforms = Some(transforms.clone());
                 }
+                update_scenario_summary(&mut summary.scenario, data);
             }
             _ => {}
         }
     }
 
     summary.servo_ids = servo_ids.into_iter().collect();
+    summary.virtual_bus_paths = virtual_bus_paths.into_iter().collect();
+    summary.virtual_bus_path = match summary.virtual_bus_paths.as_slice() {
+        [path] => Some(path.clone()),
+        _ => None,
+    };
+    summary.bus_command_events_by_servo = target_writes
+        .into_values()
+        .map(ServoCommandAccumulator::finish)
+        .collect();
+    summary.servo_snapshot_count_by_servo = servo_movement
+        .values()
+        .map(|state| state.snapshot_count())
+        .collect();
+    summary.servo_movement_by_servo = servo_movement
+        .into_values()
+        .map(ServoMovementAccumulator::finish)
+        .collect();
+    summary.changed_transform_ids = changed_transform_ids.into_iter().collect();
     Ok(summary)
 }
 
@@ -864,6 +1477,19 @@ fn inspect_recording(args: RecordingInspectArgs) -> Result<()> {
     println!("Samples: {}", summary.sample_count);
     println!("Sample errors: {}", summary.sample_error_count);
     println!("Commands: {}", summary.command_count);
+    println!("Running samples: {}", summary.running_sample_count);
+    println!(
+        "Virtual bus running samples: {}",
+        summary.virtual_bus_running_sample_count
+    );
+    if let Some(path) = &summary.virtual_bus_path {
+        println!("Virtual bus path: {path}");
+    } else if !summary.virtual_bus_paths.is_empty() {
+        println!(
+            "Virtual bus paths: {}",
+            summary.virtual_bus_paths.join(", ")
+        );
+    }
     println!(
         "Servo ids: {}",
         summary
@@ -887,6 +1513,262 @@ fn inspect_recording(args: RecordingInspectArgs) -> Result<()> {
         println!("Transform changes: none detected");
     }
     Ok(())
+}
+
+fn assertion_case(
+    name: &str,
+    ok: bool,
+    details: serde_json::Value,
+    first_elapsed_sec: Option<f64>,
+) -> RecordingAssertionCase {
+    RecordingAssertionCase {
+        name: name.to_string(),
+        ok,
+        severity: "mandatory",
+        details,
+        first_elapsed_sec,
+    }
+}
+
+fn ready_virtual_bus_path(ready: &serde_json::Value) -> Option<String> {
+    ready
+        .get("virtualBusPath")
+        .or_else(|| ready.pointer("/simulation/virtualBus/path"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn ready_virtual_bus_running(ready: &serde_json::Value) -> bool {
+    ready
+        .get("virtualBusRunning")
+        .or_else(|| ready.pointer("/simulation/virtualBus/running"))
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+}
+
+fn command_evidence(summary: &RecordingInspectSummary, id: u8) -> Option<&ServoCommandEvidence> {
+    summary
+        .bus_command_events_by_servo
+        .iter()
+        .find(|evidence| evidence.id == id)
+}
+
+fn movement_evidence(summary: &RecordingInspectSummary, id: u8) -> Option<&ServoMovementEvidence> {
+    summary
+        .servo_movement_by_servo
+        .iter()
+        .find(|evidence| evidence.id == id)
+}
+
+fn expected_target_write_ids(args: &RecordingAssertArgs) -> Vec<u8> {
+    let mut ids = BTreeSet::new();
+    if args.expect_target_write.is_empty() {
+        ids.extend(args.expect_servo_moved.iter().copied());
+    } else {
+        ids.extend(args.expect_target_write.iter().copied());
+    }
+    ids.into_iter().collect()
+}
+
+fn read_ready_file(path: &Path) -> Result<serde_json::Value> {
+    let raw = std::fs::read_to_string(path)
+        .with_context(|| format!("read ready file {}", path.display()))?;
+    serde_json::from_str(&raw).with_context(|| format!("parse ready file {}", path.display()))
+}
+
+fn assert_recording(args: &RecordingAssertArgs) -> Result<RecordingAssertResult> {
+    let trace_file = std::fs::File::open(&args.trace)
+        .with_context(|| format!("open trace {}", args.trace.display()))?;
+    let summary = inspect_recording_reader(std::io::BufReader::new(trace_file))?;
+    let ready = read_ready_file(&args.ready)?;
+    let ready_path = ready_virtual_bus_path(&ready);
+    let expected_target_write_ids = expected_target_write_ids(args);
+    let expected_moved_ids = args
+        .expect_servo_moved
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+
+    let mut cases = Vec::new();
+    cases.push(assertion_case(
+        "traceComplete",
+        summary.schema.as_deref() == Some("robotdreams.recording.trace.v1")
+            && summary.sample_count >= 2
+            && summary.ended_unix_ms.is_some(),
+        serde_json::json!({
+            "schema": &summary.schema,
+            "sampleCount": summary.sample_count,
+            "endedUnixMs": &summary.ended_unix_ms,
+        }),
+        None,
+    ));
+    cases.push(assertion_case(
+        "noSampleErrors",
+        summary.sample_error_count == 0,
+        serde_json::json!({
+            "sampleErrorCount": summary.sample_error_count,
+        }),
+        None,
+    ));
+    cases.push(assertion_case(
+        "readyVirtualBus",
+        ready_virtual_bus_running(&ready) && ready_path.is_some(),
+        serde_json::json!({
+            "readyVirtualBusRunning": ready_virtual_bus_running(&ready),
+            "readyVirtualBusPath": &ready_path,
+        }),
+        None,
+    ));
+
+    let bus_path_match = ready_path.as_ref().is_some_and(|ready_path| {
+        !summary.virtual_bus_paths.is_empty()
+            && summary
+                .virtual_bus_paths
+                .iter()
+                .all(|trace_path| trace_path == ready_path)
+    });
+    cases.push(assertion_case(
+        "virtualBusPathMatches",
+        bus_path_match,
+        serde_json::json!({
+            "readyVirtualBusPath": &ready_path,
+            "traceVirtualBusPaths": &summary.virtual_bus_paths,
+        }),
+        None,
+    ));
+    cases.push(assertion_case(
+        "simulationRunning",
+        summary.running_sample_count > 0 && summary.virtual_bus_running_sample_count > 0,
+        serde_json::json!({
+            "runningSampleCount": summary.running_sample_count,
+            "virtualBusRunningSampleCount": summary.virtual_bus_running_sample_count,
+        }),
+        None,
+    ));
+
+    let target_write_ok = if expected_target_write_ids.is_empty() {
+        !summary.bus_command_events_by_servo.is_empty()
+    } else {
+        expected_target_write_ids
+            .iter()
+            .all(|id| command_evidence(&summary, *id).is_some_and(|evidence| evidence.count > 0))
+    };
+    cases.push(assertion_case(
+        "busTargetWrites",
+        target_write_ok,
+        serde_json::json!({
+            "expectedServoIds": &expected_target_write_ids,
+            "observed": &summary.bus_command_events_by_servo,
+        }),
+        summary
+            .bus_command_events_by_servo
+            .iter()
+            .filter_map(|evidence| evidence.first_elapsed_sec)
+            .min_by(f64::total_cmp),
+    ));
+
+    let moved_ids = if expected_moved_ids.is_empty() {
+        summary
+            .servo_movement_by_servo
+            .iter()
+            .filter(|evidence| evidence.max_present_delta >= args.min_present_delta)
+            .map(|evidence| evidence.id)
+            .collect::<Vec<_>>()
+    } else {
+        expected_moved_ids.clone()
+    };
+    let present_movement_ok = !moved_ids.is_empty()
+        && moved_ids.iter().all(|id| {
+            movement_evidence(&summary, *id).is_some_and(|evidence| {
+                evidence.max_present_delta >= args.min_present_delta
+                    && (evidence.max_target_delta >= args.min_target_delta
+                        || command_evidence(&summary, *id).is_some())
+            })
+        });
+    cases.push(assertion_case(
+        "presentPositionMovement",
+        present_movement_ok,
+        serde_json::json!({
+            "expectedServoIds": &moved_ids,
+            "minPresentDelta": args.min_present_delta,
+            "minTargetDelta": args.min_target_delta,
+            "observed": &summary.servo_movement_by_servo,
+        }),
+        None,
+    ));
+
+    if !args.allow_servo_id.is_empty() {
+        let allowed = args.allow_servo_id.iter().copied().collect::<BTreeSet<_>>();
+        let unexpected = summary
+            .servo_ids
+            .iter()
+            .copied()
+            .filter(|id| !allowed.contains(id))
+            .collect::<Vec<_>>();
+        cases.push(assertion_case(
+            "allowedServoIds",
+            unexpected.is_empty(),
+            serde_json::json!({
+                "allowedServoIds": &args.allow_servo_id,
+                "observedServoIds": &summary.servo_ids,
+                "unexpectedServoIds": &unexpected,
+            }),
+            None,
+        ));
+    }
+
+    cases.push(assertion_case(
+        "transformChanges",
+        !args.require_transform_change || summary.transform_change_count > 0,
+        serde_json::json!({
+            "required": args.require_transform_change,
+            "transformChangeCount": summary.transform_change_count,
+            "changedTransformIds": &summary.changed_transform_ids,
+            "firstTransformChangeSec": summary.first_transform_change_sec,
+            "lastTransformChangeSec": summary.last_transform_change_sec,
+        }),
+        summary.first_transform_change_sec,
+    ));
+
+    let ok = cases.iter().all(|case| case.ok);
+    Ok(RecordingAssertResult {
+        schema: "robotdreams.recording.assert.v1",
+        ok,
+        trace: args.trace.display().to_string(),
+        ready: args.ready.display().to_string(),
+        summary,
+        cases,
+    })
+}
+
+fn print_assert_result(result: &RecordingAssertResult, json: bool) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(result)?);
+    } else {
+        println!(
+            "Recording assert: {}",
+            if result.ok { "ok" } else { "failed" }
+        );
+        println!("Trace {}", result.trace);
+        println!("Ready {}", result.ready);
+        for case in &result.cases {
+            println!("{}: {}", case.name, if case.ok { "ok" } else { "failed" });
+        }
+    }
+    if result.ok {
+        Ok(())
+    } else {
+        bail!("recording assertion failed")
+    }
+}
+
+fn assert_recording_command(args: RecordingAssertArgs) -> Result<()> {
+    let result = assert_recording(&args)?;
+    print_assert_result(&result, args.json)
 }
 
 fn find_chrome(explicit: Option<PathBuf>) -> Result<PathBuf> {
@@ -2018,6 +2900,9 @@ async fn main() -> Result<()> {
         },
         Command::Recording(RecordingCommand::Inspect(args)) => {
             inspect_recording(args)?;
+        }
+        Command::Recording(RecordingCommand::Assert(args)) => {
+            assert_recording_command(args)?;
         }
         Command::Daemon(DaemonCommand::Start(args)) => {
             start_daemon(&cli.socket, None, &args.bind).await?;
