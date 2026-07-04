@@ -16,7 +16,7 @@ use clap::{Args as ClapArgs, Parser, Subcommand};
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 
 use crate::app_controller::{
     AppController, SimulationRuntimeHandle, SimulationStatus, ViewportController,
@@ -3185,13 +3185,21 @@ impl ProjectSession {
                     simulation_id: simulation_id.clone(),
                     url,
                     viewport_url,
-                    virtual_bus: WorkbenchVirtualBusHandle::new(),
+                    virtual_bus: robotdreams_virtual_bus_for_project(&self.source_path),
                     simulation_runtime: SimulationRuntimeHandle::new(),
                 },
             );
         }
         Ok(simulation_id)
     }
+}
+
+fn robotdreams_virtual_bus_for_project(path: &Path) -> WorkbenchVirtualBusHandle {
+    robotdreams_core::RobotDreams::open(path)
+        .map(|robotdreams| {
+            WorkbenchVirtualBusHandle::new_with_robotdreams(Arc::new(StdMutex::new(robotdreams)))
+        })
+        .unwrap_or_else(|_| WorkbenchVirtualBusHandle::new())
 }
 
 fn canonical_input_path(path: &Path) -> PathBuf {
@@ -3241,7 +3249,7 @@ fn make_project_session(
             simulation_id: DEFAULT_SIMULATION_ID.to_string(),
             url: simulation_url,
             viewport_url,
-            virtual_bus: WorkbenchVirtualBusHandle::new(),
+            virtual_bus: robotdreams_virtual_bus_for_project(&source_path),
             simulation_runtime: SimulationRuntimeHandle::new(),
         },
     );
@@ -4814,6 +4822,18 @@ mod tests {
         );
         assert!(!simulation.virtual_bus.is_running());
         assert!(simulation.virtual_bus.path().is_none());
+    }
+
+    #[test]
+    fn project_simulation_virtual_bus_is_backed_by_robotdreams_core() {
+        let mut state = test_state();
+        let (project_id, _) =
+            open_project_session(&mut state, &repo_path("examples/puppyarm/project.json")).unwrap();
+        let project = state.projects.get(&project_id).unwrap();
+        let simulation = project.default_simulation().unwrap();
+
+        assert!(simulation.virtual_bus.is_robotdreams_backed());
+        assert_eq!(simulation.virtual_bus.snapshots().len(), 4);
     }
 
     #[test]

@@ -918,6 +918,10 @@ impl RobotDreamsModel {
             .map(robot_state)
     }
 
+    pub fn robot_states(&self) -> Vec<RobotState> {
+        self.robots.iter().map(robot_state).collect()
+    }
+
     pub fn set_joint_angle(
         &mut self,
         name: impl AsRef<str>,

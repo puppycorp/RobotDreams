@@ -8,7 +8,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
 use crate::physics::PhysicsWorld;
+use crate::project::{BusConfig, DeviceConfig, ProjectConfig};
 use crate::urdf::{UrdfModel, load_urdf};
+use feetech_servo::servo::protocol::serial_bus::ProtocolError;
+use feetech_servo::servo::sim::{FeetechBusEvent, FeetechBusSim, FeetechServoSnapshot};
 
 pub mod physics;
 pub mod project;
@@ -24,7 +27,277 @@ pub struct RobotDreams {
     physics: PhysicsWorld,
     model: Option<RobotDreamsModel>,
     models: Vec<UrdfModel>,
+    hardware: HardwareRuntime,
+    virtual_buses: Vec<VirtualBusRuntime>,
+    clock_sec: f64,
     dt: f32,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RobotDreamsSnapshot {
+    pub clock_sec: f64,
+    pub hardware: HardwareRuntime,
+    pub servo_snapshots: Vec<BusServoSnapshots>,
+    pub robots: Vec<RobotState>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct BusServoSnapshots {
+    pub bus_id: String,
+    pub snapshots: Vec<FeetechServoSnapshot>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct HardwareRuntime {
+    pub buses: Vec<HardwareBusRuntime>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct HardwareBusRuntime {
+    pub id: String,
+    pub name: String,
+    pub transport_type: String,
+    pub device_path: Option<String>,
+    pub baud: Option<u32>,
+    pub protocol: String,
+    pub devices: Vec<HardwareDeviceRuntime>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum HardwareDeviceRuntime {
+    Servo(HardwareServoRuntime),
+    Imu(HardwareImuRuntime),
+    IoBoard(HardwareIoBoardRuntime),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct HardwareServoRuntime {
+    pub id: u32,
+    pub name: String,
+    pub profile: String,
+    pub drives_robot: String,
+    pub drives_joint: String,
+    pub zero_offset: i16,
+    pub direction: i8,
+    pub target_position: i16,
+    pub present_position: i16,
+    pub torque_enabled: bool,
+    pub temperature_c: i16,
+    pub voltage_v: f32,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct HardwareImuRuntime {
+    pub id: u32,
+    pub name: String,
+    pub profile: String,
+    pub mounted_robot: Option<String>,
+    pub mounted_link: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct HardwareIoBoardRuntime {
+    pub id: u32,
+    pub name: String,
+    pub profile: String,
+    pub digital_inputs: usize,
+    pub digital_outputs: usize,
+    pub analog_inputs: usize,
+}
+
+struct VirtualBusRuntime {
+    id: String,
+    sim: FeetechBusSim,
+}
+
+const SERVO_FULL_ROTATION_TICKS: f64 = 4096.0;
+
+fn servo_runtime_from_config(config: &crate::project::ServoDeviceConfig) -> HardwareServoRuntime {
+    let drives = config.drives.as_ref();
+    HardwareServoRuntime {
+        id: config.id,
+        name: config.name.clone(),
+        profile: config.profile.clone(),
+        drives_robot: drives
+            .map(|mapping| mapping.robot.clone())
+            .unwrap_or_default(),
+        drives_joint: drives
+            .map(|mapping| mapping.target.clone())
+            .unwrap_or_default(),
+        zero_offset: config.calibration.zero_offset,
+        direction: config.calibration.direction,
+        target_position: config.calibration.zero_offset,
+        present_position: config.calibration.zero_offset,
+        torque_enabled: true,
+        temperature_c: 25,
+        voltage_v: 7.4,
+    }
+}
+
+fn device_runtime_from_config(config: &DeviceConfig) -> HardwareDeviceRuntime {
+    match config {
+        DeviceConfig::Servo(config) => {
+            HardwareDeviceRuntime::Servo(servo_runtime_from_config(config))
+        }
+        DeviceConfig::Imu(config) => HardwareDeviceRuntime::Imu(HardwareImuRuntime {
+            id: config.id,
+            name: config.name.clone(),
+            profile: config.profile.clone(),
+            mounted_robot: config
+                .mounted_on
+                .as_ref()
+                .map(|mapping| mapping.robot.clone()),
+            mounted_link: config
+                .mounted_on
+                .as_ref()
+                .map(|mapping| mapping.target.clone()),
+        }),
+        DeviceConfig::IoBoard(config) => HardwareDeviceRuntime::IoBoard(HardwareIoBoardRuntime {
+            id: config.id,
+            name: config.name.clone(),
+            profile: config.profile.clone(),
+            digital_inputs: 0,
+            digital_outputs: 0,
+            analog_inputs: 0,
+        }),
+    }
+}
+
+fn bus_runtime_from_config(config: &BusConfig) -> HardwareBusRuntime {
+    HardwareBusRuntime {
+        id: config.id.clone(),
+        name: config.name.clone(),
+        transport_type: config.transport.type_name.clone(),
+        device_path: config.transport.path.clone(),
+        baud: config.transport.baud,
+        protocol: config.protocol.clone(),
+        devices: config
+            .devices
+            .iter()
+            .map(device_runtime_from_config)
+            .collect(),
+    }
+}
+
+fn hardware_runtime_from_project(project: &ProjectConfig) -> HardwareRuntime {
+    HardwareRuntime {
+        buses: project
+            .hardware
+            .buses
+            .iter()
+            .map(bus_runtime_from_config)
+            .collect(),
+    }
+}
+
+fn hardware_runtime_from_model(model: &RobotDreamsModel) -> HardwareRuntime {
+    model
+        .project()
+        .map(hardware_runtime_from_project)
+        .unwrap_or_default()
+}
+
+fn bus_servo_count(bus: &HardwareBusRuntime) -> u8 {
+    bus.devices
+        .iter()
+        .filter_map(|device| match device {
+            HardwareDeviceRuntime::Servo(servo) => u8::try_from(servo.id).ok(),
+            _ => None,
+        })
+        .max()
+        .unwrap_or(1)
+}
+
+fn virtual_buses_from_hardware(hardware: &HardwareRuntime) -> Vec<VirtualBusRuntime> {
+    hardware
+        .buses
+        .iter()
+        .filter(|bus| bus.transport_type.eq_ignore_ascii_case("virtual"))
+        .map(|bus| {
+            let mut sim = FeetechBusSim::new();
+            sim.set_servo_count(bus_servo_count(bus));
+            for device in &bus.devices {
+                let HardwareDeviceRuntime::Servo(servo) = device else {
+                    continue;
+                };
+                let Ok(id) = u8::try_from(servo.id) else {
+                    continue;
+                };
+                let _ = sim.set_target_position(id, servo.zero_offset);
+            }
+            sim.step(3.0);
+            VirtualBusRuntime {
+                id: bus.id.clone(),
+                sim,
+            }
+        })
+        .collect()
+}
+
+fn servo_snapshot<'a>(
+    snapshots: &'a [FeetechServoSnapshot],
+    servo: &HardwareServoRuntime,
+) -> Option<&'a FeetechServoSnapshot> {
+    let servo_id = u8::try_from(servo.id).ok()?;
+    snapshots.iter().find(|snapshot| snapshot.id == servo_id)
+}
+
+fn servo_ticks_to_radians(ticks: i16, zero_offset: i16, direction: i8) -> f64 {
+    let ticks = ticks.clamp(0, 4095) as f64;
+    let zero_offset = zero_offset.clamp(0, 4095) as f64;
+    let direction = if direction < 0 { -1.0 } else { 1.0 };
+    direction * (ticks - zero_offset) * (std::f64::consts::TAU / SERVO_FULL_ROTATION_TICKS)
+}
+
+fn apply_servo_snapshots_to_hardware(
+    hardware: &mut HardwareRuntime,
+    bus_id: &str,
+    snapshots: &[FeetechServoSnapshot],
+) {
+    let Some(bus) = hardware.buses.iter_mut().find(|bus| bus.id == bus_id) else {
+        return;
+    };
+    for device in &mut bus.devices {
+        let HardwareDeviceRuntime::Servo(servo) = device else {
+            continue;
+        };
+        let Some(snapshot) = servo_snapshot(snapshots, servo) else {
+            continue;
+        };
+        servo.target_position = snapshot.target_position;
+        servo.present_position = snapshot.present_position;
+        servo.torque_enabled = snapshot.torque_enabled;
+        servo.temperature_c = i16::from(snapshot.temperature_c);
+        servo.voltage_v = f32::from(snapshot.voltage_tenths) / 10.0;
+    }
+}
+
+fn apply_servo_snapshots_to_model(
+    model: &mut RobotDreamsModel,
+    hardware: &HardwareRuntime,
+    bus_id: &str,
+    snapshots: &[FeetechServoSnapshot],
+) {
+    let Some(bus) = hardware.buses.iter().find(|bus| bus.id == bus_id) else {
+        return;
+    };
+    for device in &bus.devices {
+        let HardwareDeviceRuntime::Servo(servo) = device else {
+            continue;
+        };
+        if servo.drives_joint.is_empty() {
+            continue;
+        }
+        let Some(snapshot) = servo_snapshot(snapshots, servo) else {
+            continue;
+        };
+        let radians = servo_ticks_to_radians(
+            snapshot.present_position,
+            servo.zero_offset,
+            servo.direction,
+        );
+        let _ = model.set_joint_angle(&servo.drives_joint, radians);
+    }
 }
 
 impl RobotDreams {
@@ -33,15 +306,25 @@ impl RobotDreams {
             physics: PhysicsWorld::new(),
             model: None,
             models: Vec::new(),
+            hardware: HardwareRuntime::default(),
+            virtual_buses: Vec::new(),
+            clock_sec: 0.0,
             dt: 1.0 / 200.0,
         }
     }
 
     pub fn open(path: impl AsRef<Path>) -> Result<Self, Box<dyn Error>> {
-        Ok(Self {
-            model: Some(RobotDreamsModel::open(path)?),
+        let model = RobotDreamsModel::open(path)?;
+        let hardware = hardware_runtime_from_model(&model);
+        let virtual_buses = virtual_buses_from_hardware(&hardware);
+        let mut dreams = Self {
+            model: Some(model),
+            hardware,
+            virtual_buses,
             ..Self::new()
-        })
+        };
+        dreams.apply_virtual_bus_snapshots();
+        Ok(dreams)
     }
 
     pub fn set_time_step(&mut self, dt: f32) {
@@ -80,9 +363,109 @@ impl RobotDreams {
             .and_then(|model| model.set_joint_angle(name, radians))
     }
 
+    pub fn advance_seconds(&mut self, dt: f32) {
+        if dt <= 0.0 {
+            return;
+        }
+        self.clock_sec += f64::from(dt);
+        for bus in &mut self.virtual_buses {
+            bus.sim.step(dt);
+        }
+        self.apply_virtual_bus_snapshots();
+        self.set_time_step(dt);
+        self.physics.step();
+    }
+
+    pub fn snapshot(&self) -> RobotDreamsSnapshot {
+        RobotDreamsSnapshot {
+            clock_sec: self.clock_sec,
+            hardware: self.hardware.clone(),
+            servo_snapshots: self
+                .virtual_buses
+                .iter()
+                .map(|bus| BusServoSnapshots {
+                    bus_id: bus.id.clone(),
+                    snapshots: bus.sim.servo_snapshots(),
+                })
+                .collect(),
+            robots: self
+                .model
+                .as_ref()
+                .map(|model| model.robot_states())
+                .unwrap_or_default(),
+        }
+    }
+
+    pub fn hardware(&self) -> &HardwareRuntime {
+        &self.hardware
+    }
+
+    pub fn servo_snapshots(&self, bus_id: &str) -> Option<Vec<FeetechServoSnapshot>> {
+        self.virtual_buses
+            .iter()
+            .find(|bus| bus.id == bus_id)
+            .map(|bus| bus.sim.servo_snapshots())
+    }
+
+    pub fn first_virtual_bus_id(&self) -> Option<&str> {
+        self.virtual_buses.first().map(|bus| bus.id.as_str())
+    }
+
+    pub fn handle_virtual_bus_frame(
+        &mut self,
+        bus_id: &str,
+        frame: &[u8],
+    ) -> Result<Option<Vec<u8>>, ProtocolError> {
+        self.handle_virtual_bus_frame_with_event(bus_id, frame).0
+    }
+
+    pub fn handle_virtual_bus_frame_with_event(
+        &mut self,
+        bus_id: &str,
+        frame: &[u8],
+    ) -> (Result<Option<Vec<u8>>, ProtocolError>, FeetechBusEvent) {
+        let Some(bus) = self.virtual_buses.iter_mut().find(|bus| bus.id == bus_id) else {
+            return (
+                Ok(None),
+                FeetechBusEvent {
+                    instruction: "invalid".to_string(),
+                    id: None,
+                    broadcast: false,
+                    address: None,
+                    length: None,
+                    ids: Vec::new(),
+                    writes: Vec::new(),
+                    data: Vec::new(),
+                    target_position: None,
+                    raw: frame.to_vec(),
+                    error: Some(format!("virtual bus '{bus_id}' not found")),
+                },
+            );
+        };
+        let result = bus.sim.handle_frame_with_event(frame);
+        self.apply_virtual_bus_snapshots();
+        result
+    }
+
+    pub fn set_virtual_servo_target(
+        &mut self,
+        bus_id: &str,
+        servo_id: u8,
+        target_position: i16,
+    ) -> bool {
+        let Some(bus) = self.virtual_buses.iter_mut().find(|bus| bus.id == bus_id) else {
+            return false;
+        };
+        let updated = bus.sim.set_target_position(servo_id, target_position);
+        if updated {
+            self.apply_virtual_bus_snapshots();
+        }
+        updated
+    }
+
     pub fn step(&mut self, steps: usize) {
         for _ in 0..steps {
-            self.physics.step();
+            self.advance_seconds(self.dt);
         }
     }
 
@@ -100,6 +483,20 @@ impl RobotDreams {
 
     pub fn physics_mut(&mut self) -> &mut PhysicsWorld {
         &mut self.physics
+    }
+
+    fn apply_virtual_bus_snapshots(&mut self) {
+        let snapshots_by_bus = self
+            .virtual_buses
+            .iter()
+            .map(|bus| (bus.id.clone(), bus.sim.servo_snapshots()))
+            .collect::<Vec<_>>();
+        for (bus_id, snapshots) in snapshots_by_bus {
+            apply_servo_snapshots_to_hardware(&mut self.hardware, &bus_id, &snapshots);
+            if let Some(model) = &mut self.model {
+                apply_servo_snapshots_to_model(model, &self.hardware, &bus_id, &snapshots);
+            }
+        }
     }
 }
 
@@ -180,6 +577,51 @@ mod robotdreams_tests {
         assert!(
             distance(first_tcp, moved_tcp) > 1.0e-6,
             "expected TCP location to change after yaw joint update"
+        );
+    }
+
+    #[test]
+    fn snapshot_includes_project_hardware_and_virtual_servo_state() {
+        let dreams = RobotDreams::open(puppyarm_project_path()).expect("open PuppyArm project");
+        let snapshot = dreams.snapshot();
+
+        assert_eq!(snapshot.hardware.buses.len(), 1);
+        assert_eq!(snapshot.hardware.buses[0].id, "main_bus");
+        assert_eq!(snapshot.servo_snapshots.len(), 1);
+        assert_eq!(snapshot.servo_snapshots[0].bus_id, "main_bus");
+        assert_eq!(snapshot.servo_snapshots[0].snapshots.len(), 4);
+        assert_eq!(snapshot.robots.len(), 1);
+        assert_eq!(snapshot.robots[0].id, "puppyarm");
+    }
+
+    #[test]
+    fn virtual_servo_target_updates_robot_state_through_shared_simulation() {
+        let mut dreams = RobotDreams::open(puppyarm_project_path()).expect("open PuppyArm project");
+        let start_tcp = dreams
+            .robot_state("puppyarm")
+            .and_then(|robot| robot.tcp)
+            .and_then(|tcp| tcp.location)
+            .expect("start tcp")
+            .position;
+
+        assert!(dreams.set_virtual_servo_target("main_bus", 1, 2593));
+        dreams.advance_seconds(3.0);
+        let snapshot = dreams.snapshot();
+        let yaw = snapshot.robots[0].joints["yaw"].position_rad;
+        let moved_tcp = snapshot.robots[0]
+            .tcp
+            .as_ref()
+            .and_then(|tcp| tcp.location.clone())
+            .expect("moved tcp")
+            .position;
+
+        assert!(
+            yaw > 0.5,
+            "yaw should move from virtual servo target: {yaw}"
+        );
+        assert!(
+            distance(start_tcp, moved_tcp) > 1.0e-3,
+            "TCP should move when virtual servo updates the model"
         );
     }
 }
