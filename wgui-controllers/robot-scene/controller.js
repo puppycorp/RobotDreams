@@ -1,5 +1,7 @@
 import * as THREE from "/fs/third_party/three/three.module.js"
 
+const ROS_TO_THREE_ROT_X = -Math.PI / 2
+
 const css = `
   :host, .robot-scene {
     display: block;
@@ -433,6 +435,11 @@ const applyObjectProps = (object, node) => {
   } else {
     delete object.userData.cameraId
   }
+  if (Number.isFinite(props.get("selectRowId"))) {
+    object.userData.selectRowId = Math.trunc(props.get("selectRowId"))
+  } else {
+    delete object.userData.selectRowId
+  }
 }
 
 const updateObjectProps = (object, node) => {
@@ -520,6 +527,62 @@ const servoTicksToJointValue = (ticks, joint) => {
   const upper = finite(joint?.upper, Math.PI)
   const t = clamp(finite(ticks, 0), 0, 4095) / 4095
   return lower + (upper - lower) * t
+}
+
+const selectablePayload = (object) => {
+  for (let current = object; current; current = current.parent) {
+    if (Number.isInteger(current.userData?.selectRowId)) {
+      return {
+        rowId: current.userData.selectRowId,
+        nodeId: Number.isInteger(current.userData?.nodeId) ? current.userData.nodeId : null,
+        name: typeof current.name === "string" ? current.name : "",
+      }
+    }
+  }
+  return null
+}
+
+const createAxisLabel = (text, color) => {
+  const canvas = document.createElement("canvas")
+  canvas.width = 256
+  canvas.height = 64
+  const context = canvas.getContext("2d")
+  context.font = "600 28px Inter, ui-sans-serif, system-ui, sans-serif"
+  context.textBaseline = "middle"
+  context.fillStyle = "rgba(7, 16, 26, 0.78)"
+  context.fillRect(0, 0, canvas.width, canvas.height)
+  context.strokeStyle = color
+  context.lineWidth = 3
+  context.strokeRect(1.5, 1.5, canvas.width - 3, canvas.height - 3)
+  context.fillStyle = color
+  context.fillText(text, 14, canvas.height / 2)
+
+  const texture = new THREE.CanvasTexture(canvas)
+  texture.colorSpace = THREE.SRGBColorSpace
+  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({
+    map: texture,
+    transparent: true,
+    depthTest: false,
+  }))
+  sprite.scale.set(0.18, 0.045, 1)
+  return sprite
+}
+
+const addRosAxis = (group, direction, length, color, label) => {
+  const origin = new THREE.Vector3(0, 0.004, 0)
+  group.add(new THREE.ArrowHelper(direction, origin, length, color, 0.055, 0.032))
+  const labelSprite = createAxisLabel(label, `#${color.toString(16).padStart(6, "0")}`)
+  labelSprite.position.copy(origin).addScaledVector(direction, length + 0.06)
+  group.add(labelSprite)
+}
+
+const createRosAxisMarker = () => {
+  const marker = new THREE.Group()
+  marker.name = "ROS xyz axes"
+  addRosAxis(marker, new THREE.Vector3(1, 0, 0), 0.34, 0xff4d4d, "X forward")
+  addRosAxis(marker, new THREE.Vector3(0, 0, -1), 0.34, 0x43d17a, "Y left")
+  addRosAxis(marker, new THREE.Vector3(0, 1, 0), 0.34, 0x55a7ff, "Z up")
+  return marker
 }
 
 class CameraRig {
@@ -620,8 +683,9 @@ class CameraRig {
 }
 
 export default class RobotSceneController {
-  constructor(element) {
+  constructor(element, context) {
     this.element = element
+    this.context = context
     this.props = {}
     this.root = document.createElement("div")
     this.root.className = "robot-scene"
@@ -646,6 +710,8 @@ export default class RobotSceneController {
 
     this.worldGroup = new THREE.Group()
     this.robotGroup = new THREE.Group()
+    this.robotGroup.rotation.x = ROS_TO_THREE_ROT_X
+    this.axisMarker = createRosAxisMarker()
     this.scene.add(this.worldGroup, this.robotGroup)
 
     this.fitAfterBuild = true
@@ -655,9 +721,16 @@ export default class RobotSceneController {
     this.pendingMeshLoads = 0
     this.robotGeneration = 0
     this.sceneStructureKey = null
+    this.raycaster = new THREE.Raycaster()
+    this.pointerNdc = new THREE.Vector2()
+    this.pickPointerDown = null
     this.resize = this.resize.bind(this)
     this.render = this.render.bind(this)
+    this.pointerDown = this.pointerDown.bind(this)
+    this.click = this.click.bind(this)
     this.cameraRig = new CameraRig(this.canvas, this.camera, this.render)
+    this.canvas.addEventListener("pointerdown", this.pointerDown)
+    this.canvas.addEventListener("click", this.click)
     this.buildWorld()
   }
 
@@ -685,6 +758,7 @@ export default class RobotSceneController {
 
     this.props = nextProps
     this.root.classList.toggle("robot-scene--preview", Boolean(nextProps.preview))
+    this.axisMarker.visible = !nextProps.preview
     this.fitAfterBuild = nextModelKey !== this.modelKey
     this.modelKey = nextModelKey
     this.sceneStructureKey = nextSceneStructureKey
@@ -745,6 +819,8 @@ export default class RobotSceneController {
 
   dispose() {
     window.removeEventListener("resize", this.resize)
+    this.canvas.removeEventListener("pointerdown", this.pointerDown)
+    this.canvas.removeEventListener("click", this.click)
     this.cameraRig.dispose()
     disposeObject(this.scene)
     this.renderer.dispose()
@@ -754,6 +830,7 @@ export default class RobotSceneController {
   buildWorld() {
     const grid = new THREE.GridHelper(2.4, 12, 0x2a8dff, 0x243348)
     this.worldGroup.add(grid)
+    this.worldGroup.add(this.axisMarker)
     this.worldGroup.add(new THREE.AmbientLight(0x9fb6d0, 0.75))
 
     const key = new THREE.DirectionalLight(0xffffff, 1.6)
@@ -794,6 +871,7 @@ export default class RobotSceneController {
       case "group": {
         const group = new THREE.Group()
         applyObjectProps(group, node)
+        group.userData.nodeId = node.id
         this.nodeObjects.set(node.id, group)
         if (typeof group.userData.cameraId === "string") {
           this.cameraMounts.set(group.userData.cameraId, group)
@@ -838,6 +916,7 @@ export default class RobotSceneController {
     if (typeof src === "string" && /\.(glb|gltf)(\?|#|$)/i.test(src)) {
       const group = new THREE.Group()
       applyObjectProps(group, node)
+      group.userData.nodeId = node.id
       this.nodeObjects.set(node.id, group)
       if (typeof group.userData.cameraId === "string") {
         this.cameraMounts.set(group.userData.cameraId, group)
@@ -865,6 +944,7 @@ export default class RobotSceneController {
 
     const mesh = new THREE.Mesh(createGeometryFromNode(geometryNode), meshMaterial)
     applyObjectProps(mesh, node)
+    mesh.userData.nodeId = node.id
     this.nodeObjects.set(node.id, mesh)
     return mesh
   }
@@ -873,17 +953,17 @@ export default class RobotSceneController {
     const base = this.props?.base ?? {}
     const translation = Array.isArray(base.translation) ? base.translation : [0, 0, 0]
     const values = jointValues(this.props)
-    const root = new THREE.Vector3(finite(translation[0]), 0.05 + finite(translation[2]), finite(translation[1]))
+    const root = new THREE.Vector3(finite(translation[0]), finite(translation[1]), 0.05 + finite(translation[2]))
     const yaw = clamp(values[0] ?? 0, -Math.PI, Math.PI)
     const a1 = -0.72 + clamp(values[1] ?? 0, -1.4, 1.4) * 0.35
     const a2 = 1.04 + clamp(values[2] ?? 0, -1.4, 1.4) * 0.35
     const a3 = -0.24 + clamp(values[3] ?? 0, -1.4, 1.4) * 0.25
     const dir = (angle, len) => new THREE.Vector3(
+      Math.cos(yaw) * Math.cos(angle) * len * 0.22,
       Math.sin(yaw) * Math.cos(angle) * len * 0.22,
       Math.sin(angle) * len * 0.22,
-      Math.cos(yaw) * Math.cos(angle) * len * 0.22,
     )
-    const p0 = root.clone().add(new THREE.Vector3(0, 0.08, 0))
+    const p0 = root.clone().add(new THREE.Vector3(0, 0, 0.08))
     const p1 = p0.clone().add(dir(a1, 0.78))
     const p2 = p1.clone().add(dir(a1 + a2, 0.66))
     const p3 = p2.clone().add(dir(a1 + a2 + a3, 0.32))
@@ -945,6 +1025,37 @@ export default class RobotSceneController {
     }
   }
 
+  pointerDown(event) {
+    this.pickPointerDown = { x: event.clientX, y: event.clientY, button: event.button }
+  }
+
+  click(event) {
+    if (this.props?.preview || event.button !== 0) return
+    if (this.pickPointerDown) {
+      const dx = event.clientX - this.pickPointerDown.x
+      const dy = event.clientY - this.pickPointerDown.y
+      if (this.pickPointerDown.button !== 0 || dx * dx + dy * dy > 25) {
+        return
+      }
+    }
+
+    const rect = this.canvas.getBoundingClientRect()
+    if (rect.width < 1 || rect.height < 1) return
+    this.pointerNdc.set(
+      ((event.clientX - rect.left) / rect.width) * 2 - 1,
+      -(((event.clientY - rect.top) / rect.height) * 2 - 1),
+    )
+    this.robotGroup.updateWorldMatrix(true, true)
+    this.raycaster.setFromCamera(this.pointerNdc, this.camera)
+    const hit = this.raycaster
+      .intersectObjects(this.robotGroup.children, true)
+      .map((intersection) => selectablePayload(intersection.object))
+      .find((payload) => payload?.rowId)
+    if (hit) {
+      this.context?.emit?.("scenePicked", hit)
+    }
+  }
+
   resize() {
     const rect = this.element.getBoundingClientRect()
     if (rect.width < 1 || rect.height < 1) return
@@ -976,6 +1087,7 @@ export default class RobotSceneController {
 
   render() {
     if (!this.renderer || !this.scene || !this.camera) return
+    if (this.axisMarker) this.axisMarker.visible = !this.props?.preview
     const hiddenMount = this.applyPreviewCamera()
     if (hiddenMount) hiddenMount.visible = false
     this.renderer.render(this.scene, this.camera)

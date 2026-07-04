@@ -86,6 +86,13 @@ pub struct ProjectRobotConfig {
 pub struct ProjectRobotModelConfig {
     pub type_name: String,
     pub path: String,
+    pub model_transformation: Option<ModelTransformationConfig>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ModelTransformationConfig {
+    pub translation: [f32; 3],
+    pub rotation: [f32; 3],
 }
 
 #[derive(Clone, Debug, Default)]
@@ -331,7 +338,14 @@ fn merge_model_profile_joint_names(
     let mut joint_names = model_profile_joint_names(model_profile);
     joint_names.extend(project_joint_names);
     robot.joint_names = joint_names;
+    if robot.model.model_transformation.is_none() {
+        robot.model.model_transformation = model_profile.robot.model.model_transformation;
+    }
     robot
+}
+
+fn model_transformation(robot: &LoadedRobotModel) -> ModelTransformationConfig {
+    robot.config.model.model_transformation.unwrap_or_default()
 }
 
 fn loaded_robot_from_config(
@@ -413,9 +427,15 @@ fn scene_location(
     rotation: Option<[f32; 3]>,
     base_translation: [f32; 3],
     base_rotation: [f32; 3],
+    model_transformation: ModelTransformationConfig,
 ) -> SceneLocation {
+    let model_position = transform_project_point(
+        position,
+        model_transformation.translation,
+        model_transformation.rotation,
+    );
     SceneLocation {
-        position: transform_project_point(position, base_translation, base_rotation),
+        position: transform_project_point(model_position, base_translation, base_rotation),
         rotation: rotation.map(f32_vec3_to_f64),
     }
 }
@@ -488,6 +508,7 @@ fn robot_entity(robot: &LoadedRobotModel) -> RobotDreamsEntity {
             Some(robot.config.base_rotation),
             robot.config.base_translation,
             [0.0, 0.0, 0.0],
+            ModelTransformationConfig::default(),
         )),
         properties,
     }
@@ -518,6 +539,7 @@ fn joint_entity(robot: &LoadedRobotModel, joint: &urdf_rs::Joint) -> RobotDreams
                     None,
                     robot.config.base_translation,
                     robot.config.base_rotation,
+                    model_transformation(robot),
                 )
             }),
         properties,
@@ -537,6 +559,7 @@ fn link_entity(robot: &LoadedRobotModel, link_name: &str) -> RobotDreamsEntity {
                 None,
                 robot.config.base_translation,
                 robot.config.base_rotation,
+                model_transformation(robot),
             )
         }),
         properties: BTreeMap::new(),
@@ -569,6 +592,7 @@ fn tcp_entity(robot: &LoadedRobotModel, tcp: &TcpConfig) -> RobotDreamsEntity {
                     None,
                     robot.config.base_translation,
                     robot.config.base_rotation,
+                    model_transformation(robot),
                 )
             }),
         properties,
@@ -581,6 +605,7 @@ fn robot_base_location(robot: &LoadedRobotModel) -> SceneLocation {
         Some(robot.config.base_rotation),
         robot.config.base_translation,
         [0.0, 0.0, 0.0],
+        ModelTransformationConfig::default(),
     )
 }
 
@@ -591,6 +616,7 @@ fn robot_link_location(robot: &LoadedRobotModel, link_name: &str) -> Option<Scen
             None,
             robot.config.base_translation,
             robot.config.base_rotation,
+            model_transformation(robot),
         )
     })
 }
@@ -616,6 +642,7 @@ fn robot_tcp_location(robot: &LoadedRobotModel, tcp: &TcpConfig) -> Option<Scene
                 None,
                 robot.config.base_translation,
                 robot.config.base_rotation,
+                model_transformation(robot),
             )
         })
 }
@@ -1642,6 +1669,19 @@ fn parse_project_robot_model_config(value: &serde_json::Value) -> Option<Project
             .unwrap_or("urdf")
             .to_string(),
         path: json_string_path(model, &["path"])?.to_string(),
+        model_transformation: parse_model_transformation_config(model),
+    })
+}
+
+fn parse_model_transformation_config(
+    value: &serde_json::Value,
+) -> Option<ModelTransformationConfig> {
+    let transform = value.get("modelTransformation")?;
+    Some(ModelTransformationConfig {
+        translation: json_vec3_path(transform, &["translation"])
+            .or_else(|| json_vec3_path(transform, &["position"]))
+            .unwrap_or([0.0, 0.0, 0.0]),
+        rotation: json_vec3_path(transform, &["rotation"]).unwrap_or([0.0, 0.0, 0.0]),
     })
 }
 
@@ -1777,6 +1817,36 @@ mod tests {
         (dx * dx + dy * dy + dz * dz).sqrt()
     }
 
+    fn robot_config_with_model_transformation(
+        model_transformation: Option<ModelTransformationConfig>,
+    ) -> ProjectRobotConfig {
+        ProjectRobotConfig {
+            id: "robot".to_string(),
+            name: "Robot".to_string(),
+            model: ProjectRobotModelConfig {
+                type_name: "urdf".to_string(),
+                path: "robot.urdf".to_string(),
+                model_transformation,
+            },
+            joint_names: HashMap::new(),
+            base_translation: [0.0, 0.0, 0.0],
+            base_rotation: [0.0, 0.0, 0.0],
+        }
+    }
+
+    fn model_profile_with_robot(robot: ProjectRobotConfig) -> ModelProfile {
+        ModelProfile {
+            format: ROBOT_DREAMS_MODEL_FORMAT.to_string(),
+            name: "Robot".to_string(),
+            manifest_path: PathBuf::from("robotdreams.json"),
+            base_dir: PathBuf::from("."),
+            robot,
+            joint_names: HashMap::new(),
+            tcp: None,
+            frame_mapping: None,
+        }
+    }
+
     #[test]
     fn model_opens_project_and_queries_named_entities() {
         let model = RobotDreamsModel::open(puppyarm_project_path()).expect("load PuppyArm project");
@@ -1869,6 +1939,61 @@ mod tests {
         assert_eq!(yaw.urdf_name.as_deref(), Some("revolute_2_1"));
 
         let _ = std::fs::remove_dir_all(project_path.parent().expect("temp project parent"));
+    }
+
+    #[test]
+    fn robot_model_transformation_parses_when_present() {
+        let robot = parse_project_robot_config(&serde_json::json!({
+            "id": "robot",
+            "name": "Robot",
+            "model": {
+                "type": "urdf",
+                "path": "robot.urdf",
+                "modelTransformation": {
+                    "translation": [1.0, 2.0, 3.0],
+                    "rotation": [0.1, 0.2, 0.3]
+                }
+            }
+        }))
+        .expect("parse robot");
+
+        let transform = robot.model.model_transformation.expect("model transform");
+        assert_eq!(transform.translation, [1.0, 2.0, 3.0]);
+        assert_eq!(transform.rotation, [0.1, 0.2, 0.3]);
+    }
+
+    #[test]
+    fn project_robot_inherits_model_profile_transformation_when_omitted() {
+        let project_robot = robot_config_with_model_transformation(None);
+        let profile_transform = ModelTransformationConfig {
+            translation: [0.0, 0.0, 0.0],
+            rotation: [0.0, 0.0, std::f32::consts::PI],
+        };
+        let profile_robot = robot_config_with_model_transformation(Some(profile_transform));
+        let profile = model_profile_with_robot(profile_robot);
+
+        let merged = merge_model_profile_joint_names(project_robot, Some(&profile));
+
+        assert_eq!(merged.model.model_transformation, Some(profile_transform));
+    }
+
+    #[test]
+    fn project_robot_model_transformation_overrides_profile_default() {
+        let project_transform = ModelTransformationConfig {
+            translation: [1.0, 0.0, 0.0],
+            rotation: [0.0, 0.0, 0.0],
+        };
+        let profile_transform = ModelTransformationConfig {
+            translation: [0.0, 0.0, 0.0],
+            rotation: [0.0, 0.0, std::f32::consts::PI],
+        };
+        let project_robot = robot_config_with_model_transformation(Some(project_transform));
+        let profile_robot = robot_config_with_model_transformation(Some(profile_transform));
+        let profile = model_profile_with_robot(profile_robot);
+
+        let merged = merge_model_profile_joint_names(project_robot, Some(&profile));
+
+        assert_eq!(merged.model.model_transformation, Some(project_transform));
     }
 
     #[test]

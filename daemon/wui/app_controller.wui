@@ -208,6 +208,7 @@
             id=39002
             src="/project/robot-dreams/robot-scene"
             props={state.robot_scene_props}
+            onScenePicked="SelectSceneFromViewport"
             grow=1
             minHeight=0
             border="1px solid #245c95"

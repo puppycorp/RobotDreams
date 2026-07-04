@@ -2,7 +2,7 @@ use feetech_servo::servo::sim::FeetechServoSnapshot;
 
 use crate::{
     BusConfig, DeviceConfig, HardwareConfig, ProjectConfig, ServoDeviceConfig, UrdfViewerState,
-    joint_display_label, project_joint_name, servo_ticks_to_slider_value, urdf_joint_slider_range,
+    joint_display_label, project_joint_name, servo_ticks_to_joint_slider_value,
 };
 
 #[derive(Debug, Clone)]
@@ -388,13 +388,11 @@ pub(crate) fn apply_servo_snapshots_to_urdf(
                 continue;
             };
             let joint = &robot.joints[joint_index];
-            let (min, max) = urdf_joint_slider_range(joint);
             updates.push((
                 joint_index,
-                servo_ticks_to_slider_value(
+                servo_ticks_to_joint_slider_value(
                     snapshot.present_position,
-                    min,
-                    max,
+                    joint,
                     servo.zero_offset,
                     servo.direction,
                 ),

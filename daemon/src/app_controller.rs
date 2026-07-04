@@ -15,6 +15,7 @@ use crate::hardware_runtime::{
 use crate::robot_scene_component::servo_snapshots_json;
 use crate::scene_transform::{
     add_vec3, project_robot_base_rotation, project_robot_base_translation,
+    project_robot_model_transformation,
 };
 use crate::system_metrics::{
     CpuSample, GpuMetricCache, read_cpu_sample, system_cpu_label, system_gpu_label,
@@ -22,9 +23,10 @@ use crate::system_metrics::{
 };
 use crate::virtual_bus::{TimedFeetechBusEvent, WorkbenchVirtualBusHandle};
 use crate::{
-    ProjectCameraConfig, ProjectConfig, ProjectSceneObjectConfig, ProjectSceneObjectGeometry,
-    URDF_BASE_SLIDER_BASE_ID, URDF_JOINT_SLIDER_BASE_ID, UrdfViewerState, apply_urdf_slider_change,
-    joint_display_label, project_config_from_manifest, project_joint_name, reload_urdf_state,
+    JointDef, ModelTransformationConfig, ProjectCameraConfig, ProjectConfig,
+    ProjectSceneObjectConfig, ProjectSceneObjectGeometry, RobotModel, URDF_BASE_SLIDER_BASE_ID,
+    URDF_JOINT_SLIDER_BASE_ID, UrdfViewerState, apply_urdf_slider_change, joint_display_label,
+    project_config_from_manifest, project_joint_name, reload_urdf_state,
     robot_scene_props_with_static_scene, slider_value_to_servo_ticks, urdf_joint_slider_range,
     urdf_joint_type_name, urdf_slider_value_to_units, urdf_value_to_joint_units,
 };
@@ -1058,6 +1060,302 @@ fn format_vec3(value: [f32; 3]) -> String {
     format!("{:.3}, {:.3}, {:.3}", value[0], value[1], value[2])
 }
 
+fn format_scene_location(value: Option<[f32; 3]>) -> String {
+    value
+        .map(|value| format!("{:.3}, {:.3}, {:.3} m", value[0], value[1], value[2]))
+        .unwrap_or_else(|| "-".to_string())
+}
+
+fn location_property(value: Option<[f32; 3]>) -> WorkbenchPropertyModel {
+    workbench_property("Location (ROS xyz)", format_scene_location(value))
+}
+
+fn robot_base_scene_location(base_translation: [f32; 3]) -> Option<[f32; 3]> {
+    Some(base_translation)
+}
+
+#[derive(Clone, Copy)]
+struct SceneTransform {
+    rotation: [[f32; 3]; 3],
+    translation: [f32; 3],
+}
+
+impl SceneTransform {
+    fn identity() -> Self {
+        Self {
+            rotation: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            translation: [0.0, 0.0, 0.0],
+        }
+    }
+
+    fn from_parts(translation: [f32; 3], rotation: [[f32; 3]; 3]) -> Self {
+        Self {
+            rotation,
+            translation,
+        }
+    }
+
+    fn then(self, next: Self) -> Self {
+        Self {
+            rotation: mat3_mul(self.rotation, next.rotation),
+            translation: vec3_add(self.transform_vector(next.translation), self.translation),
+        }
+    }
+
+    fn transform_point(self, point: [f32; 3]) -> [f32; 3] {
+        vec3_add(self.transform_vector(point), self.translation)
+    }
+
+    fn transform_vector(self, vector: [f32; 3]) -> [f32; 3] {
+        [
+            self.rotation[0][0] * vector[0]
+                + self.rotation[0][1] * vector[1]
+                + self.rotation[0][2] * vector[2],
+            self.rotation[1][0] * vector[0]
+                + self.rotation[1][1] * vector[1]
+                + self.rotation[1][2] * vector[2],
+            self.rotation[2][0] * vector[0]
+                + self.rotation[2][1] * vector[1]
+                + self.rotation[2][2] * vector[2],
+        ]
+    }
+}
+
+fn vec3_add(left: [f32; 3], right: [f32; 3]) -> [f32; 3] {
+    [left[0] + right[0], left[1] + right[1], left[2] + right[2]]
+}
+
+fn mat3_mul(left: [[f32; 3]; 3], right: [[f32; 3]; 3]) -> [[f32; 3]; 3] {
+    let mut out = [[0.0; 3]; 3];
+    for row in 0..3 {
+        for col in 0..3 {
+            out[row][col] = left[row][0] * right[0][col]
+                + left[row][1] * right[1][col]
+                + left[row][2] * right[2][col];
+        }
+    }
+    out
+}
+
+fn rot_x(angle: f32) -> [[f32; 3]; 3] {
+    let cos = angle.cos();
+    let sin = angle.sin();
+    [[1.0, 0.0, 0.0], [0.0, cos, -sin], [0.0, sin, cos]]
+}
+
+fn rot_y(angle: f32) -> [[f32; 3]; 3] {
+    let cos = angle.cos();
+    let sin = angle.sin();
+    [[cos, 0.0, sin], [0.0, 1.0, 0.0], [-sin, 0.0, cos]]
+}
+
+fn rot_z(angle: f32) -> [[f32; 3]; 3] {
+    let cos = angle.cos();
+    let sin = angle.sin();
+    [[cos, -sin, 0.0], [sin, cos, 0.0], [0.0, 0.0, 1.0]]
+}
+
+fn rpy_rotation(rpy: [f32; 3]) -> [[f32; 3]; 3] {
+    mat3_mul(mat3_mul(rot_z(rpy[2]), rot_y(rpy[1])), rot_x(rpy[0]))
+}
+
+fn normalize_axis(axis: [f32; 3]) -> [f32; 3] {
+    let norm = (axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]).sqrt();
+    if norm <= f32::EPSILON {
+        [0.0, 0.0, 1.0]
+    } else {
+        [axis[0] / norm, axis[1] / norm, axis[2] / norm]
+    }
+}
+
+fn axis_angle_rotation(axis: [f32; 3], angle: f32) -> [[f32; 3]; 3] {
+    let axis = normalize_axis(axis);
+    let (x, y, z) = (axis[0], axis[1], axis[2]);
+    let cos = angle.cos();
+    let sin = angle.sin();
+    let inv_cos = 1.0 - cos;
+    [
+        [
+            cos + x * x * inv_cos,
+            x * y * inv_cos - z * sin,
+            x * z * inv_cos + y * sin,
+        ],
+        [
+            y * x * inv_cos + z * sin,
+            cos + y * y * inv_cos,
+            y * z * inv_cos - x * sin,
+        ],
+        [
+            z * x * inv_cos - y * sin,
+            z * y * inv_cos + x * sin,
+            cos + z * z * inv_cos,
+        ],
+    ]
+}
+
+fn root_scene_transform(
+    base_translation: [f32; 3],
+    base_rotation: [f32; 3],
+    model_transformation: ModelTransformationConfig,
+) -> SceneTransform {
+    SceneTransform::from_parts(base_translation, rpy_rotation(base_rotation)).then(
+        SceneTransform::from_parts(
+            model_transformation.translation,
+            rpy_rotation(model_transformation.rotation),
+        ),
+    )
+}
+
+fn joint_origin_transform(joint: &JointDef) -> SceneTransform {
+    SceneTransform::from_parts(joint.origin_xyz, rpy_rotation(joint.origin_rpy))
+}
+
+fn joint_motion_transform(joint: &JointDef, joint_value: f32) -> SceneTransform {
+    match joint.joint_type {
+        crate::UrdfJointType::Revolute | crate::UrdfJointType::Continuous => {
+            SceneTransform::from_parts(
+                [0.0, 0.0, 0.0],
+                axis_angle_rotation(joint.axis, joint_value),
+            )
+        }
+        crate::UrdfJointType::Prismatic => {
+            let axis = normalize_axis(joint.axis);
+            SceneTransform::from_parts(
+                [
+                    axis[0] * joint_value,
+                    axis[1] * joint_value,
+                    axis[2] * joint_value,
+                ],
+                SceneTransform::identity().rotation,
+            )
+        }
+        _ => SceneTransform::identity(),
+    }
+}
+
+fn link_scene_transform_from(
+    robot: &RobotModel,
+    state: &UrdfViewerState,
+    current_link: &str,
+    current_transform: SceneTransform,
+    target_link: &str,
+) -> Option<SceneTransform> {
+    if current_link == target_link {
+        return Some(current_transform);
+    }
+
+    for joint_index in robot.children_by_parent.get(current_link)? {
+        let joint = robot.joints.get(*joint_index)?;
+        let joint_value = state
+            .joint_values
+            .get(*joint_index)
+            .map(|value| urdf_value_to_joint_units(joint, *value))
+            .unwrap_or_default();
+        let child_transform = current_transform
+            .then(joint_origin_transform(joint))
+            .then(joint_motion_transform(joint, joint_value));
+        if let Some(transform) =
+            link_scene_transform_from(robot, state, &joint.child, child_transform, target_link)
+        {
+            return Some(transform);
+        }
+    }
+
+    None
+}
+
+fn link_scene_transform(
+    state: &UrdfViewerState,
+    link_name: &str,
+    base_translation: [f32; 3],
+    base_rotation: [f32; 3],
+    model_transformation: ModelTransformationConfig,
+) -> Option<SceneTransform> {
+    let robot = state.robot.as_ref()?;
+    let root_transform =
+        root_scene_transform(base_translation, base_rotation, model_transformation);
+    for root in &robot.roots {
+        if let Some(transform) =
+            link_scene_transform_from(robot, state, root, root_transform, link_name)
+        {
+            return Some(transform);
+        }
+    }
+    None
+}
+
+fn link_scene_location(
+    state: &UrdfViewerState,
+    link_name: &str,
+    base_translation: [f32; 3],
+    base_rotation: [f32; 3],
+    model_transformation: ModelTransformationConfig,
+) -> Option<[f32; 3]> {
+    link_scene_transform(
+        state,
+        link_name,
+        base_translation,
+        base_rotation,
+        model_transformation,
+    )
+    .map(|transform| transform.translation)
+}
+
+fn joint_scene_transform(
+    state: &UrdfViewerState,
+    joint: &JointDef,
+    base_translation: [f32; 3],
+    base_rotation: [f32; 3],
+    model_transformation: ModelTransformationConfig,
+) -> Option<SceneTransform> {
+    let parent_transform = if joint.parent == "world" {
+        root_scene_transform(base_translation, base_rotation, model_transformation)
+    } else {
+        link_scene_transform(
+            state,
+            &joint.parent,
+            base_translation,
+            base_rotation,
+            model_transformation,
+        )?
+    };
+    Some(parent_transform.then(joint_origin_transform(joint)))
+}
+
+fn joint_scene_location(
+    state: &UrdfViewerState,
+    joint: &JointDef,
+    base_translation: [f32; 3],
+    base_rotation: [f32; 3],
+    model_transformation: ModelTransformationConfig,
+) -> Option<[f32; 3]> {
+    joint_scene_transform(
+        state,
+        joint,
+        base_translation,
+        base_rotation,
+        model_transformation,
+    )
+    .map(|transform| transform.translation)
+}
+
+fn mounted_camera_scene_location(
+    state: &UrdfViewerState,
+    camera: &ProjectCameraConfig,
+    base_translation: [f32; 3],
+    base_rotation: [f32; 3],
+    model_transformation: ModelTransformationConfig,
+) -> Option<[f32; 3]> {
+    let link_transform = link_scene_transform(
+        state,
+        &camera.mounted_link,
+        base_translation,
+        base_rotation,
+        model_transformation,
+    )?;
+    Some(link_transform.transform_point(camera.position))
+}
+
 fn static_scene_info(
     name: &str,
     selected_type: &str,
@@ -1077,26 +1375,38 @@ fn static_scene_info(
 }
 
 fn robot_transform_properties(
-    project_config: Option<&ProjectConfig>,
+    base_translation: [f32; 3],
+    base_rotation: [f32; 3],
 ) -> Vec<WorkbenchPropertyModel> {
-    let translation = project_robot_base_translation(project_config);
-    let rotation = project_robot_base_rotation(project_config);
     [
         ("Frame".to_string(), "World".to_string()),
-        ("Position X".to_string(), format!("{:.3} m", translation[0])),
-        ("Position Y".to_string(), format!("{:.3} m", translation[1])),
-        ("Position Z".to_string(), format!("{:.3} m", translation[2])),
+        (
+            "Location (ROS xyz)".to_string(),
+            format_scene_location(robot_base_scene_location(base_translation)),
+        ),
+        (
+            "Position X".to_string(),
+            format!("{:.3} m", base_translation[0]),
+        ),
+        (
+            "Position Y".to_string(),
+            format!("{:.3} m", base_translation[1]),
+        ),
+        (
+            "Position Z".to_string(),
+            format!("{:.3} m", base_translation[2]),
+        ),
         (
             "Roll".to_string(),
-            format!("{:.1} deg", rotation[0].to_degrees()),
+            format!("{:.1} deg", base_rotation[0].to_degrees()),
         ),
         (
             "Pitch".to_string(),
-            format!("{:.1} deg", rotation[1].to_degrees()),
+            format!("{:.1} deg", base_rotation[1].to_degrees()),
         ),
         (
             "Yaw".to_string(),
-            format!("{:.1} deg", rotation[2].to_degrees()),
+            format!("{:.1} deg", base_rotation[2].to_degrees()),
         ),
     ]
     .into_iter()
@@ -1107,6 +1417,8 @@ fn robot_transform_properties(
 fn robot_scene_info(
     state: &UrdfViewerState,
     project_config: Option<&ProjectConfig>,
+    base_translation: [f32; 3],
+    base_rotation: [f32; 3],
 ) -> SelectedSceneInfo {
     if state.robot.is_none() {
         return no_project_scene_info();
@@ -1124,7 +1436,7 @@ fn robot_scene_info(
         status,
         badge: "ARM".to_string(),
         accent: "#1c6ea4".to_string(),
-        transform_properties: robot_transform_properties(project_config),
+        transform_properties: robot_transform_properties(base_translation, base_rotation),
         physics_properties: physics_properties(),
     }
 }
@@ -1166,6 +1478,9 @@ fn joint_exists(state: &UrdfViewerState, joint_name: &str) -> bool {
 fn selected_link_info(
     state: &UrdfViewerState,
     selected_scene_row_id: u32,
+    base_translation: [f32; 3],
+    base_rotation: [f32; 3],
+    model_transformation: ModelTransformationConfig,
 ) -> Option<SelectedSceneInfo> {
     if !(SCENE_ROW_LINK_BASE..SCENE_ROW_JOINT_BASE).contains(&selected_scene_row_id) {
         return None;
@@ -1189,6 +1504,13 @@ fn selected_link_info(
         accent: "#3e7f65".to_string(),
         transform_properties: vec![
             workbench_property("Frame", "Robot"),
+            location_property(link_scene_location(
+                state,
+                &link_name,
+                base_translation,
+                base_rotation,
+                model_transformation,
+            )),
             workbench_property("Visuals", link.visuals.len().to_string()),
             workbench_property("Child joints", child_count.to_string()),
             workbench_property("Detail", link_detail(state, &link_name)),
@@ -1206,6 +1528,9 @@ fn selected_joint_info(
     hardware_runtime: &HardwareRuntime,
     project_config: Option<&ProjectConfig>,
     selected_scene_row_id: u32,
+    base_translation: [f32; 3],
+    base_rotation: [f32; 3],
+    model_transformation: ModelTransformationConfig,
 ) -> Option<SelectedSceneInfo> {
     if selected_scene_row_id < SCENE_ROW_JOINT_BASE {
         return None;
@@ -1243,6 +1568,13 @@ fn selected_joint_info(
         transform_properties: vec![
             workbench_property("Semantic name", semantic_name.unwrap_or("-").to_string()),
             workbench_property("URDF joint", joint.name.clone()),
+            location_property(joint_scene_location(
+                state,
+                joint,
+                base_translation,
+                base_rotation,
+                model_transformation,
+            )),
             workbench_property("Parent", joint.parent.clone()),
             workbench_property("Child", joint.child.clone()),
             workbench_property("Axis", format_vec3(joint.axis)),
@@ -1277,6 +1609,7 @@ fn selected_bus_info(
         accent: "#245c95".to_string(),
         transform_properties: vec![
             workbench_property("Id", bus.id.clone()),
+            location_property(None),
             workbench_property("Transport", bus.transport_type.clone()),
             workbench_property(
                 "Device path",
@@ -1308,12 +1641,33 @@ fn selected_servo_info(
     state: &UrdfViewerState,
     servo: &HardwareServoRuntime,
     project_config: Option<&ProjectConfig>,
+    base_translation: [f32; 3],
+    base_rotation: [f32; 3],
+    model_transformation: ModelTransformationConfig,
 ) -> SelectedSceneInfo {
     let mapping_status = if joint_exists(state, &servo.drives_joint) {
         "OK"
     } else {
         "Missing URDF joint"
     };
+    let scene_location = state
+        .robot
+        .as_ref()
+        .and_then(|robot| {
+            robot
+                .joints
+                .iter()
+                .find(|joint| joint.name == servo.drives_joint)
+        })
+        .and_then(|joint| {
+            joint_scene_location(
+                state,
+                joint,
+                base_translation,
+                base_rotation,
+                model_transformation,
+            )
+        });
 
     SelectedSceneInfo {
         name: servo_display_name(servo, project_config),
@@ -1324,6 +1678,7 @@ fn selected_servo_info(
         transform_properties: vec![
             workbench_property("Id", servo.id.to_string()),
             workbench_property("Configured name", servo.name.clone()),
+            location_property(scene_location),
             workbench_property("Profile", servo.profile.clone()),
             workbench_property("Mapped robot", servo.drives_robot.clone()),
             workbench_property(
@@ -1345,7 +1700,22 @@ fn selected_servo_info(
     }
 }
 
-fn selected_imu_info(imu: &HardwareImuRuntime) -> SelectedSceneInfo {
+fn selected_imu_info(
+    state: &UrdfViewerState,
+    imu: &HardwareImuRuntime,
+    base_translation: [f32; 3],
+    base_rotation: [f32; 3],
+    model_transformation: ModelTransformationConfig,
+) -> SelectedSceneInfo {
+    let scene_location = imu.mounted_link.as_ref().and_then(|link| {
+        link_scene_location(
+            state,
+            link,
+            base_translation,
+            base_rotation,
+            model_transformation,
+        )
+    });
     SelectedSceneInfo {
         name: imu.name.clone(),
         selected_type: "imu device".to_string(),
@@ -1354,6 +1724,7 @@ fn selected_imu_info(imu: &HardwareImuRuntime) -> SelectedSceneInfo {
         accent: "#245c95".to_string(),
         transform_properties: vec![
             workbench_property("Id", imu.id.to_string()),
+            location_property(scene_location),
             workbench_property("Profile", imu.profile.clone()),
             workbench_property(
                 "Mounted robot",
@@ -1381,6 +1752,7 @@ fn selected_io_board_info(io_board: &HardwareIoBoardRuntime) -> SelectedSceneInf
         accent: "#245c95".to_string(),
         transform_properties: vec![
             workbench_property("Id", io_board.id.to_string()),
+            location_property(None),
             workbench_property("Profile", io_board.profile.clone()),
         ],
         physics_properties: vec![
@@ -1414,6 +1786,9 @@ fn selected_device_info(
     hardware_runtime: &HardwareRuntime,
     project_config: Option<&ProjectConfig>,
     selected_scene_row_id: u32,
+    base_translation: [f32; 3],
+    base_rotation: [f32; 3],
+    model_transformation: ModelTransformationConfig,
 ) -> Option<SelectedSceneInfo> {
     if selected_scene_row_id < SCENE_ROW_DEVICE_BASE {
         return None;
@@ -1428,8 +1803,21 @@ fn selected_device_info(
         .devices
         .get(device_index)?;
     Some(match device {
-        HardwareDeviceRuntime::Servo(servo) => selected_servo_info(state, servo, project_config),
-        HardwareDeviceRuntime::Imu(imu) => selected_imu_info(imu),
+        HardwareDeviceRuntime::Servo(servo) => selected_servo_info(
+            state,
+            servo,
+            project_config,
+            base_translation,
+            base_rotation,
+            model_transformation,
+        ),
+        HardwareDeviceRuntime::Imu(imu) => selected_imu_info(
+            state,
+            imu,
+            base_translation,
+            base_rotation,
+            model_transformation,
+        ),
         HardwareDeviceRuntime::IoBoard(io_board) => selected_io_board_info(io_board),
     })
 }
@@ -1450,8 +1838,12 @@ fn selected_project_scene_object_info(
 }
 
 fn selected_project_camera_info(
+    state: &UrdfViewerState,
     project_config: Option<&ProjectConfig>,
     selected_scene_row_id: u32,
+    base_translation: [f32; 3],
+    base_rotation: [f32; 3],
+    model_transformation: ModelTransformationConfig,
 ) -> Option<SelectedSceneInfo> {
     if selected_scene_row_id < SCENE_ROW_PROJECT_CAMERA_BASE {
         return None;
@@ -1459,13 +1851,20 @@ fn selected_project_camera_info(
 
     let index = (selected_scene_row_id - SCENE_ROW_PROJECT_CAMERA_BASE) as usize;
     let camera = project_config?.scene.cameras.get(index)?;
-    Some(project_camera_info(camera))
+    Some(project_camera_info(
+        state,
+        camera,
+        base_translation,
+        base_rotation,
+        model_transformation,
+    ))
 }
 
 fn project_scene_object_info(object: &ProjectSceneObjectConfig) -> SelectedSceneInfo {
     let mut transform_properties = vec![
         workbench_property("Id", object.id.clone()),
         workbench_property("Frame", "World"),
+        location_property(Some(object.position)),
         workbench_property(
             "Geometry",
             project_scene_object_geometry_label(&object.geometry),
@@ -1495,13 +1894,26 @@ fn project_scene_object_info(object: &ProjectSceneObjectConfig) -> SelectedScene
     )
 }
 
-fn project_camera_info(camera: &ProjectCameraConfig) -> SelectedSceneInfo {
+fn project_camera_info(
+    state: &UrdfViewerState,
+    camera: &ProjectCameraConfig,
+    base_translation: [f32; 3],
+    base_rotation: [f32; 3],
+    model_transformation: ModelTransformationConfig,
+) -> SelectedSceneInfo {
     selected_sensor_info(
         &camera.name,
         &camera.type_name,
         &camera.icon,
         vec![
             workbench_property("Id", camera.id.clone()),
+            location_property(mounted_camera_scene_location(
+                state,
+                camera,
+                base_translation,
+                base_rotation,
+                model_transformation,
+            )),
             workbench_property("Mounted robot", camera.mounted_robot.clone()),
             workbench_property("Mounted link", camera.mounted_link.clone()),
             workbench_property("Position", format_vec3(camera.position)),
@@ -1542,8 +1954,11 @@ fn selected_static_scene_info(
     state: &UrdfViewerState,
     project_config: Option<&ProjectConfig>,
     _selected_scene_row_id: u32,
+    base_translation: [f32; 3],
+    base_rotation: [f32; 3],
+    _model_transformation: ModelTransformationConfig,
 ) -> SelectedSceneInfo {
-    robot_scene_info(state, project_config)
+    robot_scene_info(state, project_config, base_translation, base_rotation)
 }
 
 fn selected_scene_info(
@@ -1551,8 +1966,17 @@ fn selected_scene_info(
     hardware_runtime: &HardwareRuntime,
     project_config: Option<&ProjectConfig>,
     selected_scene_row_id: u32,
+    base_translation: [f32; 3],
+    base_rotation: [f32; 3],
+    model_transformation: ModelTransformationConfig,
 ) -> SelectedSceneInfo {
-    if let Some(info) = selected_link_info(state, selected_scene_row_id) {
+    if let Some(info) = selected_link_info(
+        state,
+        selected_scene_row_id,
+        base_translation,
+        base_rotation,
+        model_transformation,
+    ) {
         return info;
     }
 
@@ -1561,6 +1985,9 @@ fn selected_scene_info(
         hardware_runtime,
         project_config,
         selected_scene_row_id,
+        base_translation,
+        base_rotation,
+        model_transformation,
     ) {
         return info;
     }
@@ -1574,6 +2001,9 @@ fn selected_scene_info(
         hardware_runtime,
         project_config,
         selected_scene_row_id,
+        base_translation,
+        base_rotation,
+        model_transformation,
     ) {
         return info;
     }
@@ -1582,11 +2012,82 @@ fn selected_scene_info(
         return info;
     }
 
-    if let Some(info) = selected_project_camera_info(project_config, selected_scene_row_id) {
+    if let Some(info) = selected_project_camera_info(
+        state,
+        project_config,
+        selected_scene_row_id,
+        base_translation,
+        base_rotation,
+        model_transformation,
+    ) {
         return info;
     }
 
-    selected_static_scene_info(state, project_config, selected_scene_row_id)
+    selected_static_scene_info(
+        state,
+        project_config,
+        selected_scene_row_id,
+        base_translation,
+        base_rotation,
+        model_transformation,
+    )
+}
+
+fn viewport_scene_row_id(payload: &serde_json::Value) -> Option<u32> {
+    let value = payload.get("rowId")?.as_u64()?;
+    u32::try_from(value).ok()
+}
+
+fn scene_row_exists(
+    state: &UrdfViewerState,
+    hardware_runtime: &HardwareRuntime,
+    project_config: Option<&ProjectConfig>,
+    selected_scene_row_id: u32,
+) -> bool {
+    if selected_scene_row_id == SCENE_ROW_ROBOT {
+        return state.robot.is_some();
+    }
+    if (SCENE_ROW_LINK_BASE..SCENE_ROW_JOINT_BASE).contains(&selected_scene_row_id) {
+        let link_index = (selected_scene_row_id - SCENE_ROW_LINK_BASE) as usize;
+        return link_index < sorted_link_names(state).len();
+    }
+    if (SCENE_ROW_JOINT_BASE..SCENE_ROW_BUS_BASE).contains(&selected_scene_row_id) {
+        let joint_index = (selected_scene_row_id - SCENE_ROW_JOINT_BASE) as usize;
+        return state
+            .robot
+            .as_ref()
+            .map(|robot| joint_index < robot.joints.len())
+            .unwrap_or(false);
+    }
+    if (SCENE_ROW_BUS_BASE..SCENE_ROW_DEVICE_BASE).contains(&selected_scene_row_id) {
+        let bus_index = (selected_scene_row_id - SCENE_ROW_BUS_BASE) as usize;
+        return bus_index < hardware_runtime.buses.len();
+    }
+    if (SCENE_ROW_DEVICE_BASE..SCENE_ROW_PROJECT_OBJECT_BASE).contains(&selected_scene_row_id) {
+        let raw = selected_scene_row_id - SCENE_ROW_DEVICE_BASE;
+        let bus_index = (raw / SCENE_ROW_DEVICE_BUS_STRIDE) as usize;
+        let device_index = (raw % SCENE_ROW_DEVICE_BUS_STRIDE) as usize;
+        return hardware_runtime
+            .buses
+            .get(bus_index)
+            .map(|bus| device_index < bus.devices.len())
+            .unwrap_or(false);
+    }
+    if (SCENE_ROW_PROJECT_OBJECT_BASE..SCENE_ROW_PROJECT_CAMERA_BASE)
+        .contains(&selected_scene_row_id)
+    {
+        let object_index = (selected_scene_row_id - SCENE_ROW_PROJECT_OBJECT_BASE) as usize;
+        return project_config
+            .map(|project| object_index < project.scene.objects.len())
+            .unwrap_or(false);
+    }
+    if selected_scene_row_id >= SCENE_ROW_PROJECT_CAMERA_BASE {
+        let camera_index = (selected_scene_row_id - SCENE_ROW_PROJECT_CAMERA_BASE) as usize;
+        return project_config
+            .map(|project| camera_index < project.scene.cameras.len())
+            .unwrap_or(false);
+    }
+    false
 }
 
 fn show_robot_controls(selected_scene_row_id: u32) -> bool {
@@ -1906,6 +2407,7 @@ impl AppController {
             project_robot_base_rotation(project_config),
             live_base_rotation,
         );
+        let model_transformation = project_robot_model_transformation(project_config);
 
         let loaded_summary = live_urdf_state
             .robot
@@ -1928,6 +2430,9 @@ impl AppController {
             &live_hardware_runtime,
             project_config,
             self.selected_scene_row_id,
+            base_translation,
+            base_rotation,
+            model_transformation,
         );
         let include_static_scene = self.robot_static_scene_dirty.replace(false);
         let robot_scene_props = robot_scene_props_with_static_scene(
@@ -2109,6 +2614,22 @@ impl AppController {
         let bus_index = (arg / SCENE_ROW_DEVICE_BUS_STRIDE) as usize;
         let device_index = (arg % SCENE_ROW_DEVICE_BUS_STRIDE) as usize;
         self.selected_scene_row_id = device_row_id(bus_index, device_index);
+    }
+
+    pub(crate) fn select_scene_from_viewport(&mut self, payload: serde_json::Value) {
+        let Some(row_id) = viewport_scene_row_id(&payload) else {
+            return;
+        };
+        self.reload_project_config_if_changed();
+        let project_config = self.project_config.borrow();
+        if scene_row_exists(
+            &self.urdf_state,
+            &self.hardware_runtime,
+            project_config.as_ref(),
+            row_id,
+        ) {
+            self.selected_scene_row_id = row_id;
+        }
     }
 
     pub(crate) fn toggle_scene_section(&mut self, arg: u32) {
@@ -2658,6 +3179,70 @@ impl AppController {
 mod tests {
     use super::*;
 
+    static LOCATION_TEST_URDF_SEQ: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+
+    fn project_with_scene_object() -> ProjectConfig {
+        ProjectConfig {
+            format: "robotdreams.project.v1".to_string(),
+            name: "Pick Test".to_string(),
+            manifest_path: PathBuf::from("/tmp/robotdreams-pick-test/project.json"),
+            base_dir: PathBuf::from("/tmp/robotdreams-pick-test"),
+            scene: crate::ProjectSceneConfig {
+                objects: vec![ProjectSceneObjectConfig {
+                    id: "trash-bin".to_string(),
+                    name: "Trash Bin".to_string(),
+                    type_name: "trash bin".to_string(),
+                    icon: "BIN".to_string(),
+                    geometry: ProjectSceneObjectGeometry::Box {
+                        size: [0.2, 0.3, 0.4],
+                    },
+                    color_rgb: [32, 96, 160],
+                    position: [1.0, 2.0, 3.0],
+                    rotation: [0.0, 0.0, 0.0],
+                    scale: None,
+                    include_in_fit: true,
+                }],
+                cameras: Vec::new(),
+            },
+            robots: Vec::new(),
+            hardware: crate::HardwareConfig::default(),
+        }
+    }
+
+    fn property_value<'a>(properties: &'a [WorkbenchPropertyModel], name: &str) -> Option<&'a str> {
+        properties
+            .iter()
+            .find(|property| property.name == name)
+            .map(|property| property.value.as_str())
+    }
+
+    fn write_location_test_urdf(origin_xyz: &str) -> PathBuf {
+        let sequence = LOCATION_TEST_URDF_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "robotdreams-location-test-{}-{sequence}.urdf",
+            std::process::id(),
+        ));
+        std::fs::write(
+            &path,
+            format!(
+                r#"
+<robot name="location_test">
+  <link name="base_link" />
+  <link name="child_link" />
+  <joint name="fixed_child" type="fixed">
+    <parent link="base_link" />
+    <child link="child_link" />
+    <origin xyz="{origin_xyz}" rpy="0 0 0" />
+  </joint>
+</robot>
+"#
+            ),
+        )
+        .expect("write test urdf");
+        path
+    }
+
     #[test]
     fn no_project_workbench_has_neutral_empty_state() {
         let controller = AppController::new(
@@ -2709,5 +3294,87 @@ mod tests {
         ] {
             assert!(!labels.iter().any(|label| label == fake_label));
         }
+    }
+
+    #[test]
+    fn viewport_pick_selects_matching_scene_object_for_inspector() {
+        let mut controller = AppController::new(
+            None,
+            Some(project_with_scene_object()),
+            WorkbenchVirtualBusHandle::new(),
+            SimulationRuntimeHandle::new(),
+        );
+
+        controller.select_scene_from_viewport(serde_json::json!({
+            "rowId": SCENE_ROW_PROJECT_OBJECT_BASE
+        }));
+
+        let state = controller.state();
+        assert_eq!(state.selected_name, "Trash Bin");
+        assert_eq!(state.selected_type, "trash bin");
+        assert_eq!(
+            property_value(&state.transform_properties, "Location (ROS xyz)"),
+            Some("1.000, 2.000, 3.000 m")
+        );
+    }
+
+    #[test]
+    fn viewport_pick_ignores_unknown_scene_row() {
+        let mut controller = AppController::new(
+            None,
+            Some(project_with_scene_object()),
+            WorkbenchVirtualBusHandle::new(),
+            SimulationRuntimeHandle::new(),
+        );
+
+        controller.select_scene_from_viewport(serde_json::json!({
+            "rowId": 999_999_u32
+        }));
+
+        assert_eq!(controller.state().selected_name, "No project");
+    }
+
+    #[test]
+    fn selected_link_inspector_includes_ros_location() {
+        let urdf_path = write_location_test_urdf("1 0 0");
+        let mut controller = AppController::new(
+            Some(urdf_path.clone()),
+            None,
+            WorkbenchVirtualBusHandle::new(),
+            SimulationRuntimeHandle::new(),
+        );
+
+        controller.select_link(SCENE_ROW_LINK_BASE + 1);
+
+        let state = controller.state();
+        assert_eq!(state.selected_name, "child_link");
+        assert_eq!(
+            property_value(&state.transform_properties, "Location (ROS xyz)"),
+            Some("1.000, 0.000, 0.000 m")
+        );
+
+        let _ = std::fs::remove_file(urdf_path);
+    }
+
+    #[test]
+    fn selected_link_inspector_uses_positive_z_for_ros_up() {
+        let urdf_path = write_location_test_urdf("0 0 1");
+        let mut controller = AppController::new(
+            Some(urdf_path.clone()),
+            None,
+            WorkbenchVirtualBusHandle::new(),
+            SimulationRuntimeHandle::new(),
+        );
+
+        controller.select_link(SCENE_ROW_LINK_BASE + 1);
+
+        let state = controller.state();
+        assert_eq!(state.selected_name, "child_link");
+        assert_eq!(
+            property_value(&state.transform_properties, "Location (ROS xyz)"),
+            Some("0.000, 0.000, 1.000 m")
+        );
+
+        let _ = std::fs::remove_file(urdf_path);
     }
 }

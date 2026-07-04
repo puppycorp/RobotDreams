@@ -42,15 +42,19 @@ const URDF_BASE_POSITION_RANGE: i32 = 2000;
 const URDF_BASE_ROTATION_MIN: i32 = (-std::f32::consts::PI * URDF_VALUE_SCALE) as i32;
 const URDF_BASE_ROTATION_MAX: i32 = (std::f32::consts::PI * URDF_VALUE_SCALE) as i32;
 const URDF_ROTATION_ORDER: &str = "ZYX";
-const URDF_TO_VIEW_ROT_X: f32 = -std::f32::consts::FRAC_PI_2;
 const SERVO_FULL_ROTATION_TICKS: f32 = 4096.0;
 const SERVO_DEFAULT_ZERO_OFFSET: i16 = 2048;
 const SERVO_DEFAULT_DIRECTION: i8 = 1;
 const MODEL_FILES_ROUTE_PREFIX: &str = "/model-files";
 const STATIC_SCENE_ROOT_ID: u32 = 89;
 const ROBOT_BASE_GROUP_ID: u32 = 90;
+const MODEL_TRANSFORMATION_GROUP_ID: u32 = 92;
 const PROJECT_SCENE_OBJECT_ID_BASE: u32 = 50_000;
 const PROJECT_SCENE_OBJECT_ID_STRIDE: u32 = 10;
+const SCENE_ROW_ROBOT: u32 = 100;
+const SCENE_ROW_LINK_BASE: u32 = 10_000;
+const SCENE_ROW_PROJECT_OBJECT_BASE: u32 = 60_000;
+const SCENE_ROW_PROJECT_CAMERA_BASE: u32 = 70_000;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -227,6 +231,13 @@ pub(crate) struct ProjectRobotConfig {
 pub(crate) struct ProjectRobotModelConfig {
     pub(crate) type_name: String,
     pub(crate) path: String,
+    pub(crate) model_transformation: Option<ModelTransformationConfig>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct ModelTransformationConfig {
+    pub(crate) translation: [f32; 3],
+    pub(crate) rotation: [f32; 3],
 }
 
 #[derive(Clone, Debug, Default)]
@@ -743,6 +754,19 @@ fn parse_project_robot_model_config(value: &serde_json::Value) -> Option<Project
             .unwrap_or("urdf")
             .to_string(),
         path: json_string_path(model, &["path"])?.to_string(),
+        model_transformation: parse_model_transformation_config(model),
+    })
+}
+
+fn parse_model_transformation_config(
+    value: &serde_json::Value,
+) -> Option<ModelTransformationConfig> {
+    let transform = value.get("modelTransformation")?;
+    Some(ModelTransformationConfig {
+        translation: json_vec3_path(transform, &["translation"])
+            .or_else(|| json_vec3_path(transform, &["position"]))
+            .unwrap_or([0.0, 0.0, 0.0]),
+        rotation: json_vec3_path(transform, &["rotation"]).unwrap_or([0.0, 0.0, 0.0]),
     })
 }
 
@@ -793,6 +817,55 @@ fn parse_project_robot_config(value: &serde_json::Value) -> Option<ProjectRobotC
     })
 }
 
+fn model_profile_robot_config(
+    project_base_dir: &Path,
+    model_profile: Option<&str>,
+) -> Option<ProjectRobotConfig> {
+    let model_profile = model_profile?;
+    let profile_path = project_base_dir.join(model_profile);
+    let json = read_json_file(&profile_path).ok()?;
+    let robot = json.get("robot")?;
+    Some(ProjectRobotConfig {
+        id: json_string_path(robot, &["id"])
+            .unwrap_or_else(|| json_string_path(&json, &["name"]).unwrap_or("robot"))
+            .to_string(),
+        name: json_string_path(robot, &["name"])
+            .unwrap_or_else(|| json_string_path(&json, &["name"]).unwrap_or("Robot"))
+            .to_string(),
+        model: parse_project_robot_model_config(robot)?,
+        joint_names: parse_project_joint_names(&json),
+        base_translation: json_vec3_path(robot, &["base", "translation"])
+            .or_else(|| json_vec3_path(robot, &["base", "position"]))
+            .unwrap_or([0.0, 0.0, 0.0]),
+        base_rotation: json_vec3_path(robot, &["base", "rotation"]).unwrap_or([0.0, 0.0, 0.0]),
+    })
+}
+
+fn model_profile_matches_robot(
+    profile_robot: &ProjectRobotConfig,
+    robot: &ProjectRobotConfig,
+) -> bool {
+    profile_robot.id == robot.id
+        || profile_robot.name == robot.name
+        || profile_robot.model.path == robot.model.path
+}
+
+fn apply_model_profile_defaults(
+    mut robot: ProjectRobotConfig,
+    profile_robot: Option<&ProjectRobotConfig>,
+) -> ProjectRobotConfig {
+    let Some(profile_robot) =
+        profile_robot.filter(|profile_robot| model_profile_matches_robot(profile_robot, &robot))
+    else {
+        return robot;
+    };
+
+    if robot.model.model_transformation.is_none() {
+        robot.model.model_transformation = profile_robot.model.model_transformation;
+    }
+    robot
+}
+
 fn parse_project_config(
     value: &serde_json::Value,
     manifest_path: PathBuf,
@@ -809,6 +882,8 @@ fn parse_project_config(
     let name = json_string_path(value, &["name"])
         .unwrap_or("RobotDreams Project")
         .to_string();
+    let model_profile_robot =
+        model_profile_robot_config(&base_dir, json_string_path(value, &["modelProfile"]));
     let robots = value
         .get("robots")
         .and_then(|robots| robots.as_array())
@@ -816,6 +891,7 @@ fn parse_project_config(
             robots
                 .iter()
                 .filter_map(parse_project_robot_config)
+                .map(|robot| apply_model_profile_defaults(robot, model_profile_robot.as_ref()))
                 .collect()
         })
         .unwrap_or_default();
@@ -1591,6 +1667,16 @@ fn servo_ticks_to_radians(ticks: i16, zero_offset: i16, direction: i8) -> f32 {
         * (std::f32::consts::TAU / SERVO_FULL_ROTATION_TICKS)
 }
 
+fn wrap_radians_to_pi(radians: f32) -> f32 {
+    let wrapped =
+        (radians + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
+    if wrapped <= -std::f32::consts::PI {
+        std::f32::consts::PI
+    } else {
+        wrapped
+    }
+}
+
 pub(crate) fn servo_ticks_to_slider_value(
     ticks: i16,
     min: i32,
@@ -1603,6 +1689,25 @@ pub(crate) fn servo_ticks_to_slider_value(
     }
 
     let radians = servo_ticks_to_radians(ticks, zero_offset, direction);
+    let value = (radians * URDF_VALUE_SCALE).round() as i32;
+    value.clamp(min, max)
+}
+
+pub(crate) fn servo_ticks_to_joint_slider_value(
+    ticks: i16,
+    joint: &JointDef,
+    zero_offset: i16,
+    direction: i8,
+) -> i32 {
+    let (min, max) = urdf_joint_slider_range(joint);
+    if max <= min {
+        return min;
+    }
+
+    let mut radians = servo_ticks_to_radians(ticks, zero_offset, direction);
+    if joint.joint_type == UrdfJointType::Continuous {
+        radians = wrap_radians_to_pi(radians);
+    }
     let value = (radians * URDF_VALUE_SCALE).round() as i32;
     value.clamp(min, max)
 }
@@ -1666,20 +1771,16 @@ fn sync_urdf_with_servo_snapshots(state: &mut UrdfViewerState, snapshots: &[Feet
         let ranges = robot
             .movable_joint_indices
             .iter()
-            .map(|joint_index| {
-                let (min, max) = urdf_joint_slider_range(&robot.joints[*joint_index]);
-                (*joint_index, min, max)
-            })
+            .map(|joint_index| (*joint_index, robot.joints[*joint_index].clone()))
             .collect::<Vec<_>>();
 
         let count = snapshots.len().min(ranges.len());
         for slot in 0..count {
-            let (joint_index, min, max) = ranges[slot];
-            if let Some(value) = state.joint_values.get_mut(joint_index) {
-                *value = servo_ticks_to_slider_value(
+            let (joint_index, joint) = &ranges[slot];
+            if let Some(value) = state.joint_values.get_mut(*joint_index) {
+                *value = servo_ticks_to_joint_slider_value(
                     snapshots[slot].present_position,
-                    min,
-                    max,
+                    joint,
                     SERVO_DEFAULT_ZERO_OFFSET,
                     SERVO_DEFAULT_DIRECTION,
                 );
@@ -1823,6 +1924,39 @@ fn push_link_visuals(link: &LinkDef, id_gen: &mut u32, children: &mut Vec<ThreeN
     }
 }
 
+fn select_row_prop(row_id: u32) -> ThreePropValue {
+    ThreePropValue::Number {
+        value: row_id as f32,
+    }
+}
+
+fn link_select_row_ids(robot: &RobotModel) -> HashMap<String, u32> {
+    let mut link_names = robot.links.keys().cloned().collect::<Vec<_>>();
+    link_names.sort();
+    link_names
+        .into_iter()
+        .enumerate()
+        .map(|(index, link_name)| (link_name, SCENE_ROW_LINK_BASE + index as u32))
+        .collect()
+}
+
+fn project_object_select_row_id(index: usize) -> u32 {
+    SCENE_ROW_PROJECT_OBJECT_BASE + index as u32
+}
+
+fn project_camera_select_row_id(index: usize) -> u32 {
+    SCENE_ROW_PROJECT_CAMERA_BASE + index as u32
+}
+
+fn project_robot_model_transformation(
+    project_config: Option<&ProjectConfig>,
+) -> ModelTransformationConfig {
+    project_config
+        .and_then(|project| project.robots.first())
+        .and_then(|robot| robot.model.model_transformation)
+        .unwrap_or_default()
+}
+
 fn next_three_id(id_gen: &mut u32) -> u32 {
     *id_gen += 1;
     *id_gen
@@ -1838,11 +1972,12 @@ fn push_link_cameras(
         return;
     };
 
-    for camera in project_config
+    for (camera_index, camera) in project_config
         .scene
         .cameras
         .iter()
-        .filter(|camera| camera.mounted_link == link_name)
+        .enumerate()
+        .filter(|(_, camera)| camera.mounted_link == link_name)
     {
         let group_id = next_three_id(id_gen);
         let body_id = next_three_id(id_gen);
@@ -1925,6 +2060,10 @@ fn push_link_cameras(
                         value: camera.id.clone(),
                     },
                 )
+                .prop(
+                    "selectRowId",
+                    select_row_prop(project_camera_select_row_id(camera_index)),
+                )
                 .prop("includeInFit", ThreePropValue::Bool { value: false })
                 .prop(
                     "position",
@@ -1957,6 +2096,7 @@ fn build_static_link_subtree(
     link_name: &str,
     id_gen: &mut u32,
     project_config: Option<&ProjectConfig>,
+    link_select_rows: &HashMap<String, u32>,
 ) -> Option<ThreeNode> {
     let link = robot.links.get(link_name)?;
     *id_gen += 1;
@@ -1975,9 +2115,13 @@ fn build_static_link_subtree(
 
             let mut motion_group = group(motion_group_id, []);
 
-            if let Some(child_tree) =
-                build_static_link_subtree(robot, &joint.child, id_gen, project_config)
-            {
+            if let Some(child_tree) = build_static_link_subtree(
+                robot,
+                &joint.child,
+                id_gen,
+                project_config,
+                link_select_rows,
+            ) {
                 motion_group = motion_group.child(child_tree);
             }
 
@@ -2009,12 +2153,16 @@ fn build_static_link_subtree(
         }
     }
 
-    Some(group(link_group_id, children).prop(
+    let mut link_group = group(link_group_id, children).prop(
         "name",
         ThreePropValue::String {
             value: link.name.clone(),
         },
-    ))
+    );
+    if let Some(row_id) = link_select_rows.get(&link.name) {
+        link_group = link_group.prop("selectRowId", select_row_prop(*row_id));
+    }
+    Some(link_group)
 }
 
 fn transform_vec3_json(value: [f32; 3]) -> serde_json::Value {
@@ -2242,6 +2390,10 @@ fn project_scene_object_node(
                 },
             )
             .prop(
+                "selectRowId",
+                select_row_prop(project_object_select_row_id(index)),
+            )
+            .prop(
                 "position",
                 ThreePropValue::Vec3 {
                     x: object.position[0],
@@ -2329,26 +2481,45 @@ fn robot_static_scene(
 ) -> Option<ThreeNode> {
     let robot = state.robot.as_ref()?;
     let mut id_gen = 100;
+    let link_select_rows = link_select_row_ids(robot);
     let mut model_children: Vec<ThreeNode> = Vec::new();
     for root in &robot.roots {
-        if let Some(root_tree) = build_static_link_subtree(robot, root, &mut id_gen, project_config)
+        if let Some(root_tree) =
+            build_static_link_subtree(robot, root, &mut id_gen, project_config, &link_select_rows)
         {
             model_children.push(root_tree);
         }
     }
 
-    let urdf_frame_group = group(
-        91,
-        [group(92, model_children).prop(
-            "rotation",
-            ThreePropValue::Vec3 {
-                x: URDF_TO_VIEW_ROT_X,
-                y: 0.0,
-                z: 0.0,
-            },
-        )],
-    );
-    let mut scene_children = vec![group(ROBOT_BASE_GROUP_ID, [urdf_frame_group])];
+    let mut scene_children = vec![
+        group(
+            ROBOT_BASE_GROUP_ID,
+            [group(MODEL_TRANSFORMATION_GROUP_ID, model_children)
+                .prop(
+                    "position",
+                    ThreePropValue::Vec3 {
+                        x: project_robot_model_transformation(project_config).translation[0],
+                        y: project_robot_model_transformation(project_config).translation[1],
+                        z: project_robot_model_transformation(project_config).translation[2],
+                    },
+                )
+                .prop(
+                    "rotation",
+                    ThreePropValue::Vec3 {
+                        x: project_robot_model_transformation(project_config).rotation[0],
+                        y: project_robot_model_transformation(project_config).rotation[1],
+                        z: project_robot_model_transformation(project_config).rotation[2],
+                    },
+                )
+                .prop(
+                    "rotationOrder",
+                    ThreePropValue::String {
+                        value: URDF_ROTATION_ORDER.to_string(),
+                    },
+                )],
+        )
+        .prop("selectRowId", select_row_prop(SCENE_ROW_ROBOT)),
+    ];
     scene_children.extend(project_scene_object_nodes(state, project_config));
 
     Some(group(STATIC_SCENE_ROOT_ID, scene_children))
@@ -2480,13 +2651,16 @@ fn robot_static_scene_key(
         .unwrap_or_default();
     let scene_objects_key = project_scene_objects_key(state, project_config);
     let scene_cameras_key = project_scene_cameras_key(project_config);
+    let model_transformation = project_robot_model_transformation(project_config);
     let visual_count = robot
         .links
         .values()
         .map(|link| link.visuals.len())
         .sum::<usize>();
     Some(format!(
-        "{path}|{modified}|scene:{scene_objects_key}|cameras:{scene_cameras_key}|{}|{}|{visual_count}",
+        "{path}|{modified}|scene:{scene_objects_key}|cameras:{scene_cameras_key}|model:{:?}:{:?}|{}|{}|{visual_count}",
+        model_transformation.translation,
+        model_transformation.rotation,
         robot.links.len(),
         robot.joints.len()
     ))
@@ -4278,6 +4452,30 @@ mod tests {
         std::env::temp_dir().join(format!("robotdreams-{}-{name}", std::process::id()))
     }
 
+    fn has_node_id(value: &serde_json::Value, id: u32) -> bool {
+        if value.get("id").and_then(|value| value.as_u64()) == Some(u64::from(id)) {
+            return true;
+        }
+        value
+            .get("children")
+            .and_then(|children| children.as_array())
+            .map(|children| children.iter().any(|child| has_node_id(child, id)))
+            .unwrap_or(false)
+    }
+
+    fn node_prop_vec3<'a>(
+        value: &'a serde_json::Value,
+        key: &str,
+    ) -> Option<&'a serde_json::Map<String, serde_json::Value>> {
+        value
+            .get("props")
+            .and_then(|props| props.as_array())?
+            .iter()
+            .find(|prop| prop.get("key").and_then(|value| value.as_str()) == Some(key))?
+            .get("value")?
+            .as_object()
+    }
+
     #[test]
     fn moved_puppybot_urdf_meshes_resolve_through_model_files_mount() {
         let urdf_path = PathBuf::from(repo_path(
@@ -4306,6 +4504,48 @@ mod tests {
         assert!(
             mesh_src.ends_with(".gltf"),
             "PuppyBot mesh src should preserve GLTF file extension: {mesh_src}"
+        );
+    }
+
+    #[test]
+    fn static_scene_leaves_ros_to_three_rotation_to_browser_controller() {
+        let urdf_path = PathBuf::from(repo_path(
+            "../PuppyBot/models/puppybot/final2/urdf/final2.urdf",
+        ));
+        let project_config = project_config_from_manifest(Path::new(&repo_path(
+            "../PuppyBot/robotdreams/project.json",
+        )))
+        .expect("load PuppyBot project config");
+        let mut state = UrdfViewerState::new(Some(urdf_path.clone()));
+        state.robot = Some(
+            parse_robot(
+                &urdf_path,
+                &std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            )
+            .expect("parse PuppyBot URDF"),
+        );
+
+        let props = robot_scene_props_with_static_scene(
+            &state,
+            Some(&project_config),
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            true,
+        );
+        let static_scene = props.get("staticScene").expect("static scene");
+
+        assert!(
+            has_node_id(static_scene, MODEL_TRANSFORMATION_GROUP_ID),
+            "static scene should include modelTransformation group"
+        );
+        assert!(
+            !has_node_id(static_scene, 91),
+            "static scene should not include an extra ROS-to-view wrapper; the browser robotGroup owns ROS-to-Three conversion"
+        );
+        let root_rotation = node_prop_vec3(static_scene, "rotation");
+        assert!(
+            root_rotation.is_none(),
+            "static scene root should stay in ROS coordinates for the browser controller"
         );
     }
 
@@ -4356,6 +4596,37 @@ mod tests {
 
         assert_eq!(servo_ticks_to_slider_value(3072, min, max, 2048, 1), max);
         assert_eq!(servo_ticks_to_slider_value(3072, min, max, 2048, -1), min);
+    }
+
+    fn continuous_joint() -> JointDef {
+        JointDef {
+            name: "continuous".to_string(),
+            joint_type: UrdfJointType::Continuous,
+            parent: "parent".to_string(),
+            child: "child".to_string(),
+            origin_xyz: [0.0, 0.0, 0.0],
+            origin_rpy: [0.0, 0.0, 0.0],
+            axis: [0.0, 0.0, 1.0],
+            lower: None,
+            upper: None,
+        }
+    }
+
+    #[test]
+    fn continuous_servo_tick_mapping_wraps_instead_of_clamping() {
+        let joint = continuous_joint();
+        let wrapped = servo_ticks_to_joint_slider_value(2593, &joint, 500, -1);
+        let clamped = servo_ticks_to_slider_value(
+            2593,
+            (-std::f32::consts::PI * URDF_VALUE_SCALE) as i32,
+            (std::f32::consts::PI * URDF_VALUE_SCALE) as i32,
+            500,
+            -1,
+        );
+
+        assert_eq!(clamped, (-std::f32::consts::PI * URDF_VALUE_SCALE) as i32);
+        assert!(wrapped > (3.0 * URDF_VALUE_SCALE) as i32);
+        assert!(wrapped < (std::f32::consts::PI * URDF_VALUE_SCALE) as i32);
     }
 
     #[test]
