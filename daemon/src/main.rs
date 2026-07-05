@@ -3430,6 +3430,49 @@ fn payload_i32(payload: Option<&serde_json::Value>, keys: &[&str]) -> Option<i32
     payload.as_i64().and_then(|value| i32::try_from(value).ok())
 }
 
+fn payload_u32(payload: &serde_json::Value, keys: &[&str]) -> Option<u32> {
+    for key in keys {
+        if let Some(value) = payload.get(*key).and_then(|value| value.as_u64())
+            && let Ok(value) = u32::try_from(value)
+        {
+            return Some(value);
+        }
+    }
+    payload.as_u64().and_then(|value| u32::try_from(value).ok())
+}
+
+fn payload_i16(payload: &serde_json::Value, keys: &[&str]) -> Option<i16> {
+    for key in keys {
+        if let Some(value) = payload.get(*key).and_then(|value| value.as_i64())
+            && let Ok(value) = i16::try_from(value)
+        {
+            return Some(value);
+        }
+    }
+    payload.as_i64().and_then(|value| i16::try_from(value).ok())
+}
+
+fn payload_f64(payload: &serde_json::Value, keys: &[&str]) -> Option<f64> {
+    for key in keys {
+        if let Some(value) = payload.get(*key).and_then(|value| value.as_f64()) {
+            return Some(value);
+        }
+    }
+    payload.as_f64()
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct DriveOutputCommand {
+    bus_id: String,
+    robot_id: String,
+    left_motor_id: u32,
+    right_motor_id: u32,
+    left_speed: i16,
+    right_speed: i16,
+    steering_angle_deg: f64,
+    steering_center_deg: f64,
+}
+
 fn servo_target_from_command(
     target: &str,
     payload: Option<&serde_json::Value>,
@@ -3455,6 +3498,56 @@ fn servo_target_from_command(
     }
 
     None
+}
+
+fn drive_output_from_command(
+    target: &str,
+    payload: Option<&serde_json::Value>,
+) -> Result<DriveOutputCommand, String> {
+    let Some(payload) = payload else {
+        return Err(
+            "setDrive requires payload with leftMotorId, rightMotorId, leftSpeed, and rightSpeed"
+                .to_string(),
+        );
+    };
+    let bus_id = payload
+        .get("busId")
+        .or_else(|| payload.get("bus"))
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("drive_bus")
+        .to_string();
+    let robot_id = payload
+        .get("robotId")
+        .or_else(|| payload.get("robot"))
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string)
+        .or_else(|| target.strip_prefix("robot:").map(str::to_string))
+        .unwrap_or_else(|| "puppybot".to_string());
+    let left_motor_id = payload_u32(payload, &["leftMotorId", "leftMotor", "left"])
+        .ok_or_else(|| "setDrive payload requires leftMotorId".to_string())?;
+    let right_motor_id = payload_u32(payload, &["rightMotorId", "rightMotor", "right"])
+        .ok_or_else(|| "setDrive payload requires rightMotorId".to_string())?;
+    let left_speed = payload_i16(payload, &["leftSpeed", "leftCommand"])
+        .ok_or_else(|| "setDrive payload requires leftSpeed".to_string())?;
+    let right_speed = payload_i16(payload, &["rightSpeed", "rightCommand"])
+        .ok_or_else(|| "setDrive payload requires rightSpeed".to_string())?;
+    let steering_angle_deg =
+        payload_f64(payload, &["steeringAngleDeg", "steeringAngle"]).unwrap_or(90.0);
+    let steering_center_deg =
+        payload_f64(payload, &["steeringCenterDeg", "steeringCenter"]).unwrap_or(90.0);
+
+    Ok(DriveOutputCommand {
+        bus_id,
+        robot_id,
+        left_motor_id,
+        right_motor_id,
+        left_speed,
+        right_speed,
+        steering_angle_deg,
+        steering_center_deg,
+    })
 }
 
 fn scenario_export_payload(
@@ -3861,19 +3954,54 @@ async fn handle_daemon_request(
                 },
                 Err(err) => return DaemonState::error(err),
             };
-            let mut controller = DaemonState::controller_for_project(project, simulation);
             let result = match (target.as_str(), action.as_str()) {
-                ("virtual-bus" | "virtualBus", "start") => controller.start_virtual_bus(),
+                ("virtual-bus" | "virtualBus", "start") => {
+                    let mut controller = DaemonState::controller_for_project(project, simulation);
+                    controller.start_virtual_bus()
+                }
                 ("virtual-bus" | "virtualBus", "stop") => {
+                    let mut controller = DaemonState::controller_for_project(project, simulation);
                     controller.stop_virtual_bus();
                     Ok(None)
                 }
                 (target, "start") if target.starts_with("bus:") => {
+                    let mut controller = DaemonState::controller_for_project(project, simulation);
                     controller.start_virtual_bus_by_id(target.trim_start_matches("bus:"))
                 }
                 (target, "stop") if target.starts_with("bus:") => {
+                    let mut controller = DaemonState::controller_for_project(project, simulation);
                     controller.stop_virtual_bus();
                     Ok(None)
+                }
+                (target, "set-drive" | "setDrive")
+                    if target == "drive" || target.starts_with("robot:") =>
+                {
+                    if simulation.simulation_runtime.status() == SimulationStatus::Stopped {
+                        return DaemonState::error(
+                            "simulation is stopped; run robotdreams simulation start first",
+                        );
+                    }
+                    let drive = match drive_output_from_command(&target, payload.as_ref()) {
+                        Ok(drive) => drive,
+                        Err(err) => return DaemonState::error(err),
+                    };
+                    if simulation.virtual_bus.set_drive_output(
+                        &drive.bus_id,
+                        &drive.robot_id,
+                        drive.left_motor_id,
+                        drive.right_motor_id,
+                        drive.left_speed,
+                        drive.right_speed,
+                        drive.steering_angle_deg,
+                        drive.steering_center_deg,
+                    ) {
+                        Ok(None)
+                    } else {
+                        Err(format!(
+                            "setDrive could not find drive bus {} motors {}:{} for robot {}",
+                            drive.bus_id, drive.left_motor_id, drive.right_motor_id, drive.robot_id
+                        ))
+                    }
                 }
                 (target, "set-target" | "setTarget") => {
                     if simulation.simulation_runtime.status() == SimulationStatus::Stopped {
@@ -3884,6 +4012,8 @@ async fn handle_daemon_request(
                     if let Some((servo_id, target_position)) =
                         servo_target_from_command(target, payload.as_ref())
                     {
+                        let mut controller =
+                            DaemonState::controller_for_project(project, simulation);
                         controller.set_selected_servo_target(servo_id, target_position);
                         Ok(None)
                     } else {
@@ -3897,18 +4027,27 @@ async fn handle_daemon_request(
 
             match result {
                 Ok(path) => {
-                    let mut data_controller =
-                        DaemonState::controller_for_project(project, simulation);
-                    let project_state = data_controller.project_state_json();
-                    let data_item = if target.starts_with("servo:") {
-                        "snapshots".to_string()
-                    } else if target == "virtualBus" {
-                        "virtual-bus".to_string()
+                    let is_drive_command = matches!(action.as_str(), "set-drive" | "setDrive")
+                        && (target == "drive" || target.starts_with("robot:"));
+                    let data = if is_drive_command {
+                        serde_json::json!({
+                            "target": target,
+                            "action": action,
+                            "applied": true,
+                        })
                     } else {
-                        target.clone()
+                        let mut data_controller =
+                            DaemonState::controller_for_project(project, simulation);
+                        let project_state = data_controller.project_state_json();
+                        let data_item = if target.starts_with("servo:") {
+                            "snapshots".to_string()
+                        } else if target == "virtualBus" {
+                            "virtual-bus".to_string()
+                        } else {
+                            target.clone()
+                        };
+                        project_state_item(&project_state, &data_item).unwrap_or(project_state)
                     };
-                    let data =
-                        project_state_item(&project_state, &data_item).unwrap_or(project_state);
                     let message = path
                         .map(|path| format!("virtual bus listening at {path}"))
                         .or_else(|| Some(format!("project command {action} applied to {target}")));
@@ -4514,6 +4653,37 @@ mod tests {
             .find(|prop| prop.get("key").and_then(|value| value.as_str()) == Some(key))?
             .get("value")?
             .as_object()
+    }
+
+    #[test]
+    fn drive_output_command_parses_runtime_payload() {
+        let command = drive_output_from_command(
+            "robot:puppybot",
+            Some(&serde_json::json!({
+                "busId": "drive_bus",
+                "leftMotorId": 1,
+                "rightMotorId": 2,
+                "leftSpeed": 50,
+                "rightSpeed": 50,
+                "steeringAngleDeg": 90,
+                "steeringCenterDeg": 90
+            })),
+        )
+        .unwrap();
+
+        assert_eq!(
+            command,
+            DriveOutputCommand {
+                bus_id: "drive_bus".to_string(),
+                robot_id: "puppybot".to_string(),
+                left_motor_id: 1,
+                right_motor_id: 2,
+                left_speed: 50,
+                right_speed: 50,
+                steering_angle_deg: 90.0,
+                steering_center_deg: 90.0,
+            }
+        );
     }
 
     #[test]

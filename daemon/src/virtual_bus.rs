@@ -21,12 +21,15 @@ use robotdreams_core::RobotDreams;
 use crate::hardware_runtime::{HardwareDeviceRuntime, HardwareRuntime, max_servo_count};
 
 const MAX_RECENT_BUS_EVENTS: usize = 4096;
+const VIRTUAL_BUS_IDLE_SLEEP: Duration = Duration::from_millis(2);
+const ROBOTDREAMS_VIRTUAL_BUS_STEP_INTERVAL: Duration = Duration::from_millis(33);
 
 #[derive(Debug, Clone)]
 pub(crate) struct TimedFeetechBusEvent {
     pub(crate) sequence: u64,
     pub(crate) unix_ms: u128,
     pub(crate) event: FeetechBusEvent,
+    pub(crate) response_bytes: Option<usize>,
 }
 
 fn unix_time_millis() -> u128 {
@@ -40,6 +43,7 @@ fn append_recent_bus_event(
     events: &Arc<Mutex<VecDeque<TimedFeetechBusEvent>>>,
     next_event_sequence: &AtomicU64,
     event: FeetechBusEvent,
+    response_bytes: Option<usize>,
 ) {
     let sequence = next_event_sequence.fetch_add(1, Ordering::Relaxed);
     if let Ok(mut events) = events.lock() {
@@ -47,6 +51,7 @@ fn append_recent_bus_event(
             sequence,
             unix_ms: unix_time_millis(),
             event,
+            response_bytes,
         });
         while events.len() > MAX_RECENT_BUS_EVENTS {
             events.pop_front();
@@ -225,13 +230,43 @@ impl WorkbenchVirtualBus {
         }
     }
 
+    fn set_drive_output(
+        &self,
+        bus_id: &str,
+        robot_id: &str,
+        left_motor_id: u32,
+        right_motor_id: u32,
+        left_speed: i16,
+        right_speed: i16,
+        steering_angle_deg: f64,
+        steering_center_deg: f64,
+    ) -> bool {
+        let Some(robotdreams) = &self.robotdreams else {
+            return false;
+        };
+        robotdreams
+            .lock()
+            .map(|mut dreams| {
+                dreams.set_virtual_drive_output(
+                    bus_id,
+                    robot_id,
+                    left_motor_id,
+                    right_motor_id,
+                    left_speed,
+                    right_speed,
+                    steering_angle_deg,
+                    steering_center_deg,
+                )
+            })
+            .unwrap_or(false)
+    }
+
     fn snapshots(&self) -> Vec<FeetechServoSnapshot> {
         if let Some(robotdreams) = &self.robotdreams {
             return robotdreams
                 .lock()
                 .ok()
-                .and_then(|mut dreams| {
-                    dreams.advance_seconds(0.02);
+                .and_then(|dreams| {
                     dreams
                         .first_virtual_bus_id()
                         .map(str::to_string)
@@ -246,6 +281,19 @@ impl WorkbenchVirtualBus {
                 sim.servo_snapshots()
             })
             .unwrap_or_default()
+    }
+
+    fn robot_base_pose(&self, robot_id: &str) -> Option<([f32; 3], [f32; 3])> {
+        let robotdreams = self.robotdreams.as_ref()?;
+        robotdreams.lock().ok().and_then(|dreams| {
+            let state = dreams.robot_state(robot_id)?;
+            let position = state.base.position;
+            let rotation = state.base.rotation.unwrap_or([0.0, 0.0, 0.0]);
+            Some((
+                [position[0] as f32, position[1] as f32, position[2] as f32],
+                [rotation[0] as f32, rotation[1] as f32, rotation[2] as f32],
+            ))
+        })
     }
 
     fn recent_events(&self) -> Vec<TimedFeetechBusEvent> {
@@ -277,19 +325,22 @@ impl WorkbenchVirtualBus {
 
             while !stop_in_thread.load(Ordering::Relaxed) {
                 let now = Instant::now();
-                let dt = (now - last_step).as_secs_f32();
-                last_step = now;
-                if let Some(robotdreams) = &robotdreams {
-                    if let Ok(mut dreams) = robotdreams.lock() {
-                        dreams.advance_seconds(dt.max(0.001));
+                let step_dt = now - last_step;
+                if step_dt >= ROBOTDREAMS_VIRTUAL_BUS_STEP_INTERVAL {
+                    last_step = now;
+                    let dt = step_dt.as_secs_f32().max(0.001);
+                    if let Some(robotdreams) = &robotdreams {
+                        if let Ok(mut dreams) = robotdreams.lock() {
+                            dreams.advance_seconds(dt);
+                        }
+                    } else if let Ok(mut sim) = sim.lock() {
+                        sim.step(dt);
                     }
-                } else if let Ok(mut sim) = sim.lock() {
-                    sim.step(dt.max(0.001));
                 }
 
                 let mut incoming = port.read_port(512);
                 if incoming.is_empty() {
-                    thread::sleep(Duration::from_millis(2));
+                    thread::sleep(VIRTUAL_BUS_IDLE_SLEEP);
                     continue;
                 }
 
@@ -345,8 +396,9 @@ impl WorkbenchVirtualBus {
                                 )
                             })
                     };
-                    append_recent_bus_event(&events, &next_event_sequence, event);
                     let response = response.ok().flatten();
+                    let response_bytes = response.as_ref().map(|response| response.len());
+                    append_recent_bus_event(&events, &next_event_sequence, event, response_bytes);
                     if let Some(response) = response {
                         let _ = port.write_port(&response);
                     }
@@ -458,6 +510,37 @@ impl WorkbenchVirtualBus {
         }
     }
 
+    fn set_drive_output(
+        &self,
+        bus_id: &str,
+        robot_id: &str,
+        left_motor_id: u32,
+        right_motor_id: u32,
+        left_speed: i16,
+        right_speed: i16,
+        steering_angle_deg: f64,
+        steering_center_deg: f64,
+    ) -> bool {
+        let Some(robotdreams) = &self.robotdreams else {
+            return false;
+        };
+        robotdreams
+            .lock()
+            .map(|mut dreams| {
+                dreams.set_virtual_drive_output(
+                    bus_id,
+                    robot_id,
+                    left_motor_id,
+                    right_motor_id,
+                    left_speed,
+                    right_speed,
+                    steering_angle_deg,
+                    steering_center_deg,
+                )
+            })
+            .unwrap_or(false)
+    }
+
     fn snapshots(&self) -> Vec<FeetechServoSnapshot> {
         if let Some(robotdreams) = &self.robotdreams {
             return robotdreams
@@ -479,6 +562,19 @@ impl WorkbenchVirtualBus {
                 sim.servo_snapshots()
             })
             .unwrap_or_default()
+    }
+
+    fn robot_base_pose(&self, robot_id: &str) -> Option<([f32; 3], [f32; 3])> {
+        let robotdreams = self.robotdreams.as_ref()?;
+        robotdreams.lock().ok().and_then(|dreams| {
+            let state = dreams.robot_state(robot_id)?;
+            let position = state.base.position;
+            let rotation = state.base.rotation.unwrap_or([0.0, 0.0, 0.0]);
+            Some((
+                [position[0] as f32, position[1] as f32, position[2] as f32],
+                [rotation[0] as f32, rotation[1] as f32, rotation[2] as f32],
+            ))
+        })
     }
 
     fn recent_events(&self) -> Vec<TimedFeetechBusEvent> {
@@ -542,8 +638,37 @@ impl WorkbenchVirtualBusHandle {
         self.with_bus((), |bus| bus.set_target_position(id, target));
     }
 
+    pub(crate) fn set_drive_output(
+        &self,
+        bus_id: &str,
+        robot_id: &str,
+        left_motor_id: u32,
+        right_motor_id: u32,
+        left_speed: i16,
+        right_speed: i16,
+        steering_angle_deg: f64,
+        steering_center_deg: f64,
+    ) -> bool {
+        self.with_bus(false, |bus| {
+            bus.set_drive_output(
+                bus_id,
+                robot_id,
+                left_motor_id,
+                right_motor_id,
+                left_speed,
+                right_speed,
+                steering_angle_deg,
+                steering_center_deg,
+            )
+        })
+    }
+
     pub(crate) fn snapshots(&self) -> Vec<FeetechServoSnapshot> {
         self.with_bus(Vec::new(), |bus| bus.snapshots())
+    }
+
+    pub(crate) fn robot_base_pose(&self, robot_id: &str) -> Option<([f32; 3], [f32; 3])> {
+        self.with_bus(None, |bus| bus.robot_base_pose(robot_id))
     }
 
     pub(crate) fn recent_events(&self) -> Vec<TimedFeetechBusEvent> {

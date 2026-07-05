@@ -467,6 +467,21 @@ fn bus_write_event_json(
     })
 }
 
+fn live_robot_base_pose(
+    virtual_bus: &WorkbenchVirtualBusHandle,
+    project_config: Option<&ProjectConfig>,
+    fallback_translation: [f32; 3],
+    fallback_rotation: [f32; 3],
+) -> ([f32; 3], [f32; 3]) {
+    let robot_id = project_config
+        .and_then(|project| project.robots.first())
+        .map(|robot| robot.id.as_str())
+        .unwrap_or("puppybot");
+    virtual_bus
+        .robot_base_pose(robot_id)
+        .unwrap_or((fallback_translation, fallback_rotation))
+}
+
 fn bus_events_json(events: &[TimedFeetechBusEvent]) -> serde_json::Value {
     serde_json::Value::Array(
         events
@@ -476,6 +491,8 @@ fn bus_events_json(events: &[TimedFeetechBusEvent]) -> serde_json::Value {
                 serde_json::json!({
                     "sequence": timed.sequence,
                     "unixMs": timed.unix_ms,
+                    "responded": timed.response_bytes.is_some(),
+                    "responseBytes": timed.response_bytes,
                     "instruction": event.instruction,
                     "id": event.id,
                     "broadcast": event.broadcast,
@@ -2436,6 +2453,12 @@ impl AppController {
             project_robot_base_rotation(project_config),
             live_base_rotation,
         );
+        let (base_translation, base_rotation) = live_robot_base_pose(
+            &self.virtual_bus,
+            project_config,
+            base_translation,
+            base_rotation,
+        );
         let model_transformation = project_robot_model_transformation(project_config);
 
         let loaded_summary = live_urdf_state
@@ -2895,6 +2918,12 @@ impl ViewportController {
             project_robot_base_rotation(project_config),
             live_base_rotation,
         );
+        let (base_translation, base_rotation) = live_robot_base_pose(
+            &self.virtual_bus,
+            project_config,
+            base_translation,
+            base_rotation,
+        );
         let include_static_scene = self.robot_static_scene_dirty.replace(false);
         let robot_scene_props = robot_scene_props_with_static_scene(
             &live_urdf_state,
@@ -3025,6 +3054,12 @@ impl AppController {
         let base_rotation = add_vec3(
             project_robot_base_rotation(project_config.as_ref()),
             live_base_rotation,
+        );
+        let (base_translation, base_rotation) = live_robot_base_pose(
+            &self.virtual_bus,
+            project_config.as_ref(),
+            base_translation,
+            base_rotation,
         );
         let robot_scene_props = robot_scene_props_with_static_scene(
             &self.urdf_state,

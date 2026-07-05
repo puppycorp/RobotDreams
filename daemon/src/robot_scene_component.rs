@@ -31,6 +31,7 @@ pub(crate) struct RobotSceneComponent {
     project_config_modified: Option<SystemTime>,
     hardware_runtime: HardwareRuntime,
     last_sent_snapshots: Option<SnapshotSignature>,
+    last_sent_base_pose: Option<([f32; 3], [f32; 3])>,
 }
 
 impl RobotSceneComponent {
@@ -51,6 +52,7 @@ impl RobotSceneComponent {
             project_config_modified,
             hardware_runtime,
             last_sent_snapshots: None,
+            last_sent_base_pose: None,
         }
     }
 
@@ -79,6 +81,15 @@ impl RobotSceneComponent {
         self.virtual_bus
             .configure_from_hardware(&self.hardware_runtime);
         self.last_sent_snapshots = None;
+        self.last_sent_base_pose = None;
+    }
+
+    fn robot_id(&self) -> &str {
+        self.project_config
+            .as_ref()
+            .and_then(|project| project.robots.first())
+            .map(|robot| robot.id.as_str())
+            .unwrap_or("puppybot")
     }
 
     fn robot_scene_props_for_snapshots(
@@ -110,6 +121,10 @@ impl RobotSceneComponent {
             project_robot_base_rotation(project_config),
             live_base_rotation,
         );
+        let (base_translation, base_rotation) = self
+            .virtual_bus
+            .robot_base_pose(self.robot_id())
+            .unwrap_or((base_translation, base_rotation));
 
         robot_scene_props_with_static_scene(
             &live_urdf_state,
@@ -120,13 +135,16 @@ impl RobotSceneComponent {
         )
     }
 
-    fn should_send_snapshots(&mut self, snapshots: &[FeetechServoSnapshot]) -> bool {
+    fn should_send_live_scene(&mut self, snapshots: &[FeetechServoSnapshot]) -> bool {
         let signature = snapshot_signature(snapshots);
-        if self.last_sent_snapshots.as_ref() == Some(&signature) {
-            return false;
+        let base_pose = self.virtual_bus.robot_base_pose(self.robot_id());
+        let changed = self.last_sent_snapshots.as_ref() != Some(&signature)
+            || self.last_sent_base_pose != base_pose;
+        if changed {
+            self.last_sent_snapshots = Some(signature);
+            self.last_sent_base_pose = base_pose;
         }
-        self.last_sent_snapshots = Some(signature);
-        true
+        changed
     }
 }
 
@@ -182,7 +200,7 @@ impl CustomComponentController for RobotSceneComponent {
             self.reload_project_config_if_changed();
             if self.virtual_bus.is_running() {
                 let snapshots = self.virtual_bus.snapshots();
-                if self.should_send_snapshots(&snapshots) {
+                if self.should_send_live_scene(&snapshots) {
                     ctx.send_data(
                         "servoSnapshots",
                         serde_json::json!({

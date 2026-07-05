@@ -6,7 +6,7 @@ use std::io;
 #[cfg(unix)]
 use std::os::unix::io::RawFd;
 #[cfg(unix)]
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 #[cfg(unix)]
 use crate::servo::protocol::port_handler::PortHandler;
@@ -124,14 +124,36 @@ impl PortHandler for VirtualUartPort {
         if packet.is_empty() {
             return 0;
         }
-        unsafe {
-            let written = libc::write(
-                self.master_fd,
-                packet.as_ptr() as *const libc::c_void,
-                packet.len(),
-            );
-            if written < 0 { 0 } else { written as usize }
+
+        let deadline = Instant::now() + Duration::from_millis(20);
+        let mut total = 0usize;
+        while total < packet.len() {
+            let written = unsafe {
+                libc::write(
+                    self.master_fd,
+                    packet[total..].as_ptr() as *const libc::c_void,
+                    packet.len() - total,
+                )
+            };
+
+            if written > 0 {
+                total += written as usize;
+                continue;
+            }
+
+            let err = io::Error::last_os_error();
+            if matches!(
+                err.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+            ) && Instant::now() < deadline
+            {
+                std::thread::sleep(Duration::from_millis(1));
+                continue;
+            }
+
+            break;
         }
+        total
     }
 
     fn set_packet_timeout(&mut self, packet_length: usize) {
