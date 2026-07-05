@@ -119,6 +119,7 @@ pub struct BusTransportConfig {
 #[derive(Clone, Debug)]
 pub enum DeviceConfig {
     Servo(ServoDeviceConfig),
+    DcMotor(DcMotorDeviceConfig),
     Imu(ImuDeviceConfig),
     IoBoard(IoBoardDeviceConfig),
 }
@@ -142,6 +143,21 @@ pub struct ServoDeviceConfig {
     pub profile: String,
     pub drives: Option<DeviceMapping>,
     pub calibration: ServoCalibrationConfig,
+}
+
+#[derive(Clone, Debug)]
+pub struct DcMotorCalibrationConfig {
+    pub direction: i8,
+    pub max_speed_mps: f32,
+}
+
+#[derive(Clone, Debug)]
+pub struct DcMotorDeviceConfig {
+    pub id: u32,
+    pub name: String,
+    pub profile: String,
+    pub drives: Option<DeviceMapping>,
+    pub calibration: DcMotorCalibrationConfig,
 }
 
 #[derive(Clone, Debug)]
@@ -772,6 +788,32 @@ fn hardware_device_entity(bus: &BusConfig, device: &DeviceConfig) -> RobotDreams
                 properties,
             }
         }
+        DeviceConfig::DcMotor(motor) => {
+            let mut properties = BTreeMap::new();
+            properties.insert("bus".to_string(), bus.id.clone());
+            properties.insert("profile".to_string(), motor.profile.clone());
+            properties.insert(
+                "direction".to_string(),
+                motor.calibration.direction.to_string(),
+            );
+            properties.insert(
+                "maxSpeedMps".to_string(),
+                format!("{:.3}", motor.calibration.max_speed_mps),
+            );
+            if let Some(drives) = &motor.drives {
+                properties.insert("drivesRobot".to_string(), drives.robot.clone());
+                properties.insert("drivesWheel".to_string(), drives.target.clone());
+            }
+            RobotDreamsEntity {
+                kind: ModelEntityKind::HardwareDevice,
+                id: format!("{}:dc_motor:{}", bus.id, motor.id),
+                name: motor.name.clone(),
+                robot_id: motor.drives.as_ref().map(|drives| drives.robot.clone()),
+                urdf_name: motor.drives.as_ref().map(|drives| drives.target.clone()),
+                location: None,
+                properties,
+            }
+        }
         DeviceConfig::Imu(imu) => {
             let mut properties = BTreeMap::new();
             properties.insert("bus".to_string(), bus.id.clone());
@@ -943,6 +985,28 @@ impl RobotDreamsModel {
         }
 
         Err(format!("No joint named '{name}' found").into())
+    }
+
+    pub fn move_robot_base_flat(
+        &mut self,
+        robot_id_or_name: &str,
+        dx: f64,
+        dy: f64,
+        dyaw: f64,
+    ) -> bool {
+        let Some(robot) = self.robots.iter_mut().find(|robot| {
+            matches_query(
+                robot_id_or_name,
+                &string_candidates(&[&robot.config.id, &robot.config.name]),
+            )
+        }) else {
+            return false;
+        };
+
+        robot.config.base_translation[0] += dx as f32;
+        robot.config.base_translation[1] += dy as f32;
+        robot.config.base_rotation[2] += dyaw as f32;
+        true
     }
 }
 
@@ -1415,6 +1479,13 @@ fn parse_servo_calibration(value: &serde_json::Value) -> ServoCalibrationConfig 
     }
 }
 
+fn parse_dc_motor_calibration(value: &serde_json::Value) -> DcMotorCalibrationConfig {
+    DcMotorCalibrationConfig {
+        direction: json_i8_path(value, &["calibration", "direction"]).unwrap_or(1),
+        max_speed_mps: json_f32_path(value, &["calibration", "maxSpeedMps"]).unwrap_or(0.4),
+    }
+}
+
 fn parse_device_config(value: &serde_json::Value) -> Option<DeviceConfig> {
     let device_type = json_string_path(value, &["type"])?;
     let id = json_u32_path(value, &["id"])?;
@@ -1433,6 +1504,15 @@ fn parse_device_config(value: &serde_json::Value) -> Option<DeviceConfig> {
             drives: parse_device_mapping(value, "drives", "joint"),
             calibration: parse_servo_calibration(value),
         })),
+        "dcMotor" | "dc_motor" | "hbridgeMotor" | "hbridge_motor" => {
+            Some(DeviceConfig::DcMotor(DcMotorDeviceConfig {
+                id,
+                name,
+                profile,
+                drives: parse_device_mapping(value, "drives", "wheel"),
+                calibration: parse_dc_motor_calibration(value),
+            }))
+        }
         "imu" => Some(DeviceConfig::Imu(ImuDeviceConfig {
             id,
             name,

@@ -7,10 +7,10 @@ use wgui::wui::runtime::WuiValue;
 use wgui::{WguiModel, wgui_controller};
 
 use crate::hardware_runtime::{
-    HardwareDeviceRuntime, HardwareImuRuntime, HardwareIoBoardRuntime, HardwareRuntime,
-    HardwareServoRuntime, apply_servo_snapshots_to_hardware, apply_servo_snapshots_to_urdf,
-    bus_servo_count, hardware_device_id, hardware_device_kind, hardware_runtime_from_project,
-    hardware_runtime_json, servo_display_name,
+    HardwareDcMotorRuntime, HardwareDeviceRuntime, HardwareImuRuntime, HardwareIoBoardRuntime,
+    HardwareRuntime, HardwareServoRuntime, apply_servo_snapshots_to_hardware,
+    apply_servo_snapshots_to_urdf, bus_servo_count, hardware_device_id, hardware_device_kind,
+    hardware_runtime_from_project, hardware_runtime_json, servo_display_name,
 };
 use crate::robot_scene_component::servo_snapshots_json;
 use crate::scene_transform::{
@@ -819,6 +819,9 @@ fn device_row_detail(
                 joint_display_label(project_config, &device.drives_joint)
             )
         }
+        HardwareDeviceRuntime::DcMotor(device) => {
+            format!("{} -> {}", device.profile, device.drives_wheel)
+        }
         HardwareDeviceRuntime::Imu(device) => device
             .mounted_link
             .as_ref()
@@ -834,6 +837,7 @@ fn device_row_label(
 ) -> String {
     match device {
         HardwareDeviceRuntime::Servo(device) => servo_display_name(device, project_config),
+        HardwareDeviceRuntime::DcMotor(device) => device.name.clone(),
         HardwareDeviceRuntime::Imu(device) => device.name.clone(),
         HardwareDeviceRuntime::IoBoard(device) => device.name.clone(),
     }
@@ -842,6 +846,7 @@ fn device_row_label(
 fn device_row_icon(device: &HardwareDeviceRuntime) -> &'static str {
     match device {
         HardwareDeviceRuntime::Servo(_) => "SRV",
+        HardwareDeviceRuntime::DcMotor(_) => "MOT",
         HardwareDeviceRuntime::Imu(_) => "IMU",
         HardwareDeviceRuntime::IoBoard(_) => "IO",
     }
@@ -1700,6 +1705,29 @@ fn selected_servo_info(
     }
 }
 
+fn selected_dc_motor_info(motor: &HardwareDcMotorRuntime) -> SelectedSceneInfo {
+    SelectedSceneInfo {
+        name: motor.name.clone(),
+        selected_type: "dc motor device".to_string(),
+        status: "OK".to_string(),
+        badge: "MOT".to_string(),
+        accent: "#245c95".to_string(),
+        transform_properties: vec![
+            workbench_property("Id", motor.id.to_string()),
+            location_property(None),
+            workbench_property("Profile", motor.profile.clone()),
+            workbench_property("Mapped robot", motor.drives_robot.clone()),
+            workbench_property("Mapped wheel", motor.drives_wheel.clone()),
+            workbench_property("Direction", motor.direction.to_string()),
+            workbench_property("Max speed", format!("{:.3} m/s", motor.max_speed_mps)),
+        ],
+        physics_properties: vec![workbench_property(
+            "Command speed",
+            format!("{}%", motor.command_speed),
+        )],
+    }
+}
+
 fn selected_imu_info(
     state: &UrdfViewerState,
     imu: &HardwareImuRuntime,
@@ -1811,6 +1839,7 @@ fn selected_device_info(
             base_rotation,
             model_transformation,
         ),
+        HardwareDeviceRuntime::DcMotor(motor) => selected_dc_motor_info(motor),
         HardwareDeviceRuntime::Imu(imu) => selected_imu_info(
             state,
             imu,

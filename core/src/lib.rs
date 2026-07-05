@@ -29,6 +29,7 @@ pub struct RobotDreams {
     models: Vec<UrdfModel>,
     hardware: HardwareRuntime,
     virtual_buses: Vec<VirtualBusRuntime>,
+    rover_drives: Vec<RoverDriveRuntime>,
     clock_sec: f64,
     dt: f32,
 }
@@ -66,6 +67,7 @@ pub struct HardwareBusRuntime {
 #[derive(Clone, Debug, PartialEq)]
 pub enum HardwareDeviceRuntime {
     Servo(HardwareServoRuntime),
+    DcMotor(HardwareDcMotorRuntime),
     Imu(HardwareImuRuntime),
     IoBoard(HardwareIoBoardRuntime),
 }
@@ -84,6 +86,18 @@ pub struct HardwareServoRuntime {
     pub torque_enabled: bool,
     pub temperature_c: i16,
     pub voltage_v: f32,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct HardwareDcMotorRuntime {
+    pub id: u32,
+    pub name: String,
+    pub profile: String,
+    pub drives_robot: String,
+    pub drives_wheel: String,
+    pub direction: i8,
+    pub max_speed_mps: f32,
+    pub command_speed: i16,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -110,7 +124,16 @@ struct VirtualBusRuntime {
     sim: FeetechBusSim,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+struct RoverDriveRuntime {
+    robot_id: String,
+    steering_angle_deg: f64,
+    steering_center_deg: f64,
+    wheelbase_m: f64,
+}
+
 const SERVO_FULL_ROTATION_TICKS: f64 = 4096.0;
+const DEFAULT_ROVER_WHEELBASE_M: f64 = 0.22;
 
 fn servo_runtime_from_config(config: &crate::project::ServoDeviceConfig) -> HardwareServoRuntime {
     let drives = config.drives.as_ref();
@@ -134,10 +157,33 @@ fn servo_runtime_from_config(config: &crate::project::ServoDeviceConfig) -> Hard
     }
 }
 
+fn dc_motor_runtime_from_config(
+    config: &crate::project::DcMotorDeviceConfig,
+) -> HardwareDcMotorRuntime {
+    let drives = config.drives.as_ref();
+    HardwareDcMotorRuntime {
+        id: config.id,
+        name: config.name.clone(),
+        profile: config.profile.clone(),
+        drives_robot: drives
+            .map(|mapping| mapping.robot.clone())
+            .unwrap_or_default(),
+        drives_wheel: drives
+            .map(|mapping| mapping.target.clone())
+            .unwrap_or_default(),
+        direction: config.calibration.direction,
+        max_speed_mps: config.calibration.max_speed_mps,
+        command_speed: 0,
+    }
+}
+
 fn device_runtime_from_config(config: &DeviceConfig) -> HardwareDeviceRuntime {
     match config {
         DeviceConfig::Servo(config) => {
             HardwareDeviceRuntime::Servo(servo_runtime_from_config(config))
+        }
+        DeviceConfig::DcMotor(config) => {
+            HardwareDeviceRuntime::DcMotor(dc_motor_runtime_from_config(config))
         }
         DeviceConfig::Imu(config) => HardwareDeviceRuntime::Imu(HardwareImuRuntime {
             id: config.id,
@@ -234,6 +280,38 @@ fn virtual_buses_from_hardware(hardware: &HardwareRuntime) -> Vec<VirtualBusRunt
         .collect()
 }
 
+fn rover_drives_from_hardware(hardware: &HardwareRuntime) -> Vec<RoverDriveRuntime> {
+    let mut robot_ids = Vec::<String>::new();
+    for bus in &hardware.buses {
+        for device in &bus.devices {
+            let HardwareDeviceRuntime::DcMotor(motor) = device else {
+                continue;
+            };
+            if motor.drives_robot.is_empty()
+                || !motor.drives_wheel.to_ascii_lowercase().contains("left")
+            {
+                continue;
+            }
+            if !robot_ids
+                .iter()
+                .any(|robot_id| robot_id == &motor.drives_robot)
+            {
+                robot_ids.push(motor.drives_robot.clone());
+            }
+        }
+    }
+
+    robot_ids
+        .into_iter()
+        .map(|robot_id| RoverDriveRuntime {
+            robot_id,
+            steering_angle_deg: 90.0,
+            steering_center_deg: 90.0,
+            wheelbase_m: DEFAULT_ROVER_WHEELBASE_M,
+        })
+        .collect()
+}
+
 fn servo_snapshot<'a>(
     snapshots: &'a [FeetechServoSnapshot],
     servo: &HardwareServoRuntime,
@@ -300,6 +378,26 @@ fn apply_servo_snapshots_to_model(
     }
 }
 
+fn dc_motor_speed_mps(hardware: &HardwareRuntime, robot_id: &str, wheel: &str) -> Option<f64> {
+    for bus in &hardware.buses {
+        for device in &bus.devices {
+            let HardwareDeviceRuntime::DcMotor(motor) = device else {
+                continue;
+            };
+            if motor.drives_robot != robot_id {
+                continue;
+            }
+            if !motor.drives_wheel.to_ascii_lowercase().contains(wheel) {
+                continue;
+            }
+            let direction = if motor.direction < 0 { -1.0 } else { 1.0 };
+            let command = f64::from(motor.command_speed.clamp(-100, 100)) / 100.0;
+            return Some(command * f64::from(motor.max_speed_mps) * direction);
+        }
+    }
+    None
+}
+
 impl RobotDreams {
     pub fn new() -> Self {
         Self {
@@ -308,6 +406,7 @@ impl RobotDreams {
             models: Vec::new(),
             hardware: HardwareRuntime::default(),
             virtual_buses: Vec::new(),
+            rover_drives: Vec::new(),
             clock_sec: 0.0,
             dt: 1.0 / 200.0,
         }
@@ -317,10 +416,12 @@ impl RobotDreams {
         let model = RobotDreamsModel::open(path)?;
         let hardware = hardware_runtime_from_model(&model);
         let virtual_buses = virtual_buses_from_hardware(&hardware);
+        let rover_drives = rover_drives_from_hardware(&hardware);
         let mut dreams = Self {
             model: Some(model),
             hardware,
             virtual_buses,
+            rover_drives,
             ..Self::new()
         };
         dreams.apply_virtual_bus_snapshots();
@@ -372,6 +473,7 @@ impl RobotDreams {
             bus.sim.step(dt);
         }
         self.apply_virtual_bus_snapshots();
+        self.integrate_rover_drives(f64::from(dt));
         self.set_time_step(dt);
         self.physics.step();
     }
@@ -463,6 +565,57 @@ impl RobotDreams {
         updated
     }
 
+    pub fn set_virtual_drive_output(
+        &mut self,
+        bus_id: &str,
+        robot_id: &str,
+        left_motor_id: u32,
+        right_motor_id: u32,
+        left_speed: i16,
+        right_speed: i16,
+        steering_angle_deg: f64,
+        steering_center_deg: f64,
+    ) -> bool {
+        let Some(bus) = self.hardware.buses.iter_mut().find(|bus| bus.id == bus_id) else {
+            return false;
+        };
+        let mut updated_left = false;
+        let mut updated_right = false;
+        for device in &mut bus.devices {
+            let HardwareDeviceRuntime::DcMotor(motor) = device else {
+                continue;
+            };
+            if motor.id == left_motor_id {
+                motor.command_speed = left_speed.clamp(-100, 100);
+                updated_left = true;
+            }
+            if motor.id == right_motor_id {
+                motor.command_speed = right_speed.clamp(-100, 100);
+                updated_right = true;
+            }
+        }
+        if !updated_left || !updated_right {
+            return false;
+        }
+
+        if let Some(drive) = self
+            .rover_drives
+            .iter_mut()
+            .find(|drive| drive.robot_id == robot_id)
+        {
+            drive.steering_angle_deg = steering_angle_deg;
+            drive.steering_center_deg = steering_center_deg;
+        } else {
+            self.rover_drives.push(RoverDriveRuntime {
+                robot_id: robot_id.to_string(),
+                steering_angle_deg,
+                steering_center_deg,
+                wheelbase_m: DEFAULT_ROVER_WHEELBASE_M,
+            });
+        }
+        true
+    }
+
     pub fn step(&mut self, steps: usize) {
         for _ in 0..steps {
             self.advance_seconds(self.dt);
@@ -496,6 +649,56 @@ impl RobotDreams {
             if let Some(model) = &mut self.model {
                 apply_servo_snapshots_to_model(model, &self.hardware, &bus_id, &snapshots);
             }
+        }
+    }
+
+    fn integrate_rover_drives(&mut self, dt: f64) {
+        if dt <= 0.0 {
+            return;
+        }
+
+        let mut moves = Vec::new();
+        for drive in &self.rover_drives {
+            let Some(left_speed_mps) = dc_motor_speed_mps(&self.hardware, &drive.robot_id, "left")
+            else {
+                continue;
+            };
+            let Some(right_speed_mps) =
+                dc_motor_speed_mps(&self.hardware, &drive.robot_id, "right")
+            else {
+                continue;
+            };
+            let linear_mps = 0.5 * (left_speed_mps + right_speed_mps);
+            if linear_mps.abs() <= f64::EPSILON {
+                continue;
+            }
+            let yaw = self
+                .model
+                .as_ref()
+                .and_then(|model| model.robot_state(&drive.robot_id))
+                .and_then(|state| state.base.rotation)
+                .map(|rotation| rotation[2])
+                .unwrap_or(0.0);
+            let steering_rad = (drive.steering_angle_deg - drive.steering_center_deg).to_radians();
+            let yaw_rate = if drive.wheelbase_m > 0.0 {
+                linear_mps * steering_rad.tan() / drive.wheelbase_m
+            } else {
+                0.0
+            };
+            let distance_m = linear_mps * dt;
+            moves.push((
+                drive.robot_id.clone(),
+                distance_m * yaw.cos(),
+                distance_m * yaw.sin(),
+                yaw_rate * dt,
+            ));
+        }
+
+        let Some(model) = &mut self.model else {
+            return;
+        };
+        for (robot_id, dx, dy, dyaw) in moves {
+            model.move_robot_base_flat(&robot_id, dx, dy, dyaw);
         }
     }
 }

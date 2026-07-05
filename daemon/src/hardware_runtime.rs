@@ -1,8 +1,8 @@
 use feetech_servo::servo::sim::FeetechServoSnapshot;
 
 use crate::{
-    BusConfig, DeviceConfig, HardwareConfig, ProjectConfig, ServoDeviceConfig, UrdfViewerState,
-    joint_display_label, project_joint_name, servo_ticks_to_joint_slider_value,
+    BusConfig, DcMotorDeviceConfig, DeviceConfig, HardwareConfig, ProjectConfig, ServoDeviceConfig,
+    UrdfViewerState, joint_display_label, project_joint_name, servo_ticks_to_joint_slider_value,
 };
 
 #[derive(Debug, Clone)]
@@ -24,6 +24,7 @@ pub(crate) struct HardwareBusRuntime {
 #[derive(Debug, Clone)]
 pub(crate) enum HardwareDeviceRuntime {
     Servo(HardwareServoRuntime),
+    DcMotor(HardwareDcMotorRuntime),
     Imu(HardwareImuRuntime),
     IoBoard(HardwareIoBoardRuntime),
 }
@@ -42,6 +43,18 @@ pub(crate) struct HardwareServoRuntime {
     pub(crate) torque_enabled: bool,
     pub(crate) temperature_c: i16,
     pub(crate) voltage_v: f32,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct HardwareDcMotorRuntime {
+    pub(crate) id: u32,
+    pub(crate) name: String,
+    pub(crate) profile: String,
+    pub(crate) drives_robot: String,
+    pub(crate) drives_wheel: String,
+    pub(crate) direction: i8,
+    pub(crate) max_speed_mps: f32,
+    pub(crate) command_speed: i16,
 }
 
 #[derive(Debug, Clone)]
@@ -102,10 +115,31 @@ fn servo_runtime_from_config(config: &ServoDeviceConfig) -> HardwareServoRuntime
     }
 }
 
+fn dc_motor_runtime_from_config(config: &DcMotorDeviceConfig) -> HardwareDcMotorRuntime {
+    let drives = config.drives.as_ref();
+    HardwareDcMotorRuntime {
+        id: config.id,
+        name: config.name.clone(),
+        profile: config.profile.clone(),
+        drives_robot: drives
+            .map(|mapping| mapping.robot.clone())
+            .unwrap_or_default(),
+        drives_wheel: drives
+            .map(|mapping| mapping.target.clone())
+            .unwrap_or_default(),
+        direction: config.calibration.direction,
+        max_speed_mps: config.calibration.max_speed_mps,
+        command_speed: 0,
+    }
+}
+
 fn device_runtime_from_config(config: &DeviceConfig) -> HardwareDeviceRuntime {
     match config {
         DeviceConfig::Servo(config) => {
             HardwareDeviceRuntime::Servo(servo_runtime_from_config(config))
+        }
+        DeviceConfig::DcMotor(config) => {
+            HardwareDeviceRuntime::DcMotor(dc_motor_runtime_from_config(config))
         }
         DeviceConfig::Imu(config) => HardwareDeviceRuntime::Imu(HardwareImuRuntime {
             id: config.id,
@@ -201,6 +235,7 @@ pub(crate) fn hardware_runtime_from_project(
 pub(crate) fn hardware_device_id(device: &HardwareDeviceRuntime) -> u32 {
     match device {
         HardwareDeviceRuntime::Servo(device) => device.id,
+        HardwareDeviceRuntime::DcMotor(device) => device.id,
         HardwareDeviceRuntime::Imu(device) => device.id,
         HardwareDeviceRuntime::IoBoard(device) => device.id,
     }
@@ -209,6 +244,7 @@ pub(crate) fn hardware_device_id(device: &HardwareDeviceRuntime) -> u32 {
 pub(crate) fn hardware_device_kind(device: &HardwareDeviceRuntime) -> &'static str {
     match device {
         HardwareDeviceRuntime::Servo(_) => "servo",
+        HardwareDeviceRuntime::DcMotor(_) => "dc_motor",
         HardwareDeviceRuntime::Imu(_) => "imu",
         HardwareDeviceRuntime::IoBoard(_) => "io_board",
     }
@@ -259,6 +295,23 @@ fn hardware_device_json(
                 "torqueEnabled": device.torque_enabled,
                 "temperatureC": device.temperature_c,
                 "voltageV": device.voltage_v,
+            },
+        }),
+        HardwareDeviceRuntime::DcMotor(device) => serde_json::json!({
+            "type": "dc_motor",
+            "id": device.id,
+            "name": device.name,
+            "profile": device.profile,
+            "drives": {
+                "robot": device.drives_robot,
+                "wheel": device.drives_wheel,
+            },
+            "calibration": {
+                "direction": device.direction,
+                "maxSpeedMps": device.max_speed_mps,
+            },
+            "state": {
+                "commandSpeed": device.command_speed,
             },
         }),
         HardwareDeviceRuntime::Imu(device) => serde_json::json!({

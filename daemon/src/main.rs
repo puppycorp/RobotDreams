@@ -264,6 +264,7 @@ pub(crate) struct BusTransportConfig {
 #[derive(Clone, Debug)]
 pub(crate) enum DeviceConfig {
     Servo(ServoDeviceConfig),
+    DcMotor(DcMotorDeviceConfig),
     Imu(ImuDeviceConfig),
     IoBoard(IoBoardDeviceConfig),
 }
@@ -287,6 +288,21 @@ pub(crate) struct ServoDeviceConfig {
     pub(crate) profile: String,
     pub(crate) drives: Option<DeviceMapping>,
     pub(crate) calibration: ServoCalibrationConfig,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct DcMotorCalibrationConfig {
+    pub(crate) direction: i8,
+    pub(crate) max_speed_mps: f32,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct DcMotorDeviceConfig {
+    pub(crate) id: u32,
+    pub(crate) name: String,
+    pub(crate) profile: String,
+    pub(crate) drives: Option<DeviceMapping>,
+    pub(crate) calibration: DcMotorCalibrationConfig,
 }
 
 #[derive(Clone, Debug)]
@@ -496,6 +512,13 @@ fn parse_servo_calibration(value: &serde_json::Value) -> ServoCalibrationConfig 
     }
 }
 
+fn parse_dc_motor_calibration(value: &serde_json::Value) -> DcMotorCalibrationConfig {
+    DcMotorCalibrationConfig {
+        direction: json_i8_path(value, &["calibration", "direction"]).unwrap_or(1),
+        max_speed_mps: json_f32_path(value, &["calibration", "maxSpeedMps"]).unwrap_or(0.4),
+    }
+}
+
 fn parse_device_config(value: &serde_json::Value) -> Option<DeviceConfig> {
     let device_type = json_string_path(value, &["type"])?;
     let id = json_u32_path(value, &["id"])?;
@@ -514,6 +537,15 @@ fn parse_device_config(value: &serde_json::Value) -> Option<DeviceConfig> {
             drives: parse_device_mapping(value, "drives", "joint"),
             calibration: parse_servo_calibration(value),
         })),
+        "dcMotor" | "dc_motor" | "hbridgeMotor" | "hbridge_motor" => {
+            Some(DeviceConfig::DcMotor(DcMotorDeviceConfig {
+                id,
+                name,
+                profile,
+                drives: parse_device_mapping(value, "drives", "wheel"),
+                calibration: parse_dc_motor_calibration(value),
+            }))
+        }
         "imu" => Some(DeviceConfig::Imu(ImuDeviceConfig {
             id,
             name,
