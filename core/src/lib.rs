@@ -1,26 +1,38 @@
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::path::Path;
 #[cfg(unix)]
 use std::sync::Arc;
 #[cfg(unix)]
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, OnceLock};
 #[cfg(unix)]
 use std::thread;
 
 use crate::physics::PhysicsWorld;
 use crate::project::{BusConfig, DeviceConfig, ProjectConfig};
+use crate::scene_graph::{
+    CameraSpec, EntityId, EntityMetadata, Geometry, GeometryBounds, LightSpec as SceneLightSpec,
+    Material, ReflectionProbeSettings, RenderSettings as SceneRenderSettings, SceneGraph,
+    SceneNode, Transform,
+};
 use crate::urdf::{UrdfModel, load_urdf};
 use feetech_servo::servo::protocol::serial_bus::ProtocolError;
 use feetech_servo::servo::sim::{FeetechBusEvent, FeetechBusSim, FeetechServoSnapshot};
 
 pub mod physics;
 pub mod project;
+pub mod scene_graph;
 pub mod scene_harness;
 pub mod urdf;
 
 pub use project::{
     FrameState, JointState, LinkState, ModelEntityKind, RobotDreamsEntity, RobotDreamsModel,
     RobotState, SceneLocation,
+};
+pub use scene_graph::{
+    EnvironmentSettings, LightKind, LightSpec, ObservationMetadata, ObservationRequest,
+    ObservationView, RenderSettings, SceneNodeKind, SegmentationPolicy, ShutterPolicy, ToneMapping,
 };
 
 pub struct RobotDreams {
@@ -134,6 +146,15 @@ struct RoverDriveRuntime {
 
 const SERVO_FULL_ROTATION_TICKS: f64 = 4096.0;
 const DEFAULT_ROVER_WHEELBASE_M: f64 = 0.22;
+
+static MESH_BOUNDS_CACHE: OnceLock<Mutex<BTreeMap<MeshBoundsCacheKey, Option<GeometryBounds>>>> =
+    OnceLock::new();
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct MeshBoundsCacheKey {
+    asset: String,
+    scale_bits: [u32; 3],
+}
 
 fn servo_runtime_from_config(config: &crate::project::ServoDeviceConfig) -> HardwareServoRuntime {
     let drives = config.drives.as_ref();
@@ -498,6 +519,176 @@ impl RobotDreams {
         }
     }
 
+    pub fn scene_graph(&self) -> SceneGraph {
+        let mut graph = SceneGraph::empty();
+
+        if let Some(model) = &self.model {
+            for robot in model.robot_states() {
+                let entity = format!("robot:{}", robot.id);
+                graph.add_entity(EntityMetadata {
+                    id: EntityId(entity.clone()),
+                    name: robot.name.clone(),
+                    kind: "robot".to_string(),
+                    robot_id: Some(robot.id.clone()),
+                    link_name: None,
+                });
+                graph
+                    .root
+                    .children
+                    .push(SceneNode::group(entity, robot.name));
+            }
+
+            for (index, visual) in model.robot_visual_meshes().into_iter().enumerate() {
+                let entity = format!(
+                    "robot:{}:visual:{}:{index}",
+                    visual.robot_id, visual.link_name
+                );
+                graph.add_entity(EntityMetadata {
+                    id: EntityId(entity.clone()),
+                    name: visual.name.clone(),
+                    kind: "robotVisual".to_string(),
+                    robot_id: Some(visual.robot_id.clone()),
+                    link_name: Some(visual.link_name.clone()),
+                });
+                graph.root.children.push(SceneNode::mesh(
+                    entity,
+                    visual.name,
+                    mesh_asset_geometry(&visual.asset, visual.scale),
+                    Material {
+                        color_rgb: [102, 151, 196],
+                    },
+                    Transform::matrix(visual.translation, visual.rotation_matrix),
+                ));
+            }
+
+            if let Some(project) = model.project() {
+                graph.render_settings = project
+                    .scene
+                    .render_settings
+                    .as_ref()
+                    .map(|settings| scene_render_settings(project, settings));
+                graph.reflection_probes = project
+                    .scene
+                    .reflection_probes
+                    .iter()
+                    .map(|probe| scene_reflection_probe(project, probe))
+                    .collect();
+
+                for object in &project.scene.objects {
+                    let entity = format!("object:{}", object.id);
+                    graph.add_entity(EntityMetadata {
+                        id: EntityId(entity.clone()),
+                        name: object.name.clone(),
+                        kind: "sceneObject".to_string(),
+                        robot_id: None,
+                        link_name: None,
+                    });
+                    let mut node = SceneNode::mesh(
+                        entity,
+                        object.name.clone(),
+                        scene_object_geometry(project, object),
+                        Material {
+                            color_rgb: object.color_rgb,
+                        },
+                        Transform {
+                            translation: object.position,
+                            rotation: object.rotation,
+                            rotation_matrix: None,
+                        },
+                    );
+                    node.include_in_fit = object.include_in_fit;
+                    graph.root.children.push(node);
+                }
+
+                for camera in &project.scene.cameras {
+                    if let Some(spec) = self.camera_spec(&camera.id) {
+                        let entity = format!("camera:{}", camera.id);
+                        graph.add_entity(EntityMetadata {
+                            id: EntityId(entity.clone()),
+                            name: camera.name.clone(),
+                            kind: "camera".to_string(),
+                            robot_id: Some(camera.mounted_robot.clone()),
+                            link_name: Some(camera.mounted_link.clone()),
+                        });
+                        graph.root.children.push(SceneNode::camera(
+                            entity,
+                            camera.name.clone(),
+                            spec,
+                        ));
+                    }
+                }
+
+                for light in &project.scene.lights {
+                    let entity = format!("light:{}", light.id);
+                    graph.add_entity(EntityMetadata {
+                        id: EntityId(entity.clone()),
+                        name: light.name.clone(),
+                        kind: "light".to_string(),
+                        robot_id: None,
+                        link_name: None,
+                    });
+                    graph.root.children.push(SceneNode::light(
+                        entity,
+                        light.name.clone(),
+                        SceneLightSpec {
+                            id: light.id.clone(),
+                            name: light.name.clone(),
+                            transform: Transform {
+                                translation: light.position,
+                                rotation: light.rotation,
+                                rotation_matrix: None,
+                            },
+                            kind: light.kind,
+                            color_rgb: light.color_rgb,
+                            intensity: light.intensity,
+                        },
+                    ));
+                }
+            }
+        }
+
+        graph
+    }
+
+    pub fn camera_spec(&self, camera_id: &str) -> Option<CameraSpec> {
+        let model = self.model.as_ref()?;
+        let project = model.project()?;
+        let camera = project
+            .scene
+            .cameras
+            .iter()
+            .find(|camera| camera.id == camera_id)?;
+        let mounted_link = model
+            .robot_state(&camera.mounted_robot)
+            .and_then(|robot| robot.links.get(&camera.mounted_link).cloned())
+            .and_then(|link| link.location);
+        let mut translation = camera.position;
+        let mut link_rotation = identity_mat3();
+        if let Some(location) = mounted_link {
+            if let Some(rotation) = location.rotation {
+                link_rotation = rpy_matrix_f32(f64_vec3_to_f32(rotation));
+            }
+            translation = add_f32_vec3(
+                f64_vec3_to_f32(location.position),
+                mat3_vec_mul(link_rotation, camera.position),
+            );
+        }
+        let rotation_matrix = native_camera_rotation_matrix(link_rotation, camera.rotation);
+
+        Some(CameraSpec {
+            id: camera.id.clone(),
+            name: camera.name.clone(),
+            transform: Transform::matrix(translation, rotation_matrix),
+            fov_deg: camera.fov_deg,
+            projection: camera.projection,
+            resolution: camera.resolution.unwrap_or([320, 240]),
+            intrinsics: camera.intrinsics,
+            distortion: camera.distortion,
+            depth_range_m: camera.depth_range_m,
+            sensor_effects: camera.sensor_effects,
+        })
+    }
+
     pub fn hardware(&self) -> &HardwareRuntime {
         &self.hardware
     }
@@ -703,6 +894,267 @@ impl RobotDreams {
     }
 }
 
+fn scene_object_geometry(
+    project: &ProjectConfig,
+    object: &project::ProjectSceneObjectConfig,
+) -> Geometry {
+    match &object.geometry {
+        project::ProjectSceneObjectGeometry::Mesh { asset } => mesh_asset_geometry(
+            Path::new(&scene_object_asset_path(project, asset)),
+            object.scale.unwrap_or([1.0, 1.0, 1.0]),
+        ),
+        project::ProjectSceneObjectGeometry::Box { size } => Geometry::Box { size: *size },
+        project::ProjectSceneObjectGeometry::Sphere { radius } => {
+            Geometry::Sphere { radius: *radius }
+        }
+        project::ProjectSceneObjectGeometry::Cylinder {
+            radius_top,
+            radius_bottom,
+            height,
+        } => Geometry::Cylinder {
+            radius: radius_top.max(*radius_bottom),
+            height: *height,
+        },
+    }
+}
+
+fn mesh_asset_geometry(path: &Path, scale: [f32; 3]) -> Geometry {
+    Geometry::MeshAsset {
+        asset: path.display().to_string(),
+        scale,
+        bounds: mesh_asset_bounds(path, scale),
+    }
+}
+
+fn mesh_asset_bounds(path: &Path, scale: [f32; 3]) -> Option<GeometryBounds> {
+    let key = MeshBoundsCacheKey {
+        asset: path.display().to_string(),
+        scale_bits: scale.map(f32::to_bits),
+    };
+    if let Ok(cache) = MESH_BOUNDS_CACHE
+        .get_or_init(|| Mutex::new(BTreeMap::new()))
+        .lock()
+        && let Some(bounds) = cache.get(&key)
+    {
+        return *bounds;
+    }
+
+    let bounds = load_mesh_asset_bounds(path, scale);
+    if let Ok(mut cache) = MESH_BOUNDS_CACHE
+        .get_or_init(|| Mutex::new(BTreeMap::new()))
+        .lock()
+    {
+        cache.insert(key, bounds);
+    }
+    bounds
+}
+
+fn load_mesh_asset_bounds(path: &Path, scale: [f32; 3]) -> Option<GeometryBounds> {
+    let (document, buffers, _) = gltf::import(path).ok()?;
+    let scene = document
+        .default_scene()
+        .or_else(|| document.scenes().next())?;
+    let root_transform = mat4_scale(scale);
+    let mut builder = GeometryBoundsBuilder::default();
+    for node in scene.nodes() {
+        collect_gltf_node_bounds(&node, root_transform, &buffers, &mut builder);
+    }
+    builder.finish()
+}
+
+fn collect_gltf_node_bounds(
+    node: &gltf::Node<'_>,
+    parent_transform: [[f32; 4]; 4],
+    buffers: &[gltf::buffer::Data],
+    builder: &mut GeometryBoundsBuilder,
+) {
+    let node_transform = mat4_mul(parent_transform, node.transform().matrix());
+    if let Some(mesh) = node.mesh() {
+        for primitive in mesh.primitives() {
+            let reader = primitive.reader(|buffer| buffers.get(buffer.index()).map(|data| &**data));
+            let Some(positions) = reader.read_positions() else {
+                continue;
+            };
+            for position in positions {
+                builder.add_point(transform_point4(node_transform, position));
+            }
+        }
+    }
+    for child in node.children() {
+        collect_gltf_node_bounds(&child, node_transform, buffers, builder);
+    }
+}
+
+#[derive(Default)]
+struct GeometryBoundsBuilder {
+    min: Option<[f32; 3]>,
+    max: Option<[f32; 3]>,
+}
+
+impl GeometryBoundsBuilder {
+    fn add_point(&mut self, point: [f32; 3]) {
+        match (&mut self.min, &mut self.max) {
+            (Some(min), Some(max)) => {
+                for axis in 0..3 {
+                    min[axis] = min[axis].min(point[axis]);
+                    max[axis] = max[axis].max(point[axis]);
+                }
+            }
+            _ => {
+                self.min = Some(point);
+                self.max = Some(point);
+            }
+        }
+    }
+
+    fn finish(self) -> Option<GeometryBounds> {
+        Some(GeometryBounds {
+            min: self.min?,
+            max: self.max?,
+        })
+    }
+}
+
+fn mat4_scale(scale: [f32; 3]) -> [[f32; 4]; 4] {
+    [
+        [scale[0], 0.0, 0.0, 0.0],
+        [0.0, scale[1], 0.0, 0.0],
+        [0.0, 0.0, scale[2], 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ]
+}
+
+fn mat4_mul(left: [[f32; 4]; 4], right: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
+    let mut result = [[0.0; 4]; 4];
+    for col in 0..4 {
+        for row in 0..4 {
+            result[col][row] = left[0][row] * right[col][0]
+                + left[1][row] * right[col][1]
+                + left[2][row] * right[col][2]
+                + left[3][row] * right[col][3];
+        }
+    }
+    result
+}
+
+fn transform_point4(matrix: [[f32; 4]; 4], point: [f32; 3]) -> [f32; 3] {
+    [
+        matrix[0][0] * point[0] + matrix[1][0] * point[1] + matrix[2][0] * point[2] + matrix[3][0],
+        matrix[0][1] * point[0] + matrix[1][1] * point[1] + matrix[2][1] * point[2] + matrix[3][1],
+        matrix[0][2] * point[0] + matrix[1][2] * point[1] + matrix[2][2] * point[2] + matrix[3][2],
+    ]
+}
+
+fn scene_object_asset_path(project: &ProjectConfig, asset: &str) -> String {
+    let path = Path::new(asset);
+    if path.is_absolute() {
+        path.display().to_string()
+    } else {
+        project.base_dir.join(path).display().to_string()
+    }
+}
+
+fn scene_reflection_probe(
+    project: &ProjectConfig,
+    probe: &ReflectionProbeSettings,
+) -> ReflectionProbeSettings {
+    let mut probe = probe.clone();
+    probe.map = scene_object_asset_path(project, &probe.map);
+    probe
+}
+
+fn scene_render_settings(
+    project: &ProjectConfig,
+    settings: &SceneRenderSettings,
+) -> SceneRenderSettings {
+    let mut settings = settings.clone();
+    if let Some(environment) = &mut settings.environment
+        && let Some(map) = &environment.map
+    {
+        environment.map = Some(scene_object_asset_path(project, map));
+    }
+    if let Some(probe) = &mut settings.reflection_probe {
+        *probe = scene_reflection_probe(project, probe);
+    }
+    settings.reflection_probes = settings
+        .reflection_probes
+        .iter()
+        .map(|probe| scene_reflection_probe(project, probe))
+        .collect();
+    settings
+}
+
+fn f64_vec3_to_f32(value: [f64; 3]) -> [f32; 3] {
+    [value[0] as f32, value[1] as f32, value[2] as f32]
+}
+
+fn add_f32_vec3(left: [f32; 3], right: [f32; 3]) -> [f32; 3] {
+    [left[0] + right[0], left[1] + right[1], left[2] + right[2]]
+}
+
+fn native_camera_rotation_matrix(
+    link_rotation: [[f32; 3]; 3],
+    camera_rotation: [f32; 3],
+) -> [[f32; 3]; 3] {
+    // Project cameras follow the Three.js/RobotDreams authoring convention:
+    // local -Z is optical forward, +Y is image up, +X is image right.
+    // Native renderer rays use local +X forward, +Z up, and +Y left.
+    let project_to_native_camera = [[0.0, -1.0, 0.0], [0.0, 0.0, 1.0], [-1.0, 0.0, 0.0]];
+    mat3_mul(
+        mat3_mul(link_rotation, rpy_matrix_f32(camera_rotation)),
+        project_to_native_camera,
+    )
+}
+
+fn identity_mat3() -> [[f32; 3]; 3] {
+    [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+}
+
+fn rpy_matrix_f32(rpy: [f32; 3]) -> [[f32; 3]; 3] {
+    let basis_x = rotate_f32(rpy, [1.0, 0.0, 0.0]);
+    let basis_y = rotate_f32(rpy, [0.0, 1.0, 0.0]);
+    let basis_z = rotate_f32(rpy, [0.0, 0.0, 1.0]);
+    [
+        [basis_x[0], basis_y[0], basis_z[0]],
+        [basis_x[1], basis_y[1], basis_z[1]],
+        [basis_x[2], basis_y[2], basis_z[2]],
+    ]
+}
+
+fn rotate_f32(rpy: [f32; 3], vector: [f32; 3]) -> [f32; 3] {
+    let [roll, pitch, yaw] = rpy;
+    let (sr, cr) = roll.sin_cos();
+    let (sp, cp) = pitch.sin_cos();
+    let (sy, cy) = yaw.sin_cos();
+    let x1 = vector[0];
+    let y1 = cr * vector[1] - sr * vector[2];
+    let z1 = sr * vector[1] + cr * vector[2];
+    let x2 = cp * x1 + sp * z1;
+    let y2 = y1;
+    let z2 = -sp * x1 + cp * z1;
+    [cy * x2 - sy * y2, sy * x2 + cy * y2, z2]
+}
+
+fn mat3_mul(left: [[f32; 3]; 3], right: [[f32; 3]; 3]) -> [[f32; 3]; 3] {
+    let mut result = [[0.0; 3]; 3];
+    for row in 0..3 {
+        for col in 0..3 {
+            result[row][col] = left[row][0] * right[0][col]
+                + left[row][1] * right[1][col]
+                + left[row][2] * right[2][col];
+        }
+    }
+    result
+}
+
+fn mat3_vec_mul(matrix: [[f32; 3]; 3], vector: [f32; 3]) -> [f32; 3] {
+    [
+        matrix[0][0] * vector[0] + matrix[0][1] * vector[1] + matrix[0][2] * vector[2],
+        matrix[1][0] * vector[0] + matrix[1][1] * vector[1] + matrix[1][2] * vector[2],
+        matrix[2][0] * vector[0] + matrix[2][1] * vector[1] + matrix[2][2] * vector[2],
+    ]
+}
+
 impl Default for RobotDreams {
     fn default() -> Self {
         Self::new()
@@ -712,6 +1164,8 @@ impl Default for RobotDreams {
 #[cfg(test)]
 mod robotdreams_tests {
     use std::path::{Path, PathBuf};
+
+    use crate::scene_graph::{Geometry, LightKind, SceneNodeKind, ToneMapping, scene_bounds};
 
     use super::{ModelEntityKind, RobotDreams};
 
@@ -724,6 +1178,29 @@ mod robotdreams_tests {
 
     fn puppyarm_project_path() -> PathBuf {
         project_root().join("examples/puppyarm/project.json")
+    }
+
+    fn puppybot_project_path() -> PathBuf {
+        project_root().join("../PuppyBot/robotdreams/project.json")
+    }
+
+    fn puppyarm_urdf_path() -> PathBuf {
+        project_root().join("examples/puppyarm/model/final/urdf/final.urdf")
+    }
+
+    fn write_temp_project(name: &str, value: serde_json::Value) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("robotdreams-core-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp project dir");
+
+        let path = dir.join("project.json");
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&value).expect("serialize temp project"),
+        )
+        .expect("write temp project");
+        path
     }
 
     fn distance(left: [f64; 3], right: [f64; 3]) -> f64 {
@@ -781,6 +1258,195 @@ mod robotdreams_tests {
             distance(first_tcp, moved_tcp) > 1.0e-6,
             "expected TCP location to change after yaw joint update"
         );
+    }
+
+    #[test]
+    fn project_camera_zero_rotation_uses_robotdreams_optical_axis() {
+        let dreams = RobotDreams::open(puppybot_project_path()).expect("open PuppyBot project");
+        let camera = dreams
+            .camera_spec("overhead_camera")
+            .expect("overhead camera");
+        let rotation = camera
+            .transform
+            .rotation_matrix
+            .expect("project camera should use native optical rotation matrix");
+        let forward = [rotation[0][0], rotation[1][0], rotation[2][0]];
+
+        assert!(
+            forward[2] < -0.99,
+            "zero-rotation RobotDreams project camera should look down local -Z in native renderer, got {forward:?}"
+        );
+        assert!(
+            (camera.transform.translation[2] - 0.65).abs() < 1.0e-6,
+            "overhead camera should keep authored mount height"
+        );
+    }
+
+    #[test]
+    fn builds_scene_graph_from_project_state() {
+        let dreams = RobotDreams::open(puppyarm_project_path()).expect("open PuppyArm project");
+        let scene = dreams.scene_graph();
+
+        assert!(
+            scene
+                .entities
+                .contains_key(&super::EntityId("object:trashbin".to_string()))
+        );
+        assert!(
+            scene
+                .root
+                .children
+                .iter()
+                .any(|node| node.name == "Overhead Camera")
+        );
+        assert!(
+            scene
+                .root
+                .children
+                .iter()
+                .any(|node| node.name == "Trash Bin")
+        );
+        let floor = scene
+            .root
+            .children
+            .iter()
+            .find(|node| node.name == "Floor 5m")
+            .expect("floor scene node");
+        assert!(
+            !floor.include_in_fit,
+            "scene graph should preserve includeInFit:false for camera fitting"
+        );
+        let trashbin = scene
+            .root
+            .children
+            .iter()
+            .find(|node| node.name == "Trash Bin")
+            .expect("trash bin scene node");
+        let SceneNodeKind::Mesh { geometry, .. } = &trashbin.kind else {
+            panic!("trash bin should be a renderable mesh node");
+        };
+        let Geometry::MeshAsset {
+            asset,
+            scale,
+            bounds,
+        } = geometry
+        else {
+            panic!("trash bin should render its mesh asset, not a proxy bound");
+        };
+        assert!(
+            asset.ends_with("trashbin.gltf"),
+            "trash bin asset should resolve to trashbin.gltf, got {asset}"
+        );
+        assert_eq!(*scale, [1.0, 1.0, 1.0]);
+        assert!(
+            bounds.is_some(),
+            "trash bin mesh should carry real asset bounds for native camera fitting"
+        );
+        assert!(
+            scene
+                .entities
+                .values()
+                .filter(|entity| entity.kind == "robotVisual")
+                .count()
+                > 10,
+            "scene graph should include URDF visual mesh nodes, not only a robot proxy"
+        );
+        let (min, max) = scene_bounds(&scene).expect("fit bounds");
+        assert!(
+            max[0] - min[0] < 2.0 && max[2] - min[2] < 2.0,
+            "fit bounds should exclude the 5 m floor, got min {min:?} max {max:?}"
+        );
+    }
+
+    #[test]
+    fn scene_graph_includes_project_render_defaults_lights_and_reflection_probes() {
+        let project_path = write_temp_project(
+            "scene-probes",
+            serde_json::json!({
+                "format": "robotdreams.project.v1",
+                "name": "Scene Probe Project",
+                "robots": [
+                    {
+                        "id": "puppyarm",
+                        "name": "PuppyArm",
+                        "model": {
+                            "type": "urdf",
+                            "path": puppyarm_urdf_path()
+                        }
+                    }
+                ],
+                "scene": {
+                    "renderSettings": {
+                        "backgroundRgb": "#010203",
+                        "environment": {
+                            "map": "assets/studio.hdr",
+                            "intensity": 1.25
+                        },
+                        "toneMapping": "Reinhard"
+                    },
+                    "lights": [
+                        {
+                            "id": "sun",
+                            "name": "Sun",
+                            "kind": "directional",
+                            "direction": [0.0, -1.0, -1.0],
+                            "intensity": 2.0
+                        }
+                    ],
+                    "reflectionProbes": [
+                        {
+                            "map": "assets/studio.hdr",
+                            "rotationDeg": 45.0,
+                            "position": [0.1, 0.2, 0.3],
+                            "influenceRadiusM": 2.0
+                        }
+                    ]
+                }
+            }),
+        );
+        let dreams = RobotDreams::open(&project_path).expect("open temp project");
+        let scene = dreams.scene_graph();
+        let expected_map = project_path
+            .parent()
+            .expect("project dir")
+            .join("assets/studio.hdr")
+            .display()
+            .to_string();
+
+        let settings = scene.render_settings.as_ref().expect("render settings");
+        assert_eq!(settings.background_rgb, [1, 2, 3]);
+        assert_eq!(
+            settings
+                .environment
+                .as_ref()
+                .and_then(|environment| environment.map.as_deref()),
+            Some(expected_map.as_str())
+        );
+        assert_eq!(settings.tone_mapping, ToneMapping::Reinhard);
+
+        assert_eq!(scene.reflection_probes.len(), 1);
+        assert_eq!(scene.reflection_probes[0].map, expected_map);
+        assert_eq!(scene.reflection_probes[0].rotation_deg, 45.0);
+        assert_eq!(scene.reflection_probes[0].position, Some([0.1, 0.2, 0.3]));
+        assert_eq!(scene.reflection_probes[0].influence_radius_m, Some(2.0));
+        assert!(
+            scene
+                .entities
+                .contains_key(&super::EntityId("light:sun".to_string()))
+        );
+        let sun = scene
+            .root
+            .children
+            .iter()
+            .find(|node| node.name == "Sun")
+            .expect("sun light node");
+        let SceneNodeKind::Light(light) = &sun.kind else {
+            panic!("sun should be a light node");
+        };
+        assert_eq!(light.intensity, 2.0);
+        assert!(matches!(light.kind, LightKind::Directional { .. }));
+
+        let _ = std::fs::remove_dir_all(project_path.parent().expect("temp project parent"));
     }
 
     #[test]

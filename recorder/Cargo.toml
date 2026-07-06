@@ -1,0 +1,9 @@
+[package]
+name = "robotdreams-recorder"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+robotdreams-core = { path = "../core" }
+robotdreams-renderer = { path = "../renderer" }
+serde = { version = "1", features = ["derive"] }

@@ -16,7 +16,8 @@ use feetech_servo::servo::protocol::serial_bus::ProtocolError;
 #[cfg(unix)]
 use feetech_servo::servo::protocol::virtual_uart::VirtualUartPort;
 use feetech_servo::servo::sim::{FeetechBusEvent, FeetechBusSim, FeetechServoSnapshot};
-use robotdreams_core::RobotDreams;
+use robotdreams_core::scene_graph::SceneGraph;
+use robotdreams_core::{RobotDreams, RobotDreamsSnapshot};
 
 use crate::hardware_runtime::{HardwareDeviceRuntime, HardwareRuntime, max_servo_count};
 
@@ -116,6 +117,7 @@ struct WorkbenchVirtualBus {
     robotdreams: Option<Arc<Mutex<RobotDreams>>>,
     events: Arc<Mutex<VecDeque<TimedFeetechBusEvent>>>,
     next_event_sequence: Arc<AtomicU64>,
+    last_observation: Option<(SceneGraph, RobotDreamsSnapshot)>,
     stop: Option<Arc<AtomicBool>>,
     join: Option<thread::JoinHandle<()>>,
     path: Option<String>,
@@ -129,6 +131,7 @@ struct WorkbenchVirtualBus {
     robotdreams: Option<Arc<Mutex<RobotDreams>>>,
     events: Arc<Mutex<VecDeque<TimedFeetechBusEvent>>>,
     next_event_sequence: Arc<AtomicU64>,
+    last_observation: Option<(SceneGraph, RobotDreamsSnapshot)>,
     status: String,
     configured: bool,
 }
@@ -141,6 +144,7 @@ impl WorkbenchVirtualBus {
             robotdreams: None,
             events: Arc::new(Mutex::new(VecDeque::new())),
             next_event_sequence: Arc::new(AtomicU64::new(1)),
+            last_observation: None,
             stop: None,
             join: None,
             path: None,
@@ -155,6 +159,7 @@ impl WorkbenchVirtualBus {
             robotdreams: Some(robotdreams),
             events: Arc::new(Mutex::new(VecDeque::new())),
             next_event_sequence: Arc::new(AtomicU64::new(1)),
+            last_observation: None,
             stop: None,
             join: None,
             path: None,
@@ -441,6 +446,7 @@ impl WorkbenchVirtualBus {
             robotdreams: None,
             events: Arc::new(Mutex::new(VecDeque::new())),
             next_event_sequence: Arc::new(AtomicU64::new(1)),
+            last_observation: None,
             status: "Virtual bus devices are only available on Unix".to_string(),
             configured: false,
         }
@@ -669,6 +675,37 @@ impl WorkbenchVirtualBusHandle {
 
     pub(crate) fn robot_base_pose(&self, robot_id: &str) -> Option<([f32; 3], [f32; 3])> {
         self.with_bus(None, |bus| bus.robot_base_pose(robot_id))
+    }
+
+    pub(crate) fn robotdreams_observation_state(
+        &self,
+    ) -> Option<(SceneGraph, RobotDreamsSnapshot)> {
+        let robotdreams = self.with_bus(None, |bus| bus.robotdreams.clone())?;
+        robotdreams
+            .lock()
+            .ok()
+            .map(|dreams| (dreams.scene_graph(), dreams.snapshot()))
+    }
+
+    pub(crate) fn robotdreams_observation_samples(&self) -> Vec<(SceneGraph, RobotDreamsSnapshot)> {
+        self.with_bus(Vec::new(), |bus| {
+            let Some(robotdreams) = bus.robotdreams.clone() else {
+                return Vec::new();
+            };
+            let Ok(dreams) = robotdreams.lock() else {
+                return Vec::new();
+            };
+            let current = (dreams.scene_graph(), dreams.snapshot());
+            let mut samples = Vec::new();
+            if let Some(previous) = bus.last_observation.clone()
+                && previous.1.clock_sec < current.1.clock_sec
+            {
+                samples.push(previous);
+            }
+            samples.push(current.clone());
+            bus.last_observation = Some(current);
+            samples
+        })
     }
 
     pub(crate) fn recent_events(&self) -> Vec<TimedFeetechBusEvent> {

@@ -1,24 +1,25 @@
 use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine;
-use clap::{Args, Parser, Subcommand};
-use futures_util::{SinkExt, StreamExt};
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use clap::{Args, Parser, Subcommand, ValueEnum};
+use robotdreams_core::scene_graph::{
+    AUTO_CAMERA_ID, EnvironmentSettings, ObservationMetadata, ReflectionProbeSettings,
+    RenderSettings, SceneNode, SceneNodeKind, SegmentationPolicy, ShutterMode, ShutterPolicy,
+    ToneMapping, prepare_observation_scene,
+};
+use robotdreams_core::{ObservationRequest, ObservationView, RobotDreams, RobotDreamsSnapshot};
+use robotdreams_recorder::{NativeRecorder, RecordingArtifact, RecordingRequest};
+use robotdreams_renderer::{FrameBuffer, FrameKind, NativeRenderer, RenderOutput};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::{BufRead, ErrorKind, Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::io::{BufRead, Write};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, Stdio};
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio_tungstenite::tungstenite::Message;
 
 const DEFAULT_SOCKET: &str = "/tmp/robotdreams-daemon.sock";
-const DEFAULT_SIMULATION_ID: &str = "default";
 
 #[derive(Debug, Parser)]
 #[command(name = "robotdreams", about = "Robot Dreams CLI")]
@@ -84,8 +85,11 @@ struct RenderFrameArgs {
     #[arg(long, short)]
     out: PathBuf,
 
-    #[arg(long, default_value = "127.0.0.1:8345")]
-    bind: String,
+    #[arg(long)]
+    camera: Option<String>,
+
+    #[arg(long, value_enum, default_value_t = NativeView::DebugRgb)]
+    view: NativeView,
 
     #[arg(long, default_value_t = 1800)]
     width: u32,
@@ -93,11 +97,186 @@ struct RenderFrameArgs {
     #[arg(long, default_value_t = 1000)]
     height: u32,
 
-    #[arg(long, default_value_t = 3500)]
-    wait_ms: u64,
+    #[arg(
+        long,
+        help = "Minimum alpha for segmentation labels; 0 includes transparent hits, 1 labels only opaque hits"
+    )]
+    segmentation_min_alpha: Option<f32>,
 
-    #[arg(long)]
-    chrome: Option<PathBuf>,
+    #[arg(long, help = "Global shutter exposure window in seconds for debug RGB")]
+    shutter_exposure_sec: Option<f32>,
+
+    #[arg(
+        long,
+        help = "Number of debug RGB samples to average across the shutter exposure"
+    )]
+    shutter_samples: Option<u32>,
+
+    #[arg(long, value_enum, help = "Debug RGB shutter scan mode")]
+    shutter_mode: Option<NativeShutterMode>,
+
+    #[arg(
+        long,
+        help = "Rolling shutter top-to-bottom frame readout time in seconds"
+    )]
+    shutter_readout_sec: Option<f32>,
+
+    #[arg(long, help = "Debug RGB background color as r,g,b")]
+    background_rgb: Option<String>,
+
+    #[arg(long, help = "Debug RGB ambient light color as r,g,b")]
+    ambient_rgb: Option<String>,
+
+    #[arg(long, help = "Debug RGB ambient light intensity")]
+    ambient_intensity: Option<f32>,
+
+    #[arg(
+        long,
+        help = "Debug RGB sky color for upward environment rays as r,g,b"
+    )]
+    environment_sky_top_rgb: Option<String>,
+
+    #[arg(long, help = "Debug RGB sky color at the horizon as r,g,b")]
+    environment_sky_horizon_rgb: Option<String>,
+
+    #[arg(
+        long,
+        help = "Debug RGB ground color for downward environment rays as r,g,b"
+    )]
+    environment_ground_rgb: Option<String>,
+
+    #[arg(long, help = "Debug RGB equirectangular environment map image path")]
+    environment_map: Option<String>,
+
+    #[arg(
+        long,
+        help = "Yaw rotation in degrees for the equirectangular environment map"
+    )]
+    environment_map_rotation_deg: Option<f32>,
+
+    #[arg(long, help = "Debug RGB environment ray-miss intensity")]
+    environment_intensity: Option<f32>,
+
+    #[arg(
+        long,
+        help = "Debug RGB environment contribution to ambient surface lighting"
+    )]
+    environment_ambient_intensity: Option<f32>,
+
+    #[arg(
+        long,
+        help = "Debug RGB equirectangular reflection probe image path for material lighting"
+    )]
+    reflection_probe: Option<String>,
+
+    #[arg(long, help = "Yaw rotation in degrees for the reflection probe map")]
+    reflection_probe_rotation_deg: Option<f32>,
+
+    #[arg(long, help = "Debug RGB reflection probe specular intensity")]
+    reflection_probe_intensity: Option<f32>,
+
+    #[arg(
+        long,
+        help = "Debug RGB reflection probe contribution to ambient surface lighting"
+    )]
+    reflection_probe_ambient_intensity: Option<f32>,
+
+    #[arg(long, help = "Reflection probe world position as x,y,z in meters")]
+    reflection_probe_position: Option<String>,
+
+    #[arg(long, help = "Reflection probe box projection size as x,y,z in meters")]
+    reflection_probe_box_size_m: Option<String>,
+
+    #[arg(long, help = "Reflection probe spherical influence radius in meters")]
+    reflection_probe_influence_radius_m: Option<f32>,
+
+    #[arg(long, help = "Reflection probe distance falloff exponent")]
+    reflection_probe_falloff_power: Option<f32>,
+
+    #[arg(long, help = "Debug RGB white-balance channel multipliers as r,g,b")]
+    white_balance_rgb: Option<String>,
+
+    #[arg(long, help = "Debug RGB white-balance color temperature in Kelvin")]
+    color_temperature_kelvin: Option<f32>,
+
+    #[arg(long, value_enum, help = "Debug RGB tone mapping curve")]
+    tone_mapping: Option<NativeToneMapping>,
+
+    #[arg(long, help = "Debug RGB tone mapper exposure multiplier")]
+    tone_exposure: Option<f32>,
+
+    #[arg(long, help = "Debug RGB deterministic subpixel samples per pixel")]
+    debug_rgb_samples_per_pixel: Option<u32>,
+
+    #[arg(long, help = "Debug RGB geometry ambient-occlusion sample count")]
+    ambient_occlusion_samples: Option<u32>,
+
+    #[arg(long, help = "Debug RGB geometry ambient-occlusion radius in meters")]
+    ambient_occlusion_radius_m: Option<f32>,
+
+    #[arg(
+        long,
+        help = "Debug RGB geometry ambient-occlusion strength multiplier"
+    )]
+    ambient_occlusion_intensity: Option<f32>,
+
+    #[arg(long, help = "Debug RGB indirect diffuse sample count")]
+    indirect_diffuse_samples: Option<u32>,
+
+    #[arg(long, help = "Debug RGB indirect diffuse radius in meters")]
+    indirect_diffuse_radius_m: Option<f32>,
+
+    #[arg(long, help = "Debug RGB indirect diffuse strength multiplier")]
+    indirect_diffuse_intensity: Option<f32>,
+
+    #[arg(long, help = "Debug RGB bounded indirect diffuse bounce count")]
+    indirect_diffuse_bounces: Option<u32>,
+
+    #[arg(long, help = "Debug RGB finite-light soft-shadow sample count")]
+    soft_shadow_samples: Option<u32>,
+
+    #[arg(long, help = "Debug RGB finite-light soft-shadow radius in meters")]
+    soft_shadow_radius_m: Option<f32>,
+
+    #[arg(long, help = "Debug RGB emissive triangle area-light sample count")]
+    area_light_samples: Option<u32>,
+
+    #[arg(long, help = "Debug RGB rough transmission sample count")]
+    rough_transmission_samples: Option<u32>,
+
+    #[arg(long, help = "Debug RGB rough scene-reflection sample count")]
+    rough_reflection_samples: Option<u32>,
+
+    #[arg(long, help = "Debug RGB bounded specular reflection bounce count")]
+    specular_reflection_bounces: Option<u32>,
+
+    #[arg(long, help = "Selected KHR_materials_variants material variant name")]
+    gltf_material_variant: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum NativeView {
+    DebugRgb,
+    Depth,
+    Segmentation,
+    Normal,
+    Albedo,
+    MaterialProperties,
+    WorldPosition,
+    State,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum NativeToneMapping {
+    Linear,
+    Reinhard,
+    Aces,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum NativeShutterMode {
+    Global,
+    RollingTopToBottom,
 }
 
 #[derive(Debug, Args)]
@@ -174,6 +353,7 @@ enum SimulationCommand {
     Stop(SimulationArgs),
     Reset(SimulationArgs),
     State(SimulationStateArgs),
+    RenderFrame(SimulationRenderFrameArgs),
     Record(SimulationRecordArgs),
 }
 
@@ -321,6 +501,189 @@ struct SimulationStateArgs {
 }
 
 #[derive(Debug, Args)]
+struct SimulationRenderFrameArgs {
+    #[arg(long)]
+    project: Option<String>,
+
+    #[arg(long)]
+    simulation: Option<String>,
+
+    #[arg(long, short)]
+    out: PathBuf,
+
+    #[arg(long)]
+    camera: Option<String>,
+
+    #[arg(long, value_enum, default_value_t = NativeView::DebugRgb)]
+    view: NativeView,
+
+    #[arg(long, default_value_t = 640)]
+    width: u32,
+
+    #[arg(long, default_value_t = 480)]
+    height: u32,
+
+    #[arg(long)]
+    json: bool,
+
+    #[arg(
+        long,
+        help = "Minimum alpha for segmentation labels; 0 includes transparent hits, 1 labels only opaque hits"
+    )]
+    segmentation_min_alpha: Option<f32>,
+
+    #[arg(long, help = "Global shutter exposure window in seconds for debug RGB")]
+    shutter_exposure_sec: Option<f32>,
+
+    #[arg(
+        long,
+        help = "Number of debug RGB samples to average across the shutter exposure"
+    )]
+    shutter_samples: Option<u32>,
+
+    #[arg(long, value_enum, help = "Debug RGB shutter scan mode")]
+    shutter_mode: Option<NativeShutterMode>,
+
+    #[arg(
+        long,
+        help = "Rolling shutter top-to-bottom frame readout time in seconds"
+    )]
+    shutter_readout_sec: Option<f32>,
+
+    #[arg(long, help = "Debug RGB background color as r,g,b")]
+    background_rgb: Option<String>,
+
+    #[arg(long, help = "Debug RGB ambient light color as r,g,b")]
+    ambient_rgb: Option<String>,
+
+    #[arg(long, help = "Debug RGB ambient light intensity")]
+    ambient_intensity: Option<f32>,
+
+    #[arg(
+        long,
+        help = "Debug RGB sky color for upward environment rays as r,g,b"
+    )]
+    environment_sky_top_rgb: Option<String>,
+
+    #[arg(long, help = "Debug RGB sky color at the horizon as r,g,b")]
+    environment_sky_horizon_rgb: Option<String>,
+
+    #[arg(
+        long,
+        help = "Debug RGB ground color for downward environment rays as r,g,b"
+    )]
+    environment_ground_rgb: Option<String>,
+
+    #[arg(long, help = "Debug RGB equirectangular environment map image path")]
+    environment_map: Option<String>,
+
+    #[arg(
+        long,
+        help = "Yaw rotation in degrees for the equirectangular environment map"
+    )]
+    environment_map_rotation_deg: Option<f32>,
+
+    #[arg(long, help = "Debug RGB environment ray-miss intensity")]
+    environment_intensity: Option<f32>,
+
+    #[arg(
+        long,
+        help = "Debug RGB environment contribution to ambient surface lighting"
+    )]
+    environment_ambient_intensity: Option<f32>,
+
+    #[arg(
+        long,
+        help = "Debug RGB equirectangular reflection probe image path for material lighting"
+    )]
+    reflection_probe: Option<String>,
+
+    #[arg(long, help = "Yaw rotation in degrees for the reflection probe map")]
+    reflection_probe_rotation_deg: Option<f32>,
+
+    #[arg(long, help = "Debug RGB reflection probe specular intensity")]
+    reflection_probe_intensity: Option<f32>,
+
+    #[arg(
+        long,
+        help = "Debug RGB reflection probe contribution to ambient surface lighting"
+    )]
+    reflection_probe_ambient_intensity: Option<f32>,
+
+    #[arg(long, help = "Reflection probe world position as x,y,z in meters")]
+    reflection_probe_position: Option<String>,
+
+    #[arg(long, help = "Reflection probe box projection size as x,y,z in meters")]
+    reflection_probe_box_size_m: Option<String>,
+
+    #[arg(long, help = "Reflection probe spherical influence radius in meters")]
+    reflection_probe_influence_radius_m: Option<f32>,
+
+    #[arg(long, help = "Reflection probe distance falloff exponent")]
+    reflection_probe_falloff_power: Option<f32>,
+
+    #[arg(long, help = "Debug RGB white-balance channel multipliers as r,g,b")]
+    white_balance_rgb: Option<String>,
+
+    #[arg(long, help = "Debug RGB white-balance color temperature in Kelvin")]
+    color_temperature_kelvin: Option<f32>,
+
+    #[arg(long, value_enum, help = "Debug RGB tone mapping curve")]
+    tone_mapping: Option<NativeToneMapping>,
+
+    #[arg(long, help = "Debug RGB tone mapper exposure multiplier")]
+    tone_exposure: Option<f32>,
+
+    #[arg(long, help = "Debug RGB deterministic subpixel samples per pixel")]
+    debug_rgb_samples_per_pixel: Option<u32>,
+
+    #[arg(long, help = "Debug RGB geometry ambient-occlusion sample count")]
+    ambient_occlusion_samples: Option<u32>,
+
+    #[arg(long, help = "Debug RGB geometry ambient-occlusion radius in meters")]
+    ambient_occlusion_radius_m: Option<f32>,
+
+    #[arg(
+        long,
+        help = "Debug RGB geometry ambient-occlusion strength multiplier"
+    )]
+    ambient_occlusion_intensity: Option<f32>,
+
+    #[arg(long, help = "Debug RGB indirect diffuse sample count")]
+    indirect_diffuse_samples: Option<u32>,
+
+    #[arg(long, help = "Debug RGB indirect diffuse radius in meters")]
+    indirect_diffuse_radius_m: Option<f32>,
+
+    #[arg(long, help = "Debug RGB indirect diffuse strength multiplier")]
+    indirect_diffuse_intensity: Option<f32>,
+
+    #[arg(long, help = "Debug RGB bounded indirect diffuse bounce count")]
+    indirect_diffuse_bounces: Option<u32>,
+
+    #[arg(long, help = "Debug RGB finite-light soft-shadow sample count")]
+    soft_shadow_samples: Option<u32>,
+
+    #[arg(long, help = "Debug RGB finite-light soft-shadow radius in meters")]
+    soft_shadow_radius_m: Option<f32>,
+
+    #[arg(long, help = "Debug RGB emissive triangle area-light sample count")]
+    area_light_samples: Option<u32>,
+
+    #[arg(long, help = "Debug RGB rough transmission sample count")]
+    rough_transmission_samples: Option<u32>,
+
+    #[arg(long, help = "Debug RGB rough scene-reflection sample count")]
+    rough_reflection_samples: Option<u32>,
+
+    #[arg(long, help = "Debug RGB bounded specular reflection bounce count")]
+    specular_reflection_bounces: Option<u32>,
+
+    #[arg(long, help = "Selected KHR_materials_variants material variant name")]
+    gltf_material_variant: Option<String>,
+}
+
+#[derive(Debug, Args)]
 struct SimulationRecordArgs {
     #[arg(long)]
     project: Option<String>,
@@ -332,7 +695,16 @@ struct SimulationRecordArgs {
     out: Option<PathBuf>,
 
     #[arg(long)]
+    live: bool,
+
+    #[arg(long)]
     trace_only: bool,
+
+    #[arg(long)]
+    camera: Option<String>,
+
+    #[arg(long, value_enum, default_value_t = NativeView::DebugRgb)]
+    view: NativeView,
 
     #[arg(long, default_value_t = 10.0)]
     seconds: f32,
@@ -346,11 +718,164 @@ struct SimulationRecordArgs {
     #[arg(long, default_value_t = 720)]
     height: u32,
 
+    #[arg(
+        long,
+        help = "Minimum alpha for segmentation labels; 0 includes transparent hits, 1 labels only opaque hits"
+    )]
+    segmentation_min_alpha: Option<f32>,
+
+    #[arg(long, help = "Global shutter exposure window in seconds for debug RGB")]
+    shutter_exposure_sec: Option<f32>,
+
+    #[arg(
+        long,
+        help = "Number of debug RGB samples to average across the shutter exposure"
+    )]
+    shutter_samples: Option<u32>,
+
+    #[arg(long, value_enum, help = "Debug RGB shutter scan mode")]
+    shutter_mode: Option<NativeShutterMode>,
+
+    #[arg(
+        long,
+        help = "Rolling shutter top-to-bottom frame readout time in seconds"
+    )]
+    shutter_readout_sec: Option<f32>,
+
+    #[arg(long, help = "Debug RGB background color as r,g,b")]
+    background_rgb: Option<String>,
+
+    #[arg(long, help = "Debug RGB ambient light color as r,g,b")]
+    ambient_rgb: Option<String>,
+
+    #[arg(long, help = "Debug RGB ambient light intensity")]
+    ambient_intensity: Option<f32>,
+
+    #[arg(
+        long,
+        help = "Debug RGB sky color for upward environment rays as r,g,b"
+    )]
+    environment_sky_top_rgb: Option<String>,
+
+    #[arg(long, help = "Debug RGB sky color at the horizon as r,g,b")]
+    environment_sky_horizon_rgb: Option<String>,
+
+    #[arg(
+        long,
+        help = "Debug RGB ground color for downward environment rays as r,g,b"
+    )]
+    environment_ground_rgb: Option<String>,
+
+    #[arg(long, help = "Debug RGB equirectangular environment map image path")]
+    environment_map: Option<String>,
+
+    #[arg(
+        long,
+        help = "Yaw rotation in degrees for the equirectangular environment map"
+    )]
+    environment_map_rotation_deg: Option<f32>,
+
+    #[arg(long, help = "Debug RGB environment ray-miss intensity")]
+    environment_intensity: Option<f32>,
+
+    #[arg(
+        long,
+        help = "Debug RGB environment contribution to ambient surface lighting"
+    )]
+    environment_ambient_intensity: Option<f32>,
+
+    #[arg(
+        long,
+        help = "Debug RGB equirectangular reflection probe image path for material lighting"
+    )]
+    reflection_probe: Option<String>,
+
+    #[arg(long, help = "Yaw rotation in degrees for the reflection probe map")]
+    reflection_probe_rotation_deg: Option<f32>,
+
+    #[arg(long, help = "Debug RGB reflection probe specular intensity")]
+    reflection_probe_intensity: Option<f32>,
+
+    #[arg(
+        long,
+        help = "Debug RGB reflection probe contribution to ambient surface lighting"
+    )]
+    reflection_probe_ambient_intensity: Option<f32>,
+
+    #[arg(long, help = "Reflection probe world position as x,y,z in meters")]
+    reflection_probe_position: Option<String>,
+
+    #[arg(long, help = "Reflection probe box projection size as x,y,z in meters")]
+    reflection_probe_box_size_m: Option<String>,
+
+    #[arg(long, help = "Reflection probe spherical influence radius in meters")]
+    reflection_probe_influence_radius_m: Option<f32>,
+
+    #[arg(long, help = "Reflection probe distance falloff exponent")]
+    reflection_probe_falloff_power: Option<f32>,
+
+    #[arg(long, help = "Debug RGB white-balance channel multipliers as r,g,b")]
+    white_balance_rgb: Option<String>,
+
+    #[arg(long, help = "Debug RGB white-balance color temperature in Kelvin")]
+    color_temperature_kelvin: Option<f32>,
+
+    #[arg(long, value_enum, help = "Debug RGB tone mapping curve")]
+    tone_mapping: Option<NativeToneMapping>,
+
+    #[arg(long, help = "Debug RGB tone mapper exposure multiplier")]
+    tone_exposure: Option<f32>,
+
+    #[arg(long, help = "Debug RGB deterministic subpixel samples per pixel")]
+    debug_rgb_samples_per_pixel: Option<u32>,
+
+    #[arg(long, help = "Debug RGB geometry ambient-occlusion sample count")]
+    ambient_occlusion_samples: Option<u32>,
+
+    #[arg(long, help = "Debug RGB geometry ambient-occlusion radius in meters")]
+    ambient_occlusion_radius_m: Option<f32>,
+
+    #[arg(
+        long,
+        help = "Debug RGB geometry ambient-occlusion strength multiplier"
+    )]
+    ambient_occlusion_intensity: Option<f32>,
+
+    #[arg(long, help = "Debug RGB indirect diffuse sample count")]
+    indirect_diffuse_samples: Option<u32>,
+
+    #[arg(long, help = "Debug RGB indirect diffuse radius in meters")]
+    indirect_diffuse_radius_m: Option<f32>,
+
+    #[arg(long, help = "Debug RGB indirect diffuse strength multiplier")]
+    indirect_diffuse_intensity: Option<f32>,
+
+    #[arg(long, help = "Debug RGB bounded indirect diffuse bounce count")]
+    indirect_diffuse_bounces: Option<u32>,
+
+    #[arg(long, help = "Debug RGB finite-light soft-shadow sample count")]
+    soft_shadow_samples: Option<u32>,
+
+    #[arg(long, help = "Debug RGB finite-light soft-shadow radius in meters")]
+    soft_shadow_radius_m: Option<f32>,
+
+    #[arg(long, help = "Debug RGB emissive triangle area-light sample count")]
+    area_light_samples: Option<u32>,
+
+    #[arg(long, help = "Debug RGB rough transmission sample count")]
+    rough_transmission_samples: Option<u32>,
+
+    #[arg(long, help = "Debug RGB rough scene-reflection sample count")]
+    rough_reflection_samples: Option<u32>,
+
+    #[arg(long, help = "Debug RGB bounded specular reflection bounce count")]
+    specular_reflection_bounces: Option<u32>,
+
+    #[arg(long, help = "Selected KHR_materials_variants material variant name")]
+    gltf_material_variant: Option<String>,
+
     #[arg(long, default_value_t = 3500)]
     wait_ms: u64,
-
-    #[arg(long)]
-    chrome: Option<PathBuf>,
 
     #[arg(long)]
     keep_frames: Option<PathBuf>,
@@ -363,12 +888,6 @@ struct SimulationRecordArgs {
 
     #[arg(long, default_value_t = 20.0)]
     trace_hz: f32,
-
-    #[arg(
-        long,
-        help = "Write this file when the 3D scene is loaded and video frame capture is about to start."
-    )]
-    ready_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -440,6 +959,17 @@ enum DaemonRequest {
         project: Option<String>,
         simulation: Option<String>,
         action: String,
+    },
+    RenderFrame {
+        project: Option<String>,
+        simulation: Option<String>,
+        camera: Option<String>,
+        views: Option<Vec<ObservationView>>,
+        width: Option<u32>,
+        height: Option<u32>,
+        segmentation_policy: Option<SegmentationPolicy>,
+        shutter_policy: Option<ShutterPolicy>,
+        render_settings: Option<RenderSettings>,
     },
     BusStart,
     BusStop,
@@ -643,7 +1173,53 @@ async fn open_project(socket: &Path, path: &Path, bind: &str) -> Result<DaemonRe
 
 #[cfg(test)]
 mod tests {
+    use robotdreams_core::scene_graph::{
+        EntityId, EntityMetadata, Geometry, SceneGraph, Transform, add_auto_camera,
+    };
+
     use super::*;
+
+    fn empty_render_setting_args() -> RenderSettingArgs {
+        RenderSettingArgs {
+            background_rgb: None,
+            ambient_rgb: None,
+            ambient_intensity: None,
+            environment_sky_top_rgb: None,
+            environment_sky_horizon_rgb: None,
+            environment_ground_rgb: None,
+            environment_map: None,
+            environment_map_rotation_deg: None,
+            environment_intensity: None,
+            environment_ambient_intensity: None,
+            reflection_probe: None,
+            reflection_probe_rotation_deg: None,
+            reflection_probe_intensity: None,
+            reflection_probe_ambient_intensity: None,
+            reflection_probe_position: None,
+            reflection_probe_box_size_m: None,
+            reflection_probe_influence_radius_m: None,
+            reflection_probe_falloff_power: None,
+            white_balance_rgb: None,
+            color_temperature_kelvin: None,
+            tone_mapping: None,
+            tone_exposure: None,
+            debug_rgb_samples_per_pixel: None,
+            ambient_occlusion_samples: None,
+            ambient_occlusion_radius_m: None,
+            ambient_occlusion_intensity: None,
+            indirect_diffuse_samples: None,
+            indirect_diffuse_radius_m: None,
+            indirect_diffuse_intensity: None,
+            indirect_diffuse_bounces: None,
+            soft_shadow_samples: None,
+            soft_shadow_radius_m: None,
+            area_light_samples: None,
+            rough_transmission_samples: None,
+            rough_reflection_samples: None,
+            specular_reflection_bounces: None,
+            gltf_material_variant: None,
+        }
+    }
 
     #[test]
     fn inspect_recording_summarizes_samples_commands_and_transform_changes() {
@@ -809,6 +1385,487 @@ mod tests {
             PathBuf::from("scenarios/place_ball_to_bin.robotdreams.json")
         );
         assert!(args.json);
+    }
+
+    #[test]
+    fn cli_parses_native_render_frame_views() {
+        let cli = Cli::try_parse_from([
+            "robotdreams",
+            "render-frame",
+            "examples/puppyarm/project.json",
+            "--out",
+            "frame.bin",
+            "--camera",
+            "overhead_camera",
+            "--view",
+            "depth",
+            "--width",
+            "8",
+            "--height",
+            "6",
+            "--segmentation-min-alpha",
+            "1.0",
+            "--shutter-exposure-sec",
+            "0.02",
+            "--shutter-samples",
+            "3",
+            "--shutter-mode",
+            "rolling-top-to-bottom",
+            "--shutter-readout-sec",
+            "0.04",
+            "--background-rgb",
+            "1,2,3",
+            "--ambient-rgb",
+            "4,5,6",
+            "--ambient-intensity",
+            "0.7",
+            "--environment-sky-top-rgb",
+            "20,30,40",
+            "--environment-sky-horizon-rgb",
+            "50,60,70",
+            "--environment-ground-rgb",
+            "80,90,100",
+            "--environment-map",
+            "sky.hdr",
+            "--environment-map-rotation-deg",
+            "45",
+            "--environment-intensity",
+            "1.25",
+            "--environment-ambient-intensity",
+            "0.4",
+            "--reflection-probe",
+            "probe.hdr",
+            "--reflection-probe-rotation-deg",
+            "90",
+            "--reflection-probe-intensity",
+            "0.75",
+            "--reflection-probe-ambient-intensity",
+            "0.2",
+            "--reflection-probe-position",
+            "1.0,2.0,3.0",
+            "--reflection-probe-box-size-m",
+            "4.0,5.0,6.0",
+            "--reflection-probe-influence-radius-m",
+            "7.0",
+            "--reflection-probe-falloff-power",
+            "2.0",
+            "--white-balance-rgb",
+            "1.1,0.9,0.8",
+            "--color-temperature-kelvin",
+            "4500",
+            "--tone-mapping",
+            "reinhard",
+            "--tone-exposure",
+            "1.5",
+            "--debug-rgb-samples-per-pixel",
+            "4",
+            "--ambient-occlusion-samples",
+            "16",
+            "--ambient-occlusion-radius-m",
+            "0.6",
+            "--ambient-occlusion-intensity",
+            "0.75",
+            "--indirect-diffuse-samples",
+            "12",
+            "--indirect-diffuse-radius-m",
+            "0.9",
+            "--indirect-diffuse-intensity",
+            "0.5",
+            "--indirect-diffuse-bounces",
+            "3",
+            "--soft-shadow-samples",
+            "8",
+            "--soft-shadow-radius-m",
+            "0.12",
+            "--area-light-samples",
+            "9",
+            "--rough-transmission-samples",
+            "13",
+            "--rough-reflection-samples",
+            "15",
+            "--specular-reflection-bounces",
+            "3",
+            "--gltf-material-variant",
+            "dirty",
+        ])
+        .expect("parse render-frame");
+
+        let Command::RenderFrame(args) = cli.command else {
+            panic!("expected render-frame command");
+        };
+        assert_eq!(args.camera.as_deref(), Some("overhead_camera"));
+        assert_eq!(args.view, NativeView::Depth);
+        assert_eq!(args.width, 8);
+        assert_eq!(args.height, 6);
+        assert_eq!(args.segmentation_min_alpha, Some(1.0));
+        assert_eq!(args.shutter_exposure_sec, Some(0.02));
+        assert_eq!(args.shutter_samples, Some(3));
+        assert_eq!(
+            args.shutter_mode,
+            Some(NativeShutterMode::RollingTopToBottom)
+        );
+        assert_eq!(args.shutter_readout_sec, Some(0.04));
+        assert_eq!(args.background_rgb.as_deref(), Some("1,2,3"));
+        assert_eq!(args.ambient_rgb.as_deref(), Some("4,5,6"));
+        assert_eq!(args.ambient_intensity, Some(0.7));
+        assert_eq!(args.environment_sky_top_rgb.as_deref(), Some("20,30,40"));
+        assert_eq!(
+            args.environment_sky_horizon_rgb.as_deref(),
+            Some("50,60,70")
+        );
+        assert_eq!(args.environment_ground_rgb.as_deref(), Some("80,90,100"));
+        assert_eq!(args.environment_map.as_deref(), Some("sky.hdr"));
+        assert_eq!(args.environment_map_rotation_deg, Some(45.0));
+        assert_eq!(args.environment_intensity, Some(1.25));
+        assert_eq!(args.environment_ambient_intensity, Some(0.4));
+        assert_eq!(args.reflection_probe.as_deref(), Some("probe.hdr"));
+        assert_eq!(args.reflection_probe_rotation_deg, Some(90.0));
+        assert_eq!(args.reflection_probe_intensity, Some(0.75));
+        assert_eq!(args.reflection_probe_ambient_intensity, Some(0.2));
+        assert_eq!(
+            args.reflection_probe_position.as_deref(),
+            Some("1.0,2.0,3.0")
+        );
+        assert_eq!(
+            args.reflection_probe_box_size_m.as_deref(),
+            Some("4.0,5.0,6.0")
+        );
+        assert_eq!(args.reflection_probe_influence_radius_m, Some(7.0));
+        assert_eq!(args.reflection_probe_falloff_power, Some(2.0));
+        assert_eq!(args.white_balance_rgb.as_deref(), Some("1.1,0.9,0.8"));
+        assert_eq!(args.color_temperature_kelvin, Some(4500.0));
+        assert_eq!(args.tone_mapping, Some(NativeToneMapping::Reinhard));
+        assert_eq!(args.tone_exposure, Some(1.5));
+        assert_eq!(args.debug_rgb_samples_per_pixel, Some(4));
+        assert_eq!(args.ambient_occlusion_samples, Some(16));
+        assert_eq!(args.ambient_occlusion_radius_m, Some(0.6));
+        assert_eq!(args.ambient_occlusion_intensity, Some(0.75));
+        assert_eq!(args.indirect_diffuse_samples, Some(12));
+        assert_eq!(args.indirect_diffuse_radius_m, Some(0.9));
+        assert_eq!(args.indirect_diffuse_intensity, Some(0.5));
+        assert_eq!(args.indirect_diffuse_bounces, Some(3));
+        assert_eq!(args.soft_shadow_samples, Some(8));
+        assert_eq!(args.soft_shadow_radius_m, Some(0.12));
+        assert_eq!(args.area_light_samples, Some(9));
+        assert_eq!(args.rough_transmission_samples, Some(13));
+        assert_eq!(args.rough_reflection_samples, Some(15));
+        assert_eq!(args.specular_reflection_bounces, Some(3));
+        assert_eq!(args.gltf_material_variant.as_deref(), Some("dirty"));
+    }
+
+    #[test]
+    fn cli_parses_native_render_frame_auto_camera() {
+        let cli = Cli::try_parse_from([
+            "robotdreams",
+            "render-frame",
+            "examples/puppyarm/project.json",
+            "--out",
+            "frame.png",
+            "--camera",
+            "auto",
+        ])
+        .expect("parse render-frame auto camera");
+
+        let Command::RenderFrame(args) = cli.command else {
+            panic!("expected render-frame command");
+        };
+        assert_eq!(args.camera.as_deref(), Some("auto"));
+    }
+
+    #[test]
+    fn cli_maps_inspection_png_views_to_native_renderer_request() {
+        for (view, observation, frame, wire_name) in [
+            (
+                NativeView::Normal,
+                ObservationView::Normal,
+                FrameKind::Normal,
+                "normal",
+            ),
+            (
+                NativeView::Albedo,
+                ObservationView::Albedo,
+                FrameKind::Albedo,
+                "albedo",
+            ),
+            (
+                NativeView::MaterialProperties,
+                ObservationView::MaterialProperties,
+                FrameKind::MaterialProperties,
+                "materialProperties",
+            ),
+        ] {
+            assert_eq!(observation_view(view), observation);
+            assert_eq!(frame_kind(view), Some(frame));
+            assert_eq!(frame_kind_wire_name(view).expect("wire name"), wire_name);
+            assert_eq!(frame_file_name(7, view), "frame-00007.png");
+        }
+    }
+
+    #[test]
+    fn cli_maps_world_position_to_binary_native_renderer_request() {
+        let view = NativeView::WorldPosition;
+
+        assert_eq!(observation_view(view), ObservationView::WorldPosition);
+        assert_eq!(frame_kind(view), Some(FrameKind::WorldPosition));
+        assert_eq!(
+            frame_kind_wire_name(view).expect("wire name"),
+            "worldPosition"
+        );
+        assert_eq!(frame_file_name(7, view), "frame-00007.bin");
+    }
+
+    #[test]
+    fn cli_render_setting_overrides_inherit_project_base_settings() {
+        let mut args = empty_render_setting_args();
+        args.rough_reflection_samples = Some(8);
+        args.environment_intensity = Some(1.5);
+        let base = RenderSettings {
+            soft_shadow_samples: 12,
+            environment: Some(EnvironmentSettings {
+                sky_top_rgb: [10, 20, 30],
+                sky_horizon_rgb: [40, 50, 60],
+                ground_rgb: [70, 80, 90],
+                map: Some("studio.hdr".to_string()),
+                map_rotation_deg: 15.0,
+                intensity: 1.0,
+                ambient_intensity: 0.42,
+            }),
+            ..RenderSettings::default()
+        };
+
+        let settings = render_settings_with_base(args, Some(base)).expect("settings");
+        let settings = settings.expect("overrides should produce render settings");
+
+        assert_eq!(settings.rough_reflection_samples, 8);
+        assert_eq!(settings.soft_shadow_samples, 12);
+        let environment = settings.environment.expect("environment");
+        assert_eq!(environment.sky_top_rgb, [10, 20, 30]);
+        assert_eq!(environment.map.as_deref(), Some("studio.hdr"));
+        assert_eq!(environment.map_rotation_deg, 15.0);
+        assert_eq!(environment.intensity, 1.5);
+        assert_eq!(environment.ambient_intensity, 0.42);
+    }
+
+    #[test]
+    fn add_auto_camera_inserts_renderable_camera_node() {
+        let mut scene = SceneGraph::empty();
+        scene.add_entity(EntityMetadata {
+            id: EntityId("box".to_string()),
+            name: "Box".to_string(),
+            kind: "object".to_string(),
+            robot_id: None,
+            link_name: None,
+        });
+        scene.root.children.push(SceneNode::mesh(
+            "box",
+            "Box",
+            Geometry::Box {
+                size: [1.0, 1.0, 1.0],
+            },
+            robotdreams_core::scene_graph::Material::default(),
+            Transform::default(),
+        ));
+
+        add_auto_camera(&mut scene, [320, 240]);
+
+        assert!(
+            scene
+                .entities
+                .contains_key(&EntityId(format!("camera:{AUTO_CAMERA_ID}")))
+        );
+        assert!(
+            camera_id_from_scene(&scene.root).as_deref() == Some(AUTO_CAMERA_ID),
+            "auto camera should be discoverable in scene graph"
+        );
+    }
+
+    #[test]
+    fn cli_parses_native_recording_options() {
+        let cli = Cli::try_parse_from([
+            "robotdreams",
+            "simulation",
+            "record",
+            "--out",
+            "recording.mp4",
+            "--camera",
+            "overhead_camera",
+            "--view",
+            "debug-rgb",
+            "--seconds",
+            "1",
+            "--fps",
+            "2",
+        ])
+        .expect("parse simulation record");
+
+        let Command::Simulation(SimulationCommand::Record(args)) = cli.command else {
+            panic!("expected simulation record command");
+        };
+        assert_eq!(args.out.as_deref(), Some(Path::new("recording.mp4")));
+        assert_eq!(args.camera.as_deref(), Some("overhead_camera"));
+        assert_eq!(args.view, NativeView::DebugRgb);
+        assert_eq!(args.fps, 2);
+    }
+
+    #[test]
+    fn cli_parses_live_native_recording_options() {
+        let cli = Cli::try_parse_from([
+            "robotdreams",
+            "simulation",
+            "record",
+            "--live",
+            "--project",
+            "puppyarm",
+            "--simulation",
+            "sim-a",
+            "--keep-frames",
+            "frames",
+            "--trace-out",
+            "trace.jsonl",
+            "--camera",
+            "auto",
+            "--seconds",
+            "0.1",
+            "--fps",
+            "2",
+        ])
+        .expect("parse live simulation record");
+
+        let Command::Simulation(SimulationCommand::Record(args)) = cli.command else {
+            panic!("expected simulation record command");
+        };
+        assert!(args.live);
+        assert_eq!(args.project.as_deref(), Some("puppyarm"));
+        assert_eq!(args.simulation.as_deref(), Some("sim-a"));
+        assert_eq!(args.keep_frames.as_deref(), Some(Path::new("frames")));
+        assert_eq!(args.trace_out.as_deref(), Some(Path::new("trace.jsonl")));
+    }
+
+    #[test]
+    fn cli_parses_daemon_simulation_render_frame_options() {
+        let cli = Cli::try_parse_from([
+            "robotdreams",
+            "simulation",
+            "render-frame",
+            "--project",
+            "puppyarm",
+            "--simulation",
+            "sim-a",
+            "--out",
+            "live.png",
+            "--camera",
+            "auto",
+            "--view",
+            "debug-rgb",
+            "--width",
+            "64",
+            "--height",
+            "48",
+            "--segmentation-min-alpha",
+            "0.5",
+            "--shutter-exposure-sec",
+            "0.03",
+            "--shutter-samples",
+            "4",
+            "--shutter-mode",
+            "rolling-top-to-bottom",
+            "--shutter-readout-sec",
+            "0.05",
+            "--background-rgb",
+            "7,8,9",
+            "--ambient-rgb",
+            "10,11,12",
+            "--ambient-intensity",
+            "0.25",
+            "--environment-sky-top-rgb",
+            "14,24,34",
+            "--environment-map",
+            "studio.png",
+            "--environment-intensity",
+            "0.8",
+            "--reflection-probe",
+            "studio-probe.png",
+            "--reflection-probe-intensity",
+            "1.4",
+            "--reflection-probe-position",
+            "0.0,0.0,1.0",
+            "--reflection-probe-box-size-m",
+            "3.0,3.0,2.0",
+            "--white-balance-rgb",
+            "0.8,1.0,1.2",
+            "--color-temperature-kelvin",
+            "7200",
+            "--tone-mapping",
+            "aces",
+            "--tone-exposure",
+            "0.9",
+        ])
+        .expect("parse simulation render-frame");
+
+        let Command::Simulation(SimulationCommand::RenderFrame(args)) = cli.command else {
+            panic!("expected simulation render-frame command");
+        };
+        assert_eq!(args.project.as_deref(), Some("puppyarm"));
+        assert_eq!(args.simulation.as_deref(), Some("sim-a"));
+        assert_eq!(args.camera.as_deref(), Some("auto"));
+        assert_eq!(args.width, 64);
+        assert_eq!(args.height, 48);
+        assert_eq!(args.segmentation_min_alpha, Some(0.5));
+        assert_eq!(args.shutter_exposure_sec, Some(0.03));
+        assert_eq!(args.shutter_samples, Some(4));
+        assert_eq!(
+            args.shutter_mode,
+            Some(NativeShutterMode::RollingTopToBottom)
+        );
+        assert_eq!(args.shutter_readout_sec, Some(0.05));
+        assert_eq!(args.background_rgb.as_deref(), Some("7,8,9"));
+        assert_eq!(args.ambient_rgb.as_deref(), Some("10,11,12"));
+        assert_eq!(args.ambient_intensity, Some(0.25));
+        assert_eq!(args.environment_sky_top_rgb.as_deref(), Some("14,24,34"));
+        assert_eq!(args.environment_map.as_deref(), Some("studio.png"));
+        assert_eq!(args.environment_intensity, Some(0.8));
+        assert_eq!(args.reflection_probe.as_deref(), Some("studio-probe.png"));
+        assert_eq!(args.reflection_probe_intensity, Some(1.4));
+        assert_eq!(
+            args.reflection_probe_position.as_deref(),
+            Some("0.0,0.0,1.0")
+        );
+        assert_eq!(
+            args.reflection_probe_box_size_m.as_deref(),
+            Some("3.0,3.0,2.0")
+        );
+        assert_eq!(args.white_balance_rgb.as_deref(), Some("0.8,1.0,1.2"));
+        assert_eq!(args.color_temperature_kelvin, Some(7200.0));
+        assert_eq!(args.tone_mapping, Some(NativeToneMapping::Aces));
+        assert_eq!(args.tone_exposure, Some(0.9));
+    }
+
+    #[test]
+    fn daemon_trace_sample_data_omits_inline_frame_bytes() {
+        let data = serde_json::json!({
+            "metadata": {"timestamp_sec": 1.0},
+            "frames": [{
+                "kind": "debugRgb",
+                "width": 2,
+                "height": 1,
+                "bytesBase64": "AAAA",
+            }],
+        });
+
+        let sample = daemon_trace_sample_data(&data, Some(Path::new("frames/frame-00000.png")));
+
+        assert!(
+            sample
+                .pointer("/frames/0/bytesBase64")
+                .and_then(|value| value.as_str())
+                .is_none()
+        );
+        assert_eq!(
+            sample
+                .pointer("/frames/0/path")
+                .and_then(|value| value.as_str()),
+            Some("frames/frame-00000.png")
+        );
     }
 
     fn assert_args(trace: PathBuf, ready: PathBuf) -> RecordingAssertArgs {
@@ -1771,244 +2828,6 @@ fn assert_recording_command(args: RecordingAssertArgs) -> Result<()> {
     print_assert_result(&result, args.json)
 }
 
-fn find_chrome(explicit: Option<PathBuf>) -> Result<PathBuf> {
-    if let Some(path) = explicit {
-        return Ok(path);
-    }
-
-    if let Ok(path) = std::env::var("ROBOTDREAMS_CHROME")
-        && !path.trim().is_empty()
-    {
-        return Ok(PathBuf::from(path));
-    }
-
-    for candidate in ["google-chrome", "chromium", "chromium-browser"] {
-        let status = ProcessCommand::new(candidate)
-            .arg("--version")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-        if status.map(|status| status.success()).unwrap_or(false) {
-            return Ok(PathBuf::from(candidate));
-        }
-    }
-
-    bail!("could not find Chrome; pass --chrome or set ROBOTDREAMS_CHROME")
-}
-
-fn unused_local_port() -> Result<u16> {
-    let listener = TcpListener::bind("127.0.0.1:0").context("bind temporary local port")?;
-    Ok(listener.local_addr()?.port())
-}
-
-fn devtools_get_json(port: u16, path: &str) -> Result<serde_json::Value> {
-    let mut stream = TcpStream::connect(SocketAddr::from(([127, 0, 0, 1], port)))
-        .with_context(|| format!("connect Chrome DevTools on port {port}"))?;
-    stream.set_read_timeout(Some(std::time::Duration::from_millis(500)))?;
-    stream.set_write_timeout(Some(std::time::Duration::from_millis(500)))?;
-    let request =
-        format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n");
-    stream.write_all(request.as_bytes())?;
-    let mut raw = Vec::new();
-    let mut buffer = [0_u8; 8192];
-    loop {
-        match stream.read(&mut buffer) {
-            Ok(0) => break,
-            Ok(count) => raw.extend_from_slice(&buffer[..count]),
-            Err(err)
-                if err.kind() == ErrorKind::WouldBlock || err.kind() == ErrorKind::TimedOut =>
-            {
-                if raw.is_empty() {
-                    return Err(err.into());
-                }
-                break;
-            }
-            Err(err) => return Err(err.into()),
-        }
-    }
-    let response = String::from_utf8(raw).context("decode DevTools HTTP response")?;
-    let Some((_, body)) = response.split_once("\r\n\r\n") else {
-        bail!("invalid DevTools HTTP response");
-    };
-    Ok(serde_json::from_str(body)?)
-}
-
-async fn wait_for_devtools_page(port: u16, url: &str, wait_ms: u64) -> Result<String> {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(wait_ms.max(1));
-    loop {
-        if let Ok(serde_json::Value::Array(targets)) = devtools_get_json(port, "/json/list") {
-            for target in targets {
-                let target_url = target.get("url").and_then(|value| value.as_str());
-                let ws_url = target
-                    .get("webSocketDebuggerUrl")
-                    .and_then(|value| value.as_str());
-                if target_url == Some(url)
-                    && let Some(ws_url) = ws_url
-                {
-                    return Ok(ws_url.to_string());
-                }
-            }
-        }
-
-        if std::time::Instant::now() >= deadline {
-            bail!("timed out waiting for Chrome DevTools page");
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
-}
-
-struct CdpClient {
-    socket: tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
-    next_id: u64,
-}
-
-impl CdpClient {
-    async fn connect(url: &str) -> Result<Self> {
-        let (socket, _) = tokio_tungstenite::connect_async(url)
-            .await
-            .context("connect Chrome DevTools websocket")?;
-        Ok(Self { socket, next_id: 0 })
-    }
-
-    async fn call(&mut self, method: &str, params: serde_json::Value) -> Result<serde_json::Value> {
-        self.next_id += 1;
-        let id = self.next_id;
-        let request = serde_json::json!({
-            "id": id,
-            "method": method,
-            "params": params,
-        });
-        self.socket
-            .send(Message::Text(request.to_string()))
-            .await
-            .with_context(|| format!("send CDP {method}"))?;
-
-        while let Some(message) = self.socket.next().await {
-            let message = message?;
-            let Message::Text(raw) = message else {
-                continue;
-            };
-            let response: serde_json::Value = serde_json::from_str(&raw)?;
-            if response.get("id").and_then(|value| value.as_u64()) != Some(id) {
-                continue;
-            }
-            if let Some(error) = response.get("error") {
-                bail!("CDP {method} failed: {error}");
-            }
-            return Ok(response
-                .get("result")
-                .cloned()
-                .unwrap_or(serde_json::Value::Null));
-        }
-
-        bail!("Chrome DevTools websocket closed while waiting for {method}")
-    }
-
-    async fn evaluate(&mut self, expression: &str) -> Result<serde_json::Value> {
-        let result = self
-            .call(
-                "Runtime.evaluate",
-                serde_json::json!({
-                    "expression": expression,
-                    "returnByValue": true,
-                    "awaitPromise": true,
-                }),
-            )
-            .await?;
-        Ok(result
-            .get("result")
-            .and_then(|result| result.get("value"))
-            .cloned()
-            .unwrap_or(serde_json::Value::Null))
-    }
-}
-
-async fn wait_for_rendered_scene(client: &mut CdpClient, wait_ms: u64) -> Result<()> {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(wait_ms.max(1));
-    let initial_delay_ms = (wait_ms / 4).min(15_000);
-    if initial_delay_ms > 0 {
-        tokio::time::sleep(std::time::Duration::from_millis(initial_delay_ms)).await;
-    }
-    loop {
-        let state = client
-            .evaluate(
-                r#"(() => {
-                    const body = document.body?.innerText ?? "";
-                    const canvases = [];
-                    const visit = (root) => {
-                        if (!root) return;
-                        for (const canvas of root.querySelectorAll?.("canvas") ?? []) {
-                            canvases.push(canvas);
-                        }
-                        for (const element of root.querySelectorAll?.("*") ?? []) {
-                            if (element.shadowRoot) visit(element.shadowRoot);
-                        }
-                    };
-                    visit(document);
-                    const canvas = canvases[0];
-                    const rect = canvas?.getBoundingClientRect();
-                    return {
-                        failed: body.includes("Failed to load component"),
-                        canvasCount: canvases.length,
-                        canvasWidth: rect?.width ?? 0,
-                        canvasHeight: rect?.height ?? 0
-                    };
-                })()"#,
-            )
-            .await?;
-
-        if state
-            .get("failed")
-            .and_then(|value| value.as_bool())
-            .unwrap_or(false)
-        {
-            bail!("robot scene component failed to load");
-        }
-
-        let canvas_count = state
-            .get("canvasCount")
-            .and_then(|value| value.as_u64())
-            .unwrap_or(0);
-        let canvas_width = state
-            .get("canvasWidth")
-            .and_then(|value| value.as_f64())
-            .unwrap_or(0.0);
-        let canvas_height = state
-            .get("canvasHeight")
-            .and_then(|value| value.as_f64())
-            .unwrap_or(0.0);
-        if canvas_count > 0 && canvas_width > 0.0 && canvas_height > 0.0 {
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            return Ok(());
-        }
-
-        if std::time::Instant::now() >= deadline {
-            bail!("timed out waiting for rendered scene canvas");
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-    }
-}
-
-async fn capture_screenshot_png(client: &mut CdpClient) -> Result<Vec<u8>> {
-    let screenshot = client
-        .call(
-            "Page.captureScreenshot",
-            serde_json::json!({
-                "format": "png",
-                "fromSurface": true
-            }),
-        )
-        .await?;
-    let Some(data) = screenshot.get("data").and_then(|value| value.as_str()) else {
-        bail!("Chrome did not return screenshot data");
-    };
-    base64::engine::general_purpose::STANDARD
-        .decode(data)
-        .context("decode screenshot")
-}
-
 fn unique_temp_dir(prefix: &str) -> PathBuf {
     let millis = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -2096,39 +2915,7 @@ fn write_trace_line(file: &mut std::fs::File, value: serde_json::Value) -> Resul
     Ok(())
 }
 
-fn unix_time_millis() -> u128 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis())
-        .unwrap_or(0)
-}
-
-fn write_record_ready_file(
-    path: &Path,
-    record_url: &str,
-    video_out: Option<&Path>,
-    simulation_start: &DaemonResponse,
-) -> Result<()> {
-    if let Some(parent) = path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("create ready-file directory {}", parent.display()))?;
-    }
-    let value = serde_json::json!({
-        "type": "recordingReady",
-        "readyUnixMs": unix_time_millis(),
-        "recordUrl": record_url,
-        "videoOut": video_out.map(|path| path.display().to_string()),
-        "projectId": simulation_start.project_id.clone(),
-        "virtualBusRunning": simulation_start.virtual_bus_running,
-        "virtualBusPath": simulation_start.virtual_bus_path.clone(),
-        "simulation": simulation_start.data.clone(),
-    });
-    std::fs::write(path, format!("{}\n", serde_json::to_string(&value)?))
-        .with_context(|| format!("write ready file {}", path.display()))
-}
-
+#[cfg(test)]
 fn filter_new_bus_events(
     mut data: serde_json::Value,
     last_bus_event_sequence: &mut u64,
@@ -2157,6 +2944,7 @@ fn filter_new_bus_events(
     data
 }
 
+#[cfg(test)]
 fn attach_scenario_data(
     mut data: serde_json::Value,
     scenario_data: Option<serde_json::Value>,
@@ -2169,459 +2957,1275 @@ fn attach_scenario_data(
     data
 }
 
-fn spawn_record_trace_sampler(
-    socket: PathBuf,
-    project: Option<String>,
-    simulation: Option<String>,
-    trace_out: PathBuf,
-    video_out: Option<PathBuf>,
-    record_url: String,
-    seconds: f32,
-    fps: u32,
-    width: u32,
-    height: u32,
-    trace_hz: f32,
-    stop: Arc<AtomicBool>,
-) -> tokio::task::JoinHandle<Result<PathBuf>> {
-    tokio::spawn(async move {
-        if let Some(parent) = trace_out.parent()
-            && !parent.as_os_str().is_empty()
-        {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("create trace directory {}", parent.display()))?;
-        }
-        let mut file = std::fs::File::create(&trace_out)
-            .with_context(|| format!("create trace {}", trace_out.display()))?;
-        write_trace_line(
-            &mut file,
-            serde_json::json!({
-                "type": "recordingStart",
-                "schema": "robotdreams.recording.trace.v1",
-                "startedUnixMs": unix_time_millis(),
-                "project": project,
-                "simulation": simulation,
-                "recordUrl": record_url,
-                "videoOut": video_out.as_ref().map(|path| path.display().to_string()),
-                "seconds": seconds,
-                "fps": fps,
-                "width": width,
-                "height": height,
-                "traceHz": trace_hz.max(0.1),
-            }),
-        )?;
+fn unix_time_millis() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0)
+}
 
-        let interval = std::time::Duration::from_secs_f64(1.0 / trace_hz.max(0.1) as f64);
-        let started = std::time::Instant::now();
-        let mut index: u64 = 0;
-        let mut last_bus_event_sequence: u64 = 0;
-        while !stop.load(Ordering::Relaxed) {
-            let scenario_data = send_request(
-                &socket,
-                &DaemonRequest::ProjectCommand {
-                    project: project.clone(),
-                    simulation: simulation.clone(),
-                    target: "scenario".to_string(),
-                    action: "state".to_string(),
-                    payload: None,
-                },
-            )
-            .await
-            .ok()
-            .filter(|response| response.ok)
-            .and_then(|response| response.data);
-            let response = send_request(
-                &socket,
-                &DaemonRequest::SimulationCommand {
-                    project: project.clone(),
-                    simulation: simulation.clone(),
-                    action: "state".to_string(),
-                },
-            )
-            .await;
-            let elapsed_sec = started.elapsed().as_secs_f64();
-            match response {
-                Ok(mut response) => {
-                    response.data = response
-                        .data
-                        .map(|data| filter_new_bus_events(data, &mut last_bus_event_sequence))
-                        .map(|data| attach_scenario_data(data, scenario_data.clone()));
-                    write_trace_line(
-                        &mut file,
-                        serde_json::json!({
-                            "type": "sample",
-                            "index": index,
-                            "elapsedSec": elapsed_sec,
-                            "ok": response.ok,
-                            "projectId": response.project_id,
-                            "url": response.url,
-                            "virtualBusRunning": response.virtual_bus_running,
-                            "virtualBusPath": response.virtual_bus_path,
-                            "data": response.data,
-                        }),
-                    )?;
-                }
-                Err(err) => {
-                    write_trace_line(
-                        &mut file,
-                        serde_json::json!({
-                            "type": "sampleError",
-                            "index": index,
-                            "elapsedSec": elapsed_sec,
-                            "error": err.to_string(),
-                        }),
-                    )?;
-                }
-            }
-            index += 1;
-            tokio::time::sleep(interval).await;
-        }
+fn camera_id_from_scene(node: &SceneNode) -> Option<String> {
+    if let SceneNodeKind::Camera(camera) = &node.kind {
+        return Some(camera.id.clone());
+    }
+    node.children.iter().find_map(camera_id_from_scene)
+}
 
-        write_trace_line(
-            &mut file,
-            serde_json::json!({
-                "type": "recordingEnd",
-                "endedUnixMs": unix_time_millis(),
-                "elapsedSec": started.elapsed().as_secs_f64(),
-                "samples": index,
-            }),
-        )?;
-        Ok(trace_out)
+fn default_camera_id(dreams: &RobotDreams) -> Result<String> {
+    let scene = dreams.scene_graph();
+    camera_id_from_scene(&scene.root).ok_or_else(|| anyhow!("project does not define a camera"))
+}
+
+fn observation_view(view: NativeView) -> ObservationView {
+    match view {
+        NativeView::DebugRgb => ObservationView::DebugRgb,
+        NativeView::Depth => ObservationView::Depth,
+        NativeView::Segmentation => ObservationView::Segmentation,
+        NativeView::Normal => ObservationView::Normal,
+        NativeView::Albedo => ObservationView::Albedo,
+        NativeView::MaterialProperties => ObservationView::MaterialProperties,
+        NativeView::WorldPosition => ObservationView::WorldPosition,
+        NativeView::State => ObservationView::State,
+    }
+}
+
+fn frame_kind(view: NativeView) -> Option<FrameKind> {
+    match view {
+        NativeView::DebugRgb => Some(FrameKind::DebugRgb),
+        NativeView::Depth => Some(FrameKind::Depth),
+        NativeView::Segmentation => Some(FrameKind::Segmentation),
+        NativeView::Normal => Some(FrameKind::Normal),
+        NativeView::Albedo => Some(FrameKind::Albedo),
+        NativeView::MaterialProperties => Some(FrameKind::MaterialProperties),
+        NativeView::WorldPosition => Some(FrameKind::WorldPosition),
+        NativeView::State => None,
+    }
+}
+
+fn observation_request(
+    dreams: &RobotDreams,
+    camera: Option<String>,
+    view: NativeView,
+    resolution: [u32; 2],
+    segmentation_policy: Option<SegmentationPolicy>,
+    shutter_policy: Option<ShutterPolicy>,
+    render_settings: Option<RenderSettings>,
+) -> Result<ObservationRequest> {
+    let camera_id = if matches!(view, NativeView::State) {
+        None
+    } else {
+        Some(match camera.as_deref() {
+            Some("auto") => AUTO_CAMERA_ID.to_string(),
+            Some(camera) => camera.to_string(),
+            None => default_camera_id(dreams)?,
+        })
+    };
+    Ok(ObservationRequest {
+        camera_id,
+        views: vec![observation_view(view)],
+        resolution,
+        segmentation_policy,
+        shutter_policy,
+        render_settings,
     })
 }
 
-async fn render_frame(socket: &Path, args: RenderFrameArgs) -> Result<()> {
-    let daemon_was_running = send_request(socket, &DaemonRequest::Status).await.is_ok();
-    let response = open_project(socket, &args.path, &args.bind).await?;
-    if !response.ok {
-        bail!(
-            "{}",
-            response
-                .message
-                .unwrap_or_else(|| "daemon command failed".to_string())
-        );
+fn segmentation_policy(min_alpha: Option<f32>) -> Option<SegmentationPolicy> {
+    min_alpha.map(|min_alpha| SegmentationPolicy { min_alpha })
+}
+
+fn shutter_policy(
+    exposure_sec: Option<f32>,
+    samples: Option<u32>,
+    mode: Option<NativeShutterMode>,
+    readout_sec: Option<f32>,
+) -> Option<ShutterPolicy> {
+    if exposure_sec.is_none() && samples.is_none() && mode.is_none() && readout_sec.is_none() {
+        return None;
     }
+    Some(ShutterPolicy {
+        exposure_sec: exposure_sec.unwrap_or(0.0),
+        samples: samples.unwrap_or(1),
+        mode: match mode.unwrap_or(NativeShutterMode::Global) {
+            NativeShutterMode::Global => ShutterMode::Global,
+            NativeShutterMode::RollingTopToBottom => ShutterMode::RollingTopToBottom,
+        },
+        readout_sec: readout_sec.unwrap_or(0.0),
+    })
+}
 
-    let Some(url) = response.url else {
-        bail!("daemon did not return a project URL");
-    };
+#[derive(Clone, Debug, Default)]
+struct RenderSettingArgs {
+    background_rgb: Option<String>,
+    ambient_rgb: Option<String>,
+    ambient_intensity: Option<f32>,
+    environment_sky_top_rgb: Option<String>,
+    environment_sky_horizon_rgb: Option<String>,
+    environment_ground_rgb: Option<String>,
+    environment_map: Option<String>,
+    environment_map_rotation_deg: Option<f32>,
+    environment_intensity: Option<f32>,
+    environment_ambient_intensity: Option<f32>,
+    reflection_probe: Option<String>,
+    reflection_probe_rotation_deg: Option<f32>,
+    reflection_probe_intensity: Option<f32>,
+    reflection_probe_ambient_intensity: Option<f32>,
+    reflection_probe_position: Option<String>,
+    reflection_probe_box_size_m: Option<String>,
+    reflection_probe_influence_radius_m: Option<f32>,
+    reflection_probe_falloff_power: Option<f32>,
+    white_balance_rgb: Option<String>,
+    color_temperature_kelvin: Option<f32>,
+    tone_mapping: Option<NativeToneMapping>,
+    tone_exposure: Option<f32>,
+    debug_rgb_samples_per_pixel: Option<u32>,
+    ambient_occlusion_samples: Option<u32>,
+    ambient_occlusion_radius_m: Option<f32>,
+    ambient_occlusion_intensity: Option<f32>,
+    indirect_diffuse_samples: Option<u32>,
+    indirect_diffuse_radius_m: Option<f32>,
+    indirect_diffuse_intensity: Option<f32>,
+    indirect_diffuse_bounces: Option<u32>,
+    soft_shadow_samples: Option<u32>,
+    soft_shadow_radius_m: Option<f32>,
+    area_light_samples: Option<u32>,
+    rough_transmission_samples: Option<u32>,
+    rough_reflection_samples: Option<u32>,
+    specular_reflection_bounces: Option<u32>,
+    gltf_material_variant: Option<String>,
+}
 
-    let chrome = find_chrome(args.chrome)?;
-    if let Some(parent) = args.out.parent()
+fn render_settings(args: RenderSettingArgs) -> Result<Option<RenderSettings>> {
+    render_settings_with_base(args, None)
+}
+
+fn render_settings_with_base(
+    args: RenderSettingArgs,
+    base: Option<RenderSettings>,
+) -> Result<Option<RenderSettings>> {
+    if args.background_rgb.is_none()
+        && args.ambient_rgb.is_none()
+        && args.ambient_intensity.is_none()
+        && args.environment_sky_top_rgb.is_none()
+        && args.environment_sky_horizon_rgb.is_none()
+        && args.environment_ground_rgb.is_none()
+        && args.environment_map.is_none()
+        && args.environment_map_rotation_deg.is_none()
+        && args.environment_intensity.is_none()
+        && args.environment_ambient_intensity.is_none()
+        && args.reflection_probe.is_none()
+        && args.reflection_probe_rotation_deg.is_none()
+        && args.reflection_probe_intensity.is_none()
+        && args.reflection_probe_ambient_intensity.is_none()
+        && args.reflection_probe_position.is_none()
+        && args.reflection_probe_box_size_m.is_none()
+        && args.reflection_probe_influence_radius_m.is_none()
+        && args.reflection_probe_falloff_power.is_none()
+        && args.white_balance_rgb.is_none()
+        && args.color_temperature_kelvin.is_none()
+        && args.tone_mapping.is_none()
+        && args.tone_exposure.is_none()
+        && args.debug_rgb_samples_per_pixel.is_none()
+        && args.ambient_occlusion_samples.is_none()
+        && args.ambient_occlusion_radius_m.is_none()
+        && args.ambient_occlusion_intensity.is_none()
+        && args.indirect_diffuse_samples.is_none()
+        && args.indirect_diffuse_radius_m.is_none()
+        && args.indirect_diffuse_intensity.is_none()
+        && args.indirect_diffuse_bounces.is_none()
+        && args.soft_shadow_samples.is_none()
+        && args.soft_shadow_radius_m.is_none()
+        && args.area_light_samples.is_none()
+        && args.rough_transmission_samples.is_none()
+        && args.rough_reflection_samples.is_none()
+        && args.specular_reflection_bounces.is_none()
+        && args.gltf_material_variant.is_none()
+    {
+        return Ok(None);
+    }
+    let mut settings = base.unwrap_or_default();
+    if let Some(background_rgb) = args.background_rgb {
+        settings.background_rgb = parse_rgb(&background_rgb)?;
+    }
+    if let Some(ambient_rgb) = args.ambient_rgb {
+        settings.ambient_rgb = parse_rgb(&ambient_rgb)?;
+    }
+    if let Some(ambient_intensity) = args.ambient_intensity {
+        settings.ambient_intensity = ambient_intensity;
+    }
+    if args.environment_sky_top_rgb.is_some()
+        || args.environment_sky_horizon_rgb.is_some()
+        || args.environment_ground_rgb.is_some()
+        || args.environment_map.is_some()
+        || args.environment_map_rotation_deg.is_some()
+        || args.environment_intensity.is_some()
+        || args.environment_ambient_intensity.is_some()
+    {
+        let mut environment = settings.environment.take().unwrap_or(EnvironmentSettings {
+            sky_top_rgb: [96, 160, 255],
+            sky_horizon_rgb: [180, 205, 235],
+            ground_rgb: [70, 72, 68],
+            map: None,
+            map_rotation_deg: 0.0,
+            intensity: 1.0,
+            ambient_intensity: 0.35,
+        });
+        if let Some(sky_top_rgb) = args.environment_sky_top_rgb {
+            environment.sky_top_rgb = parse_rgb(&sky_top_rgb)?;
+        }
+        if let Some(sky_horizon_rgb) = args.environment_sky_horizon_rgb {
+            environment.sky_horizon_rgb = parse_rgb(&sky_horizon_rgb)?;
+        }
+        if let Some(ground_rgb) = args.environment_ground_rgb {
+            environment.ground_rgb = parse_rgb(&ground_rgb)?;
+        }
+        if let Some(map) = args.environment_map {
+            environment.map = Some(map);
+        }
+        if let Some(map_rotation_deg) = args.environment_map_rotation_deg {
+            environment.map_rotation_deg = map_rotation_deg;
+        }
+        if let Some(intensity) = args.environment_intensity {
+            environment.intensity = intensity;
+        }
+        if let Some(ambient_intensity) = args.environment_ambient_intensity {
+            environment.ambient_intensity = ambient_intensity;
+        }
+        settings.environment = Some(environment);
+    }
+    if args.reflection_probe.is_some()
+        || args.reflection_probe_rotation_deg.is_some()
+        || args.reflection_probe_intensity.is_some()
+        || args.reflection_probe_ambient_intensity.is_some()
+        || args.reflection_probe_position.is_some()
+        || args.reflection_probe_box_size_m.is_some()
+        || args.reflection_probe_influence_radius_m.is_some()
+        || args.reflection_probe_falloff_power.is_some()
+    {
+        let Some(map) = args.reflection_probe else {
+            bail!("--reflection-probe is required when reflection probe settings are provided");
+        };
+        settings.reflection_probe = Some(ReflectionProbeSettings {
+            map,
+            rotation_deg: args.reflection_probe_rotation_deg.unwrap_or(0.0),
+            intensity: args.reflection_probe_intensity.unwrap_or(1.0),
+            ambient_intensity: args.reflection_probe_ambient_intensity.unwrap_or(0.35),
+            position: args
+                .reflection_probe_position
+                .as_deref()
+                .map(parse_vec3_f32)
+                .transpose()?,
+            box_size_m: args
+                .reflection_probe_box_size_m
+                .as_deref()
+                .map(parse_vec3_f32)
+                .transpose()?,
+            influence_radius_m: args.reflection_probe_influence_radius_m,
+            falloff_power: args.reflection_probe_falloff_power,
+        });
+    }
+    if let Some(white_balance_rgb) = args.white_balance_rgb {
+        settings.white_balance_rgb = parse_rgb_f32(&white_balance_rgb)?;
+    }
+    if let Some(color_temperature_kelvin) = args.color_temperature_kelvin {
+        settings.color_temperature_kelvin = Some(color_temperature_kelvin);
+    }
+    if let Some(tone_mapping) = args.tone_mapping {
+        settings.tone_mapping = match tone_mapping {
+            NativeToneMapping::Linear => ToneMapping::Linear,
+            NativeToneMapping::Reinhard => ToneMapping::Reinhard,
+            NativeToneMapping::Aces => ToneMapping::Aces,
+        };
+    }
+    if let Some(tone_exposure) = args.tone_exposure {
+        settings.tone_exposure = tone_exposure;
+    }
+    if let Some(samples) = args.debug_rgb_samples_per_pixel {
+        settings.debug_rgb_samples_per_pixel = samples.max(1);
+    }
+    if let Some(samples) = args.ambient_occlusion_samples {
+        settings.ambient_occlusion_samples = samples;
+    }
+    if let Some(radius) = args.ambient_occlusion_radius_m {
+        settings.ambient_occlusion_radius_m = radius.max(0.0);
+    }
+    if let Some(intensity) = args.ambient_occlusion_intensity {
+        settings.ambient_occlusion_intensity = intensity.max(0.0);
+    }
+    if let Some(samples) = args.indirect_diffuse_samples {
+        settings.indirect_diffuse_samples = samples;
+    }
+    if let Some(radius) = args.indirect_diffuse_radius_m {
+        settings.indirect_diffuse_radius_m = radius.max(0.0);
+    }
+    if let Some(intensity) = args.indirect_diffuse_intensity {
+        settings.indirect_diffuse_intensity = intensity.max(0.0);
+    }
+    if let Some(bounces) = args.indirect_diffuse_bounces {
+        settings.indirect_diffuse_bounces = bounces;
+    }
+    if let Some(samples) = args.soft_shadow_samples {
+        settings.soft_shadow_samples = samples.max(1);
+    }
+    if let Some(radius) = args.soft_shadow_radius_m {
+        settings.soft_shadow_radius_m = radius.max(0.0);
+    }
+    if let Some(samples) = args.area_light_samples {
+        settings.area_light_samples = samples.max(1);
+    }
+    if let Some(samples) = args.rough_transmission_samples {
+        settings.rough_transmission_samples = samples.max(1);
+    }
+    if let Some(samples) = args.rough_reflection_samples {
+        settings.rough_reflection_samples = samples.max(1);
+    }
+    if let Some(bounces) = args.specular_reflection_bounces {
+        settings.specular_reflection_bounces = bounces;
+    }
+    if let Some(variant) = args.gltf_material_variant {
+        settings.gltf_material_variant = Some(variant);
+    }
+    Ok(Some(settings))
+}
+
+fn parse_rgb(value: &str) -> Result<[u8; 3]> {
+    let parts = value
+        .split(',')
+        .map(str::trim)
+        .map(str::parse::<u8>)
+        .collect::<Result<Vec<_>, _>>()
+        .with_context(|| format!("parse RGB color '{value}' as r,g,b"))?;
+    let [r, g, b]: [u8; 3] = parts.try_into().map_err(|_| {
+        anyhow!("RGB color '{value}' must have exactly three comma-separated bytes")
+    })?;
+    Ok([r, g, b])
+}
+
+fn parse_rgb_f32(value: &str) -> Result<[f32; 3]> {
+    let parts = value
+        .split(',')
+        .map(str::trim)
+        .map(str::parse::<f32>)
+        .collect::<Result<Vec<_>, _>>()
+        .with_context(|| format!("parse RGB float triplet '{value}' as r,g,b"))?;
+    let [r, g, b]: [f32; 3] = parts.try_into().map_err(|_| {
+        anyhow!("RGB float triplet '{value}' must have exactly three comma-separated values")
+    })?;
+    Ok([r, g, b])
+}
+
+fn parse_vec3_f32(value: &str) -> Result<[f32; 3]> {
+    let parts = value
+        .split(',')
+        .map(str::trim)
+        .map(str::parse::<f32>)
+        .collect::<Result<Vec<_>, _>>()
+        .with_context(|| format!("parse vector '{value}' as x,y,z"))?;
+    let [x, y, z]: [f32; 3] = parts
+        .try_into()
+        .map_err(|_| anyhow!("vector '{value}' must have exactly three comma-separated values"))?;
+    Ok([x, y, z])
+}
+
+fn create_parent_dir(path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
     {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("create output directory {}", parent.display()))?;
     }
+    Ok(())
+}
 
-    let profile_dir =
-        std::env::temp_dir().join(format!("robotdreams-render-frame-{}", std::process::id()));
-    let window_size = format!("{},{}", args.width.max(1), args.height.max(1));
-    let devtools_port = unused_local_port()?;
+fn metadata_path(out: &Path) -> PathBuf {
+    let file_name = out
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("frame");
+    out.with_file_name(format!("{file_name}.metadata.json"))
+}
 
-    let mut child = tokio::process::Command::new(chrome)
-        .arg("--headless")
-        .arg("--no-sandbox")
-        .arg("--disable-gpu=false")
-        .arg("--use-gl=swiftshader")
-        .arg("--enable-unsafe-swiftshader")
-        .arg(format!("--user-data-dir={}", profile_dir.display()))
-        .arg(format!("--remote-debugging-port={devtools_port}"))
-        .arg(format!("--window-size={window_size}"))
-        .arg(&url)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .context("start headless Chrome")?;
+fn write_metadata(out: &Path, metadata: &ObservationMetadata) -> Result<PathBuf> {
+    let path = metadata_path(out);
+    create_parent_dir(&path)?;
+    std::fs::write(&path, serde_json::to_vec_pretty(metadata)?)
+        .with_context(|| format!("write metadata {}", path.display()))?;
+    Ok(path)
+}
 
-    let capture_result = tokio::time::timeout(
-        std::time::Duration::from_millis(args.wait_ms + 10_000),
-        async {
-            let ws_url = wait_for_devtools_page(devtools_port, &url, args.wait_ms).await?;
-            let mut client = CdpClient::connect(&ws_url).await?;
-            client.call("Page.enable", serde_json::json!({})).await?;
-            client.call("Runtime.enable", serde_json::json!({})).await?;
-            client
-                .call("Page.bringToFront", serde_json::json!({}))
-                .await?;
-            wait_for_rendered_scene(&mut client, args.wait_ms).await?;
-            let bytes = capture_screenshot_png(&mut client).await?;
-            std::fs::write(&args.out, bytes)
-                .with_context(|| format!("write screenshot {}", args.out.display()))?;
-            Result::<()>::Ok(())
-        },
-    )
-    .await
-    .context("timed out capturing frame")?;
+fn location_json(location: &robotdreams_core::SceneLocation) -> serde_json::Value {
+    serde_json::json!({
+        "position": location.position,
+        "rotation": location.rotation,
+    })
+}
 
-    let _ = child.kill().await;
-    if !daemon_was_running {
-        let _ = send_request(socket, &DaemonRequest::Shutdown).await;
+fn robot_transform_json(snapshot: &RobotDreamsSnapshot) -> serde_json::Value {
+    let mut transforms = serde_json::Map::new();
+    for robot in &snapshot.robots {
+        transforms.insert(
+            format!("robot:{}:base", robot.id),
+            location_json(&robot.base),
+        );
+        for (name, link) in &robot.links {
+            if let Some(location) = &link.location {
+                transforms.insert(
+                    format!("robot:{}:link:{name}", robot.id),
+                    location_json(location),
+                );
+            }
+        }
+        if let Some(tcp) = &robot.tcp
+            && let Some(location) = &tcp.location
+        {
+            transforms.insert(format!("robot:{}:tcp", robot.id), location_json(location));
+        }
     }
-    capture_result?;
+    serde_json::Value::Object(transforms)
+}
 
-    println!("Rendered {url}");
+fn servo_snapshot_json(snapshot: &RobotDreamsSnapshot) -> Vec<serde_json::Value> {
+    snapshot
+        .servo_snapshots
+        .iter()
+        .flat_map(|bus| {
+            bus.snapshots.iter().map(|servo| {
+                serde_json::json!({
+                    "busId": bus.bus_id,
+                    "id": servo.id,
+                    "mode": servo.mode,
+                    "torqueEnabled": servo.torque_enabled,
+                    "moving": servo.moving,
+                    "targetPosition": servo.target_position,
+                    "presentPosition": servo.present_position,
+                    "presentSpeed": servo.present_speed,
+                    "presentLoad": servo.present_load,
+                    "currentRaw": servo.current_raw,
+                    "temperatureC": servo.temperature_c,
+                    "voltageTenths": servo.voltage_tenths,
+                })
+            })
+        })
+        .collect()
+}
+
+fn hardware_json(snapshot: &RobotDreamsSnapshot) -> serde_json::Value {
+    let buses = snapshot
+        .hardware
+        .buses
+        .iter()
+        .map(|bus| {
+            let devices = bus
+                .devices
+                .iter()
+                .map(|device| match device {
+                    robotdreams_core::HardwareDeviceRuntime::Servo(servo) => serde_json::json!({
+                        "type": "servo",
+                        "id": servo.id,
+                        "name": servo.name,
+                        "profile": servo.profile,
+                        "drivesRobot": servo.drives_robot,
+                        "drivesJoint": servo.drives_joint,
+                        "zeroOffset": servo.zero_offset,
+                        "direction": servo.direction,
+                        "targetPosition": servo.target_position,
+                        "presentPosition": servo.present_position,
+                        "torqueEnabled": servo.torque_enabled,
+                    }),
+                    robotdreams_core::HardwareDeviceRuntime::DcMotor(motor) => serde_json::json!({
+                        "type": "dcMotor",
+                        "id": motor.id,
+                        "name": motor.name,
+                        "profile": motor.profile,
+                        "drivesRobot": motor.drives_robot,
+                        "drivesWheel": motor.drives_wheel,
+                        "direction": motor.direction,
+                        "maxSpeedMps": motor.max_speed_mps,
+                        "commandSpeed": motor.command_speed,
+                    }),
+                    robotdreams_core::HardwareDeviceRuntime::Imu(imu) => serde_json::json!({
+                        "type": "imu",
+                        "id": imu.id,
+                        "name": imu.name,
+                        "profile": imu.profile,
+                        "mountedRobot": imu.mounted_robot,
+                        "mountedLink": imu.mounted_link,
+                    }),
+                    robotdreams_core::HardwareDeviceRuntime::IoBoard(io) => serde_json::json!({
+                        "type": "ioBoard",
+                        "id": io.id,
+                        "name": io.name,
+                        "profile": io.profile,
+                        "digitalInputs": io.digital_inputs,
+                        "digitalOutputs": io.digital_outputs,
+                        "analogInputs": io.analog_inputs,
+                    }),
+                })
+                .collect::<Vec<_>>();
+            serde_json::json!({
+                "id": bus.id,
+                "name": bus.name,
+                "transportType": bus.transport_type,
+                "devicePath": bus.device_path,
+                "baud": bus.baud,
+                "protocol": bus.protocol,
+                "devices": devices,
+            })
+        })
+        .collect::<Vec<_>>();
+    serde_json::json!({ "buses": buses })
+}
+
+fn snapshot_json(snapshot: &RobotDreamsSnapshot) -> serde_json::Value {
+    let servo_snapshots = servo_snapshot_json(snapshot);
+    serde_json::json!({
+        "status": "running",
+        "clockSec": snapshot.clock_sec,
+        "hardware": hardware_json(snapshot),
+        "servoSnapshots": servo_snapshots,
+        "virtualBus": {
+            "running": !snapshot.servo_snapshots.is_empty(),
+            "snapshots": servo_snapshot_json(snapshot),
+        },
+        "robots": snapshot.robots.iter().map(|robot| {
+            serde_json::json!({
+                "id": robot.id,
+                "name": robot.name,
+                "base": location_json(&robot.base),
+                "joints": robot.joints.iter().map(|(name, joint)| {
+                    (name.clone(), serde_json::json!({
+                        "urdfName": joint.urdf_name,
+                        "semanticName": joint.semantic_name,
+                        "positionRad": joint.position_rad,
+                        "location": joint.location.as_ref().map(location_json),
+                    }))
+                }).collect::<serde_json::Map<_, _>>(),
+                "tcp": robot.tcp.as_ref().map(|tcp| serde_json::json!({
+                    "name": tcp.name,
+                    "link": tcp.link,
+                    "location": tcp.location.as_ref().map(location_json),
+                })),
+            })
+        }).collect::<Vec<_>>(),
+        "robotScene": {
+            "dynamicState": {
+                "transforms": robot_transform_json(snapshot),
+            }
+        },
+    })
+}
+
+fn write_snapshot_json(path: &Path, snapshot: &RobotDreamsSnapshot) -> Result<()> {
+    create_parent_dir(path)?;
+    std::fs::write(path, serde_json::to_vec_pretty(&snapshot_json(snapshot))?)
+        .with_context(|| format!("write state {}", path.display()))
+}
+
+fn write_native_trace(
+    trace_out: &Path,
+    project_path: &Path,
+    video_out: Option<&Path>,
+    request: &RecordingRequest,
+    snapshots: &[RobotDreamsSnapshot],
+) -> Result<()> {
+    create_parent_dir(trace_out)?;
+    let mut file = std::fs::File::create(trace_out)
+        .with_context(|| format!("create trace {}", trace_out.display()))?;
+    let start_clock = snapshots
+        .first()
+        .map(|snapshot| snapshot.clock_sec)
+        .unwrap_or(0.0);
+    write_trace_line(
+        &mut file,
+        serde_json::json!({
+            "type": "recordingStart",
+            "schema": "robotdreams.recording.trace.v1",
+            "startedUnixMs": unix_time_millis(),
+            "projectPath": project_path.display().to_string(),
+            "videoOut": video_out.map(|path| path.display().to_string()),
+            "seconds": request.seconds,
+            "fps": request.fps,
+            "width": request.observation.resolution[0],
+            "height": request.observation.resolution[1],
+            "native": true,
+        }),
+    )?;
+    for (index, snapshot) in snapshots.iter().enumerate() {
+        write_trace_line(
+            &mut file,
+            serde_json::json!({
+                "type": "sample",
+                "index": index,
+                "elapsedSec": snapshot.clock_sec - start_clock,
+                "ok": true,
+                "virtualBusRunning": !snapshot.servo_snapshots.is_empty(),
+                "data": snapshot_json(snapshot),
+            }),
+        )?;
+    }
+    let elapsed_sec = snapshots
+        .last()
+        .map(|snapshot| snapshot.clock_sec - start_clock)
+        .unwrap_or(0.0);
+    write_trace_line(
+        &mut file,
+        serde_json::json!({
+            "type": "recordingEnd",
+            "endedUnixMs": unix_time_millis(),
+            "elapsedSec": elapsed_sec,
+            "samples": snapshots.len(),
+        }),
+    )?;
+    Ok(())
+}
+
+fn frame_for_view<'a>(output: &'a RenderOutput, view: NativeView) -> Result<&'a FrameBuffer> {
+    let Some(kind) = frame_kind(view) else {
+        bail!("state view does not produce a frame buffer");
+    };
+    output
+        .frames
+        .iter()
+        .find(|frame| frame.kind == kind)
+        .ok_or_else(|| anyhow!("renderer did not produce {kind:?} frame"))
+}
+
+fn write_frame_buffer(path: &Path, frame: &FrameBuffer) -> Result<()> {
+    create_parent_dir(path)?;
+    std::fs::write(path, &frame.bytes).with_context(|| format!("write frame {}", path.display()))
+}
+
+fn frame_kind_wire_name(view: NativeView) -> Result<&'static str> {
+    match view {
+        NativeView::DebugRgb => Ok("debugRgb"),
+        NativeView::Depth => Ok("depth"),
+        NativeView::Segmentation => Ok("segmentation"),
+        NativeView::Normal => Ok("normal"),
+        NativeView::Albedo => Ok("albedo"),
+        NativeView::MaterialProperties => Ok("materialProperties"),
+        NativeView::WorldPosition => Ok("worldPosition"),
+        NativeView::State => bail!("state view does not produce a frame buffer"),
+    }
+}
+
+fn daemon_frame_from_data(
+    data: &serde_json::Value,
+    view: NativeView,
+    fallback_resolution: [u32; 2],
+) -> Result<FrameBuffer> {
+    let expected_kind = frame_kind_wire_name(view)?;
+    let frame = data
+        .get("frames")
+        .and_then(|frames| frames.as_array())
+        .and_then(|frames| {
+            frames.iter().find(|frame| {
+                frame.get("kind").and_then(|kind| kind.as_str()) == Some(expected_kind)
+            })
+        })
+        .ok_or_else(|| {
+            anyhow!("daemon render-frame response did not include {expected_kind} frame")
+        })?;
+    let width = frame
+        .get("width")
+        .and_then(|value| value.as_u64())
+        .and_then(|value| u32::try_from(value).ok())
+        .unwrap_or(fallback_resolution[0]);
+    let height = frame
+        .get("height")
+        .and_then(|value| value.as_u64())
+        .and_then(|value| u32::try_from(value).ok())
+        .unwrap_or(fallback_resolution[1]);
+    let bytes = frame
+        .get("bytesBase64")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| anyhow!("daemon render-frame response did not include bytesBase64"))
+        .and_then(|bytes| {
+            BASE64_STANDARD
+                .decode(bytes)
+                .map_err(|err| anyhow!("decode daemon frame bytes: {err}"))
+        })?;
+    let kind = frame_kind(view).expect("state handled by frame_kind_wire_name");
+    Ok(FrameBuffer {
+        kind,
+        width,
+        height,
+        bytes,
+    })
+}
+
+fn write_daemon_frame_metadata(out: &Path, data: &serde_json::Value) -> Result<Option<PathBuf>> {
+    let Some(metadata) = data.get("metadata") else {
+        return Ok(None);
+    };
+    let metadata_path = metadata_path(out);
+    create_parent_dir(&metadata_path)?;
+    std::fs::write(&metadata_path, serde_json::to_vec_pretty(metadata)?)
+        .with_context(|| format!("write metadata {}", metadata_path.display()))?;
+    Ok(Some(metadata_path))
+}
+
+fn daemon_trace_sample_data(
+    data: &serde_json::Value,
+    frame_path: Option<&Path>,
+) -> serde_json::Value {
+    let mut data = data.clone();
+    if let Some(frames) = data
+        .get_mut("frames")
+        .and_then(|frames| frames.as_array_mut())
+    {
+        for frame in frames {
+            if let Some(object) = frame.as_object_mut() {
+                object.remove("bytesBase64");
+                if let Some(path) = frame_path {
+                    object.insert(
+                        "path".to_string(),
+                        serde_json::Value::String(path.display().to_string()),
+                    );
+                }
+            }
+        }
+    }
+    data
+}
+
+fn write_daemon_render_frame(
+    response: DaemonResponse,
+    args: SimulationRenderFrameArgs,
+) -> Result<()> {
+    if !response.ok {
+        bail!(
+            "{}",
+            response
+                .message
+                .unwrap_or_else(|| "daemon render-frame failed".to_string())
+        );
+    }
+    let Some(data) = response.data else {
+        bail!("daemon render-frame response did not include data");
+    };
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&data)?);
+    }
+
+    if matches!(args.view, NativeView::State) {
+        create_parent_dir(&args.out)?;
+        std::fs::write(&args.out, serde_json::to_vec_pretty(&data)?)
+            .with_context(|| format!("write state {}", args.out.display()))?;
+        println!("Wrote {}", args.out.display());
+        return Ok(());
+    }
+
+    let frame = daemon_frame_from_data(&data, args.view, [args.width, args.height])?;
+    write_frame_buffer(&args.out, &frame)?;
+    if let Some(metadata_path) = write_daemon_frame_metadata(&args.out, &data)? {
+        println!("Metadata {}", metadata_path.display());
+    }
     println!("Wrote {}", args.out.display());
     Ok(())
 }
 
-async fn record_simulation(
+fn frame_file_name(index: usize, view: NativeView) -> String {
+    let extension = match view {
+        NativeView::DebugRgb
+        | NativeView::Normal
+        | NativeView::Albedo
+        | NativeView::MaterialProperties => "png",
+        NativeView::Depth | NativeView::Segmentation | NativeView::WorldPosition => "bin",
+        NativeView::State => "json",
+    };
+    format!("frame-{index:05}.{extension}")
+}
+
+fn write_recorded_frames(
+    frame_dir: &Path,
+    view: NativeView,
+    frames: &[robotdreams_recorder::RecordedFrame],
+) -> Result<()> {
+    std::fs::create_dir_all(frame_dir)
+        .with_context(|| format!("create frame directory {}", frame_dir.display()))?;
+    for frame in frames {
+        let buffer = frame_for_view(&frame.output, view)?;
+        let path = frame_dir.join(frame_file_name(frame.index, view));
+        write_frame_buffer(&path, buffer)?;
+        let metadata_path = metadata_path(&path);
+        std::fs::write(
+            &metadata_path,
+            serde_json::to_vec_pretty(&frame.output.metadata)?,
+        )
+        .with_context(|| format!("write metadata {}", metadata_path.display()))?;
+    }
+    Ok(())
+}
+
+fn render_frame(args: RenderFrameArgs) -> Result<()> {
+    let dreams = RobotDreams::open(&args.path)
+        .map_err(|err| anyhow!("{err}"))
+        .with_context(|| format!("open project {}", args.path.display()))?;
+    if matches!(args.view, NativeView::State) {
+        write_snapshot_json(&args.out, &dreams.snapshot())?;
+        println!("Wrote {}", args.out.display());
+        return Ok(());
+    }
+
+    let request = observation_request(
+        &dreams,
+        args.camera,
+        args.view,
+        [args.width.max(1), args.height.max(1)],
+        segmentation_policy(args.segmentation_min_alpha),
+        shutter_policy(
+            args.shutter_exposure_sec,
+            args.shutter_samples,
+            args.shutter_mode,
+            args.shutter_readout_sec,
+        ),
+        render_settings_with_base(
+            RenderSettingArgs {
+                background_rgb: args.background_rgb,
+                ambient_rgb: args.ambient_rgb,
+                ambient_intensity: args.ambient_intensity,
+                environment_sky_top_rgb: args.environment_sky_top_rgb,
+                environment_sky_horizon_rgb: args.environment_sky_horizon_rgb,
+                environment_ground_rgb: args.environment_ground_rgb,
+                environment_map: args.environment_map,
+                environment_map_rotation_deg: args.environment_map_rotation_deg,
+                environment_intensity: args.environment_intensity,
+                environment_ambient_intensity: args.environment_ambient_intensity,
+                reflection_probe: args.reflection_probe,
+                reflection_probe_rotation_deg: args.reflection_probe_rotation_deg,
+                reflection_probe_intensity: args.reflection_probe_intensity,
+                reflection_probe_ambient_intensity: args.reflection_probe_ambient_intensity,
+                reflection_probe_position: args.reflection_probe_position,
+                reflection_probe_box_size_m: args.reflection_probe_box_size_m,
+                reflection_probe_influence_radius_m: args.reflection_probe_influence_radius_m,
+                reflection_probe_falloff_power: args.reflection_probe_falloff_power,
+                white_balance_rgb: args.white_balance_rgb,
+                color_temperature_kelvin: args.color_temperature_kelvin,
+                tone_mapping: args.tone_mapping,
+                tone_exposure: args.tone_exposure,
+                debug_rgb_samples_per_pixel: args.debug_rgb_samples_per_pixel,
+                ambient_occlusion_samples: args.ambient_occlusion_samples,
+                ambient_occlusion_radius_m: args.ambient_occlusion_radius_m,
+                ambient_occlusion_intensity: args.ambient_occlusion_intensity,
+                indirect_diffuse_samples: args.indirect_diffuse_samples,
+                indirect_diffuse_radius_m: args.indirect_diffuse_radius_m,
+                indirect_diffuse_intensity: args.indirect_diffuse_intensity,
+                indirect_diffuse_bounces: args.indirect_diffuse_bounces,
+                soft_shadow_samples: args.soft_shadow_samples,
+                soft_shadow_radius_m: args.soft_shadow_radius_m,
+                area_light_samples: args.area_light_samples,
+                rough_transmission_samples: args.rough_transmission_samples,
+                rough_reflection_samples: args.rough_reflection_samples,
+                specular_reflection_bounces: args.specular_reflection_bounces,
+                gltf_material_variant: args.gltf_material_variant,
+            },
+            dreams.scene_graph().render_settings.clone(),
+        )?,
+    )?;
+    let scene = prepare_observation_scene(dreams.scene_graph(), &request);
+    let output = NativeRenderer::new()
+        .render(&scene, Some(dreams.snapshot()), &request)
+        .map_err(|err| anyhow!(err))?;
+    let frame = frame_for_view(&output, args.view)?;
+    write_frame_buffer(&args.out, frame)?;
+    let metadata = write_metadata(&args.out, &output.metadata)?;
+
+    println!("Wrote {}", args.out.display());
+    println!("Metadata {}", metadata.display());
+    Ok(())
+}
+
+fn record_simulation(project_path: &Path, args: SimulationRecordArgs) -> Result<()> {
+    let mut dreams = RobotDreams::open(project_path)
+        .map_err(|err| anyhow!("{err}"))
+        .with_context(|| format!("open project {}", project_path.display()))?;
+    let fps = args.fps.max(1);
+    let seconds = args.seconds.max(0.0);
+    let is_state = matches!(args.view, NativeView::State);
+    let trace_path = if args.trace_only || is_state {
+        Some(args.trace_out.clone().or(args.out.clone()).context(
+            "state and --trace-only recordings require --out or --trace-out for the JSONL trace",
+        )?)
+    } else {
+        args.trace_out
+            .clone()
+            .or_else(|| args.out.as_deref().map(default_record_trace_path))
+    };
+
+    if matches!(
+        args.view,
+        NativeView::Depth
+            | NativeView::Segmentation
+            | NativeView::Normal
+            | NativeView::Albedo
+            | NativeView::MaterialProperties
+            | NativeView::WorldPosition
+    ) && !args.trace_only
+        && args.keep_frames.is_none()
+    {
+        bail!(
+            "depth, segmentation, normal, albedo, material-properties, and world-position recording require --keep-frames"
+        );
+    }
+
+    let request = observation_request(
+        &dreams,
+        args.camera.clone(),
+        args.view,
+        [args.width.max(1), args.height.max(1)],
+        segmentation_policy(args.segmentation_min_alpha),
+        shutter_policy(
+            args.shutter_exposure_sec,
+            args.shutter_samples,
+            args.shutter_mode,
+            args.shutter_readout_sec,
+        ),
+        render_settings_with_base(
+            RenderSettingArgs {
+                background_rgb: args.background_rgb.clone(),
+                ambient_rgb: args.ambient_rgb.clone(),
+                ambient_intensity: args.ambient_intensity,
+                environment_sky_top_rgb: args.environment_sky_top_rgb.clone(),
+                environment_sky_horizon_rgb: args.environment_sky_horizon_rgb.clone(),
+                environment_ground_rgb: args.environment_ground_rgb.clone(),
+                environment_map: args.environment_map.clone(),
+                environment_map_rotation_deg: args.environment_map_rotation_deg,
+                environment_intensity: args.environment_intensity,
+                environment_ambient_intensity: args.environment_ambient_intensity,
+                reflection_probe: args.reflection_probe.clone(),
+                reflection_probe_rotation_deg: args.reflection_probe_rotation_deg,
+                reflection_probe_intensity: args.reflection_probe_intensity,
+                reflection_probe_ambient_intensity: args.reflection_probe_ambient_intensity,
+                reflection_probe_position: args.reflection_probe_position.clone(),
+                reflection_probe_box_size_m: args.reflection_probe_box_size_m.clone(),
+                reflection_probe_influence_radius_m: args.reflection_probe_influence_radius_m,
+                reflection_probe_falloff_power: args.reflection_probe_falloff_power,
+                white_balance_rgb: args.white_balance_rgb.clone(),
+                color_temperature_kelvin: args.color_temperature_kelvin,
+                tone_mapping: args.tone_mapping,
+                tone_exposure: args.tone_exposure,
+                debug_rgb_samples_per_pixel: args.debug_rgb_samples_per_pixel,
+                ambient_occlusion_samples: args.ambient_occlusion_samples,
+                ambient_occlusion_radius_m: args.ambient_occlusion_radius_m,
+                ambient_occlusion_intensity: args.ambient_occlusion_intensity,
+                indirect_diffuse_samples: args.indirect_diffuse_samples,
+                indirect_diffuse_radius_m: args.indirect_diffuse_radius_m,
+                indirect_diffuse_intensity: args.indirect_diffuse_intensity,
+                indirect_diffuse_bounces: args.indirect_diffuse_bounces,
+                soft_shadow_samples: args.soft_shadow_samples,
+                soft_shadow_radius_m: args.soft_shadow_radius_m,
+                area_light_samples: args.area_light_samples,
+                rough_transmission_samples: args.rough_transmission_samples,
+                rough_reflection_samples: args.rough_reflection_samples,
+                specular_reflection_bounces: args.specular_reflection_bounces,
+                gltf_material_variant: args.gltf_material_variant.clone(),
+            },
+            dreams.scene_graph().render_settings.clone(),
+        )?,
+    )?;
+    let mut artifacts = vec![RecordingArtifact::StateTrace];
+    if !args.trace_only && !is_state {
+        if matches!(args.view, NativeView::DebugRgb) && args.keep_frames.is_none() {
+            artifacts.push(RecordingArtifact::VideoFrames);
+        } else {
+            artifacts.push(RecordingArtifact::Frames);
+        }
+    }
+    let recording_request = RecordingRequest {
+        observation: request,
+        fps: fps as f32,
+        seconds,
+        artifacts,
+    };
+    let output = NativeRecorder::new()
+        .record(&mut dreams, &recording_request)
+        .map_err(|err| anyhow!(err))?;
+
+    if let Some(trace_path) = trace_path.as_ref() {
+        write_native_trace(
+            trace_path,
+            project_path,
+            args.out.as_deref(),
+            &recording_request,
+            &output.state_trace,
+        )?;
+        println!("Trace {}", trace_path.display());
+    }
+
+    if args.trace_only || is_state {
+        return Ok(());
+    }
+
+    if let Some(frame_dir) = args.keep_frames.as_ref() {
+        write_recorded_frames(frame_dir, args.view, &output.frames)?;
+        println!("Frames: {} at {fps} fps", output.frame_count);
+        println!("Wrote frames {}", frame_dir.display());
+        return Ok(());
+    }
+
+    let video_out = args.out.as_ref().context(
+        "debug-rgb recording requires --out unless --keep-frames or --trace-only is set",
+    )?;
+    let stream = output
+        .video_stream
+        .as_ref()
+        .context("native recorder did not produce a video frame stream")?;
+    let frame_dir = unique_temp_dir("robotdreams-record-frames");
+    std::fs::create_dir_all(&frame_dir)
+        .with_context(|| format!("create frame directory {}", frame_dir.display()))?;
+    for (index, frame) in stream.frames.iter().enumerate() {
+        write_frame_buffer(
+            &frame_dir.join(frame_file_name(index, NativeView::DebugRgb)),
+            frame,
+        )?;
+    }
+    encode_frames_to_mp4(&frame_dir, stream.frames.len() as u32, fps, video_out)?;
+    let _ = std::fs::remove_dir_all(&frame_dir);
+
+    println!("Frames: {} at {fps} fps", stream.frames.len());
+    println!("Wrote {}", video_out.display());
+    Ok(())
+}
+
+async fn record_live_simulation(
     socket: &Path,
     project_path: &Path,
     bind: &str,
     args: SimulationRecordArgs,
 ) -> Result<()> {
-    let daemon_was_running = send_request(socket, &DaemonRequest::Status).await.is_ok();
-    let open_response = open_project(socket, project_path, bind).await?;
-    if !open_response.ok {
-        bail!(
-            "{}",
-            open_response
-                .message
-                .unwrap_or_else(|| "project open failed".to_string())
-        );
-    }
-    let state_response = send_request(
-        socket,
-        &DaemonRequest::ProjectState {
-            project: args.project.clone(),
-            item: Some("simulation".to_string()),
-        },
-    )
-    .await?;
-    if !state_response.ok {
-        bail!(
-            "{}",
-            state_response
-                .message
-                .unwrap_or_else(|| "project state failed".to_string())
-        );
-    }
-    let simulation_id = args
-        .simulation
-        .as_deref()
-        .unwrap_or(DEFAULT_SIMULATION_ID)
-        .trim();
-    let simulation_id = if simulation_id.is_empty() {
-        DEFAULT_SIMULATION_ID
+    let fps = args.fps.max(1);
+    let seconds = args.seconds.max(0.0);
+    let is_state = matches!(args.view, NativeView::State);
+    let trace_path = if args.trace_only || is_state {
+        Some(args.trace_out.clone().or(args.out.clone()).context(
+            "state and --trace-only recordings require --out or --trace-out for the JSONL trace",
+        )?)
     } else {
-        simulation_id
+        args.trace_out
+            .clone()
+            .or_else(|| args.out.as_deref().map(default_record_trace_path))
     };
-    let record_url = state_response
-        .data
-        .as_ref()
-        .and_then(|data| data.get("viewportUrl"))
-        .and_then(|value| value.as_str())
-        .map(|url| url.to_string())
-        .or_else(|| {
-            state_response.url.as_ref().map(|url| {
-                let project_base_url = url.trim_end_matches('/').trim_end_matches("/workbench");
-                format!("{project_base_url}/simulation/{simulation_id}/viewport")
-            })
-        })
-        .ok_or_else(|| anyhow!("daemon did not return a simulation viewport URL"))?;
-    let stop_response = send_request(
-        socket,
-        &DaemonRequest::SimulationCommand {
-            project: args.project.clone(),
-            simulation: args.simulation.clone(),
-            action: "stop".to_string(),
-        },
-    )
-    .await?;
-    if !stop_response.ok {
+
+    if matches!(
+        args.view,
+        NativeView::Depth
+            | NativeView::Segmentation
+            | NativeView::Normal
+            | NativeView::Albedo
+            | NativeView::MaterialProperties
+            | NativeView::WorldPosition
+    ) && !args.trace_only
+        && args.keep_frames.is_none()
+    {
         bail!(
-            "{}",
-            stop_response
-                .message
-                .unwrap_or_else(|| "simulation stop failed".to_string())
+            "depth, segmentation, normal, albedo, material-properties, and world-position recording require --keep-frames"
         );
     }
 
-    if args.trace_only {
-        let trace_path = args
-            .trace_out
-            .clone()
-            .or_else(|| args.out.as_deref().map(default_record_trace_path))
-            .context("--trace-only requires --trace-out when --out is not provided")?;
-        let trace_stop = Arc::new(AtomicBool::new(false));
-        let trace_handle = spawn_record_trace_sampler(
-            socket.to_path_buf(),
-            args.project.clone(),
-            args.simulation.clone(),
-            trace_path,
-            args.out.clone(),
-            record_url.clone(),
-            args.seconds.max(0.1),
-            args.fps.max(1),
-            args.width.max(1),
-            args.height.max(1),
-            args.trace_hz,
-            trace_stop.clone(),
-        );
-        let start_response = send_request(
+    let frame_count = (seconds * fps as f32).ceil() as usize + 1;
+    let frame_interval = std::time::Duration::from_secs_f32(1.0 / fps as f32);
+    let render_settings = render_settings(RenderSettingArgs {
+        background_rgb: args.background_rgb.clone(),
+        ambient_rgb: args.ambient_rgb.clone(),
+        ambient_intensity: args.ambient_intensity,
+        environment_sky_top_rgb: args.environment_sky_top_rgb.clone(),
+        environment_sky_horizon_rgb: args.environment_sky_horizon_rgb.clone(),
+        environment_ground_rgb: args.environment_ground_rgb.clone(),
+        environment_map: args.environment_map.clone(),
+        environment_map_rotation_deg: args.environment_map_rotation_deg,
+        environment_intensity: args.environment_intensity,
+        environment_ambient_intensity: args.environment_ambient_intensity,
+        reflection_probe: args.reflection_probe.clone(),
+        reflection_probe_rotation_deg: args.reflection_probe_rotation_deg,
+        reflection_probe_intensity: args.reflection_probe_intensity,
+        reflection_probe_ambient_intensity: args.reflection_probe_ambient_intensity,
+        reflection_probe_position: args.reflection_probe_position.clone(),
+        reflection_probe_box_size_m: args.reflection_probe_box_size_m.clone(),
+        reflection_probe_influence_radius_m: args.reflection_probe_influence_radius_m,
+        reflection_probe_falloff_power: args.reflection_probe_falloff_power,
+        white_balance_rgb: args.white_balance_rgb.clone(),
+        color_temperature_kelvin: args.color_temperature_kelvin,
+        tone_mapping: args.tone_mapping,
+        tone_exposure: args.tone_exposure,
+        debug_rgb_samples_per_pixel: args.debug_rgb_samples_per_pixel,
+        ambient_occlusion_samples: args.ambient_occlusion_samples,
+        ambient_occlusion_radius_m: args.ambient_occlusion_radius_m,
+        ambient_occlusion_intensity: args.ambient_occlusion_intensity,
+        indirect_diffuse_samples: args.indirect_diffuse_samples,
+        indirect_diffuse_radius_m: args.indirect_diffuse_radius_m,
+        indirect_diffuse_intensity: args.indirect_diffuse_intensity,
+        indirect_diffuse_bounces: args.indirect_diffuse_bounces,
+        soft_shadow_samples: args.soft_shadow_samples,
+        soft_shadow_radius_m: args.soft_shadow_radius_m,
+        area_light_samples: args.area_light_samples,
+        rough_transmission_samples: args.rough_transmission_samples,
+        rough_reflection_samples: args.rough_reflection_samples,
+        specular_reflection_bounces: args.specular_reflection_bounces,
+        gltf_material_variant: args.gltf_material_variant.clone(),
+    })?;
+    let wants_frames = !args.trace_only && !is_state;
+    let temp_frame_dir = if wants_frames
+        && args.keep_frames.is_none()
+        && matches!(args.view, NativeView::DebugRgb)
+    {
+        let dir = unique_temp_dir("robotdreams-live-record-frames");
+        std::fs::create_dir_all(&dir)
+            .with_context(|| format!("create frame directory {}", dir.display()))?;
+        Some(dir)
+    } else {
+        None
+    };
+
+    let mut trace_file = if let Some(trace_path) = trace_path.as_ref() {
+        create_parent_dir(trace_path)?;
+        Some(
+            std::fs::File::create(trace_path)
+                .with_context(|| format!("create trace {}", trace_path.display()))?,
+        )
+    } else {
+        None
+    };
+
+    if let Some(file) = trace_file.as_mut() {
+        write_trace_line(
+            file,
+            serde_json::json!({
+                "type": "recordingStart",
+                "schema": "robotdreams.recording.trace.v1",
+                "startedUnixMs": unix_time_millis(),
+                "projectPath": project_path.display().to_string(),
+                "project": args.project.clone(),
+                "simulation": args.simulation.clone(),
+                "videoOut": args.out.as_ref().map(|path| path.display().to_string()),
+                "seconds": seconds,
+                "fps": fps,
+                "width": args.width.max(1),
+                "height": args.height.max(1),
+                "native": true,
+                "liveDaemon": true,
+            }),
+        )?;
+    }
+
+    let mut start_clock = None;
+    let mut written_frames = 0_usize;
+    for index in 0..frame_count {
+        if index > 0 {
+            tokio::time::sleep(frame_interval).await;
+        }
+
+        let response = send_request_or_start(
             socket,
-            &DaemonRequest::SimulationCommand {
+            &DaemonRequest::RenderFrame {
                 project: args.project.clone(),
                 simulation: args.simulation.clone(),
-                action: "start".to_string(),
+                camera: args.camera.clone(),
+                views: Some(vec![observation_view(args.view)]),
+                width: Some(args.width.max(1)),
+                height: Some(args.height.max(1)),
+                segmentation_policy: segmentation_policy(args.segmentation_min_alpha),
+                shutter_policy: shutter_policy(
+                    args.shutter_exposure_sec,
+                    args.shutter_samples,
+                    args.shutter_mode,
+                    args.shutter_readout_sec,
+                ),
+                render_settings: render_settings.clone(),
             },
+            project_path,
+            bind,
         )
         .await?;
-        if !start_response.ok {
-            trace_stop.store(true, Ordering::Relaxed);
-            let _ = trace_handle.await;
+        if !response.ok {
             bail!(
                 "{}",
-                start_response
+                response
                     .message
-                    .unwrap_or_else(|| "simulation start failed".to_string())
+                    .unwrap_or_else(|| "daemon live recording sample failed".to_string())
             );
         }
-        if let Some(ready_file) = args.ready_file.as_ref() {
-            write_record_ready_file(
-                ready_file,
-                &record_url,
-                args.out.as_deref(),
-                &start_response,
+        let virtual_bus_running = response.virtual_bus_running;
+        let data = response
+            .data
+            .ok_or_else(|| anyhow!("daemon render-frame response did not include data"))?;
+
+        let frame_path = if wants_frames {
+            let frame_dir = args.keep_frames.as_ref().or(temp_frame_dir.as_ref());
+            if let Some(frame_dir) = frame_dir {
+                std::fs::create_dir_all(frame_dir)
+                    .with_context(|| format!("create frame directory {}", frame_dir.display()))?;
+                let path = frame_dir.join(frame_file_name(index, args.view));
+                let frame = daemon_frame_from_data(&data, args.view, [args.width, args.height])?;
+                write_frame_buffer(&path, &frame)?;
+                let _ = write_daemon_frame_metadata(&path, &data)?;
+                written_frames += 1;
+                Some(path)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let timestamp_sec = data
+            .pointer("/metadata/timestamp_sec")
+            .and_then(|value| value.as_f64())
+            .unwrap_or(index as f64 / fps as f64);
+        let start = *start_clock.get_or_insert(timestamp_sec);
+        if let Some(file) = trace_file.as_mut() {
+            write_trace_line(
+                file,
+                serde_json::json!({
+                    "type": "sample",
+                    "index": index,
+                    "elapsedSec": timestamp_sec - start,
+                    "ok": true,
+                    "virtualBusRunning": virtual_bus_running,
+                    "framePath": frame_path.as_ref().map(|path| path.display().to_string()),
+                    "data": daemon_trace_sample_data(&data, frame_path.as_deref()),
+                }),
             )?;
         }
-        tokio::time::sleep(std::time::Duration::from_secs_f32(args.seconds.max(0.1))).await;
-        trace_stop.store(true, Ordering::Relaxed);
-        let trace_out = trace_handle.await.context("join trace sampler")??;
-        if !daemon_was_running {
-            let _ = send_request(socket, &DaemonRequest::Shutdown).await;
-        }
-        println!("Recorded trace {record_url}");
-        println!("Trace {}", trace_out.display());
+    }
+
+    if let Some(file) = trace_file.as_mut() {
+        write_trace_line(
+            file,
+            serde_json::json!({
+                "type": "recordingEnd",
+                "endedUnixMs": unix_time_millis(),
+                "elapsedSec": seconds,
+                "samples": frame_count,
+            }),
+        )?;
+    }
+
+    if let Some(trace_path) = trace_path.as_ref() {
+        println!("Trace {}", trace_path.display());
+    }
+
+    if args.trace_only || is_state {
         return Ok(());
     }
 
-    let video_out = args
-        .out
-        .clone()
-        .context("simulation record requires --out unless --trace-only is set")?;
-    let chrome = find_chrome(args.chrome)?;
-    let fps = args.fps.max(1);
-    let seconds = args.seconds.max(0.1);
-    let trace_path = args
-        .trace_out
-        .clone()
-        .unwrap_or_else(|| default_record_trace_path(&video_out));
-    let frame_count = ((seconds * fps as f32).ceil() as u32).max(1);
-    let frame_interval = std::time::Duration::from_secs_f64(1.0 / fps as f64);
-    let frame_dir = args
-        .keep_frames
-        .clone()
-        .unwrap_or_else(|| unique_temp_dir("robotdreams-record-frames"));
-    std::fs::create_dir_all(&frame_dir)
-        .with_context(|| format!("create frame directory {}", frame_dir.display()))?;
-
-    let profile_dir = unique_temp_dir("robotdreams-record-chrome");
-    let window_size = format!("{},{}", args.width.max(1), args.height.max(1));
-    let devtools_port = unused_local_port()?;
-
-    let mut child = tokio::process::Command::new(chrome)
-        .arg("--headless")
-        .arg("--no-sandbox")
-        .arg("--disable-gpu=false")
-        .arg("--use-gl=swiftshader")
-        .arg("--enable-unsafe-swiftshader")
-        .arg(format!("--user-data-dir={}", profile_dir.display()))
-        .arg(format!("--remote-debugging-port={devtools_port}"))
-        .arg(format!("--window-size={window_size}"))
-        .arg(&record_url)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .context("start headless Chrome")?;
-    let trace_stop = Arc::new(AtomicBool::new(false));
-    let trace_handle = spawn_record_trace_sampler(
-        socket.to_path_buf(),
-        args.project.clone(),
-        args.simulation.clone(),
-        trace_path,
-        Some(video_out.clone()),
-        record_url.clone(),
-        seconds,
-        fps,
-        args.width.max(1),
-        args.height.max(1),
-        args.trace_hz,
-        trace_stop.clone(),
-    );
-
-    let capture_timeout = std::time::Duration::from_millis(args.wait_ms)
-        + std::time::Duration::from_secs_f32(seconds)
-        + std::time::Duration::from_secs(30);
-    let capture_result: Result<()> = tokio::time::timeout(capture_timeout, async {
-        let ws_url = wait_for_devtools_page(devtools_port, &record_url, args.wait_ms).await?;
-        let mut client = CdpClient::connect(&ws_url).await?;
-        client.call("Page.enable", serde_json::json!({})).await?;
-        client.call("Runtime.enable", serde_json::json!({})).await?;
-        client
-            .call("Page.bringToFront", serde_json::json!({}))
-            .await?;
-        wait_for_rendered_scene(&mut client, args.wait_ms).await?;
-        let start_response = send_request(
-            socket,
-            &DaemonRequest::SimulationCommand {
-                project: args.project.clone(),
-                simulation: args.simulation.clone(),
-                action: "start".to_string(),
-            },
-        )
-        .await?;
-        if !start_response.ok {
-            bail!(
-                "{}",
-                start_response
-                    .message
-                    .unwrap_or_else(|| "simulation start failed".to_string())
-            );
-        }
-        if let Some(ready_file) = args.ready_file.as_ref() {
-            write_record_ready_file(ready_file, &record_url, Some(&video_out), &start_response)?;
-        }
-
-        let started = std::time::Instant::now();
-        for index in 0..frame_count {
-            let frame_path = frame_dir.join(format!("frame-{index:05}.png"));
-            let bytes = capture_screenshot_png(&mut client).await?;
-            std::fs::write(&frame_path, bytes)
-                .with_context(|| format!("write frame {}", frame_path.display()))?;
-            let next_frame_at = started + frame_interval * (index + 1);
-            let now = std::time::Instant::now();
-            if next_frame_at > now {
-                tokio::time::sleep(next_frame_at - now).await;
-            }
-        }
-        Result::<()>::Ok(())
-    })
-    .await
-    .context("timed out recording simulation frames")
-    .and_then(|inner| inner);
-
-    let _ = child.kill().await;
-    let _ = std::fs::remove_dir_all(&profile_dir);
-    trace_stop.store(true, Ordering::Relaxed);
-    let trace_out = trace_handle.await.context("join trace sampler")??;
-    capture_result?;
-
-    encode_frames_to_mp4(&frame_dir, frame_count, fps, &video_out)?;
-
-    if args.keep_frames.is_none() {
-        let _ = std::fs::remove_dir_all(&frame_dir);
-    }
-    if !daemon_was_running {
-        let _ = send_request(socket, &DaemonRequest::Shutdown).await;
+    if let Some(frame_dir) = args.keep_frames.as_ref() {
+        println!("Frames: {written_frames} at {fps} fps");
+        println!("Wrote frames {}", frame_dir.display());
+        return Ok(());
     }
 
-    println!("Recorded {record_url}");
-    println!("Frames: {frame_count} at {fps} fps");
+    let video_out = args.out.as_ref().context(
+        "debug-rgb live recording requires --out unless --keep-frames or --trace-only is set",
+    )?;
+    let frame_dir = temp_frame_dir
+        .as_ref()
+        .context("debug-rgb live recording did not create temporary frames")?;
+    encode_frames_to_mp4(frame_dir, written_frames as u32, fps, video_out)?;
+    let _ = std::fs::remove_dir_all(frame_dir);
+
+    println!("Frames: {written_frames} at {fps} fps");
     println!("Wrote {}", video_out.display());
-    println!("Trace {}", trace_out.display());
     Ok(())
 }
 
@@ -2659,7 +4263,7 @@ async fn main() -> Result<()> {
             print_response(send_request(&cli.socket, &DaemonRequest::Close).await?)?;
         }
         Command::RenderFrame(args) => {
-            render_frame(&cli.socket, args).await?;
+            render_frame(args)?;
         }
         Command::Bus(BusCommand::Start) => {
             print_response(
@@ -2909,8 +4513,79 @@ async fn main() -> Result<()> {
                     args.json,
                 )?;
             }
+            SimulationCommand::RenderFrame(args) => {
+                let view = observation_view(args.view);
+                let response = send_request_or_start(
+                    &cli.socket,
+                    &DaemonRequest::RenderFrame {
+                        project: args.project.clone(),
+                        simulation: args.simulation.clone(),
+                        camera: args.camera.clone(),
+                        views: Some(vec![view]),
+                        width: Some(args.width),
+                        height: Some(args.height),
+                        segmentation_policy: segmentation_policy(args.segmentation_min_alpha),
+                        shutter_policy: shutter_policy(
+                            args.shutter_exposure_sec,
+                            args.shutter_samples,
+                            args.shutter_mode,
+                            args.shutter_readout_sec,
+                        ),
+                        render_settings: render_settings(RenderSettingArgs {
+                            background_rgb: args.background_rgb.clone(),
+                            ambient_rgb: args.ambient_rgb.clone(),
+                            ambient_intensity: args.ambient_intensity,
+                            environment_sky_top_rgb: args.environment_sky_top_rgb.clone(),
+                            environment_sky_horizon_rgb: args.environment_sky_horizon_rgb.clone(),
+                            environment_ground_rgb: args.environment_ground_rgb.clone(),
+                            environment_map: args.environment_map.clone(),
+                            environment_map_rotation_deg: args.environment_map_rotation_deg,
+                            environment_intensity: args.environment_intensity,
+                            environment_ambient_intensity: args.environment_ambient_intensity,
+                            reflection_probe: args.reflection_probe.clone(),
+                            reflection_probe_rotation_deg: args.reflection_probe_rotation_deg,
+                            reflection_probe_intensity: args.reflection_probe_intensity,
+                            reflection_probe_ambient_intensity: args
+                                .reflection_probe_ambient_intensity,
+                            reflection_probe_position: args.reflection_probe_position.clone(),
+                            reflection_probe_box_size_m: args.reflection_probe_box_size_m.clone(),
+                            reflection_probe_influence_radius_m: args
+                                .reflection_probe_influence_radius_m,
+                            reflection_probe_falloff_power: args.reflection_probe_falloff_power,
+                            white_balance_rgb: args.white_balance_rgb.clone(),
+                            color_temperature_kelvin: args.color_temperature_kelvin,
+                            tone_mapping: args.tone_mapping,
+                            tone_exposure: args.tone_exposure,
+                            debug_rgb_samples_per_pixel: args.debug_rgb_samples_per_pixel,
+                            ambient_occlusion_samples: args.ambient_occlusion_samples,
+                            ambient_occlusion_radius_m: args.ambient_occlusion_radius_m,
+                            ambient_occlusion_intensity: args.ambient_occlusion_intensity,
+                            indirect_diffuse_samples: args.indirect_diffuse_samples,
+                            indirect_diffuse_radius_m: args.indirect_diffuse_radius_m,
+                            indirect_diffuse_intensity: args.indirect_diffuse_intensity,
+                            indirect_diffuse_bounces: args.indirect_diffuse_bounces,
+                            soft_shadow_samples: args.soft_shadow_samples,
+                            soft_shadow_radius_m: args.soft_shadow_radius_m,
+                            area_light_samples: args.area_light_samples,
+                            rough_transmission_samples: args.rough_transmission_samples,
+                            rough_reflection_samples: args.rough_reflection_samples,
+                            specular_reflection_bounces: args.specular_reflection_bounces,
+                            gltf_material_variant: args.gltf_material_variant.clone(),
+                        })?,
+                    },
+                    &cli.project,
+                    &cli.daemon_bind,
+                )
+                .await?;
+                write_daemon_render_frame(response, args)?;
+            }
             SimulationCommand::Record(args) => {
-                record_simulation(&cli.socket, &cli.project, &cli.daemon_bind, args).await?;
+                if args.live {
+                    record_live_simulation(&cli.socket, &cli.project, &cli.daemon_bind, args)
+                        .await?;
+                } else {
+                    record_simulation(&cli.project, args)?;
+                }
             }
         },
         Command::Recording(RecordingCommand::Inspect(args)) => {

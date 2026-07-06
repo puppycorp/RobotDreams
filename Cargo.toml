@@ -1,6 +1,8 @@
 [workspace]
 members = [
     "core",
+    "renderer",
+    "recorder",
     "daemon",
     "cli",
     "crates/feetech-servo",

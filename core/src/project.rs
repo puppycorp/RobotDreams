@@ -2,6 +2,10 @@ use std::collections::{BTreeMap, HashMap};
 use std::error::Error;
 use std::path::{Path, PathBuf};
 
+use crate::scene_graph::{
+    CameraDistortion, CameraIntrinsics, CameraProjection, CameraSensorEffects, EnvironmentSettings,
+    LightKind, ReflectionProbeSettings, RenderSettings, ToneMapping,
+};
 use crate::scene_harness::UrdfSceneHarness;
 
 pub const ROBOT_DREAMS_MODEL_FORMAT: &str = "robotdreams.model.v1";
@@ -23,6 +27,20 @@ pub struct ProjectConfig {
 pub struct ProjectSceneConfig {
     pub objects: Vec<ProjectSceneObjectConfig>,
     pub cameras: Vec<ProjectCameraConfig>,
+    pub lights: Vec<ProjectLightConfig>,
+    pub render_settings: Option<RenderSettings>,
+    pub reflection_probes: Vec<ReflectionProbeSettings>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ProjectLightConfig {
+    pub id: String,
+    pub name: String,
+    pub kind: LightKind,
+    pub color_rgb: [u8; 3],
+    pub intensity: f32,
+    pub position: [f32; 3],
+    pub rotation: [f32; 3],
 }
 
 #[derive(Clone, Debug)]
@@ -50,8 +68,13 @@ pub struct ProjectCameraConfig {
     pub position: [f32; 3],
     pub rotation: [f32; 3],
     pub fov_deg: f32,
+    pub projection: CameraProjection,
     pub rate: String,
     pub resolution: Option<[u32; 2]>,
+    pub intrinsics: Option<CameraIntrinsics>,
+    pub distortion: Option<CameraDistortion>,
+    pub depth_range_m: Option<[f32; 2]>,
+    pub sensor_effects: Option<CameraSensorEffects>,
 }
 
 #[derive(Clone, Debug)]
@@ -281,6 +304,17 @@ pub struct FrameState {
     pub location: Option<SceneLocation>,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct RobotVisualMesh {
+    pub robot_id: String,
+    pub link_name: String,
+    pub name: String,
+    pub asset: PathBuf,
+    pub scale: [f32; 3],
+    pub translation: [f32; 3],
+    pub rotation_matrix: [[f32; 3]; 3],
+}
+
 fn normalize_query(value: &str) -> String {
     value
         .chars()
@@ -460,6 +494,10 @@ fn f32_vec3_to_f64(value: [f32; 3]) -> [f64; 3] {
     [value[0] as f64, value[1] as f64, value[2] as f64]
 }
 
+fn f64_vec3_to_f32(value: [f64; 3]) -> [f32; 3] {
+    [value[0] as f32, value[1] as f32, value[2] as f32]
+}
+
 fn rpy_rotation(rpy: [f64; 3]) -> [[f64; 3]; 3] {
     let (roll, pitch, yaw) = (rpy[0], rpy[1], rpy[2]);
     mat_mul(mat_mul(rot_z(yaw), rot_y(pitch)), rot_x(roll))
@@ -471,6 +509,66 @@ fn transform_vector(rotation: [[f64; 3]; 3], vector: [f64; 3]) -> [f64; 3] {
         rotation[1][0] * vector[0] + rotation[1][1] * vector[1] + rotation[1][2] * vector[2],
         rotation[2][0] * vector[0] + rotation[2][1] * vector[1] + rotation[2][2] * vector[2],
     ]
+}
+
+fn transform_point_matrix(transform: ([f64; 3], [[f64; 3]; 3]), point: [f64; 3]) -> [f64; 3] {
+    vec_add(transform_vector(transform.1, point), transform.0)
+}
+
+fn transform_then(
+    left: ([f64; 3], [[f64; 3]; 3]),
+    right: ([f64; 3], [[f64; 3]; 3]),
+) -> ([f64; 3], [[f64; 3]; 3]) {
+    (
+        transform_point_matrix(left, right.0),
+        mat_mul(left.1, right.1),
+    )
+}
+
+fn f64_matrix_to_f32(value: [[f64; 3]; 3]) -> [[f32; 3]; 3] {
+    [
+        [value[0][0] as f32, value[0][1] as f32, value[0][2] as f32],
+        [value[1][0] as f32, value[1][1] as f32, value[1][2] as f32],
+        [value[2][0] as f32, value[2][1] as f32, value[2][2] as f32],
+    ]
+}
+
+fn resolve_mesh_path(urdf_path: &Path, filename: &str) -> PathBuf {
+    if let Some(rest) = filename.strip_prefix("package://") {
+        let mut parts = rest.splitn(2, '/');
+        let package = parts.next().unwrap_or_default();
+        let relative = parts.next().unwrap_or_default();
+        let urdf_dir = urdf_path.parent().unwrap_or_else(|| Path::new(""));
+        let package_root = urdf_dir
+            .ancestors()
+            .find(|path| path.file_name().and_then(|name| name.to_str()) == Some(package))
+            .unwrap_or_else(|| urdf_dir.parent().unwrap_or(urdf_dir));
+        return package_root.join(relative);
+    }
+    let path = Path::new(filename);
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        urdf_path
+            .parent()
+            .unwrap_or_else(|| Path::new(""))
+            .join(path)
+    }
+}
+
+fn robot_base_transform(robot: &LoadedRobotModel) -> ([f64; 3], [[f64; 3]; 3]) {
+    (
+        f32_vec3_to_f64(robot.config.base_translation),
+        rpy_rotation(f32_vec3_to_f64(robot.config.base_rotation)),
+    )
+}
+
+fn model_transform(robot: &LoadedRobotModel) -> ([f64; 3], [[f64; 3]; 3]) {
+    let transform = model_transformation(robot);
+    (
+        f32_vec3_to_f64(transform.translation),
+        rpy_rotation(f32_vec3_to_f64(transform.rotation)),
+    )
 }
 
 fn rot_x(angle: f64) -> [[f64; 3]; 3] {
@@ -693,6 +791,46 @@ fn tcp_state(robot: &LoadedRobotModel) -> Option<FrameState> {
         link: tcp.link.clone(),
         location: robot_tcp_location(robot, tcp),
     })
+}
+
+fn robot_visual_meshes(robot: &LoadedRobotModel) -> Vec<RobotVisualMesh> {
+    let base_transform = robot_base_transform(robot);
+    let model_transform = model_transform(robot);
+    let robot_transform = transform_then(base_transform, model_transform);
+    let mut meshes = Vec::new();
+
+    for link in &robot.harness.robot().links {
+        let Some(link_pose) = robot.harness.link_pose_world(&link.name) else {
+            continue;
+        };
+        let link_transform = (link_pose.translation, link_pose.rotation);
+        let link_transform = transform_then(robot_transform, link_transform);
+
+        for (index, visual) in link.visual.iter().enumerate() {
+            let urdf_rs::Geometry::Mesh { filename, scale } = &visual.geometry else {
+                continue;
+            };
+            let visual_transform = (*visual.origin.xyz, rpy_rotation(*visual.origin.rpy));
+            let transform = transform_then(link_transform, visual_transform);
+            let scale = scale
+                .map(|scale| f64_vec3_to_f32(*scale))
+                .unwrap_or([1.0, 1.0, 1.0]);
+            meshes.push(RobotVisualMesh {
+                robot_id: robot.config.id.clone(),
+                link_name: link.name.clone(),
+                name: visual
+                    .name
+                    .clone()
+                    .unwrap_or_else(|| format!("{} visual {index}", link.name)),
+                asset: resolve_mesh_path(&robot.urdf_path, filename),
+                scale,
+                translation: f64_vec3_to_f32(transform.0),
+                rotation_matrix: f64_matrix_to_f32(transform.1),
+            });
+        }
+    }
+
+    meshes
 }
 
 fn robot_state(robot: &LoadedRobotModel) -> RobotState {
@@ -962,6 +1100,10 @@ impl RobotDreamsModel {
 
     pub fn robot_states(&self) -> Vec<RobotState> {
         self.robots.iter().map(robot_state).collect()
+    }
+
+    pub fn robot_visual_meshes(&self) -> Vec<RobotVisualMesh> {
+        self.robots.iter().flat_map(robot_visual_meshes).collect()
     }
 
     pub fn set_joint_angle(
@@ -1409,6 +1551,18 @@ fn json_vec2_u32_path(value: &serde_json::Value, path: &[&str]) -> Option<[u32; 
     ])
 }
 
+fn json_vec2_f32_path(value: &serde_json::Value, path: &[&str]) -> Option<[f32; 2]> {
+    let mut current = value;
+    for key in path {
+        current = current.get(*key)?;
+    }
+    let values = current.as_array()?;
+    if values.len() != 2 {
+        return None;
+    }
+    Some([values[0].as_f64()? as f32, values[1].as_f64()? as f32])
+}
+
 fn json_vec3_path(value: &serde_json::Value, path: &[&str]) -> Option<[f32; 3]> {
     let mut current = value;
     for key in path {
@@ -1423,6 +1577,92 @@ fn json_vec3_path(value: &serde_json::Value, path: &[&str]) -> Option<[f32; 3]> 
         values[1].as_f64()? as f32,
         values[2].as_f64()? as f32,
     ])
+}
+
+fn parse_camera_intrinsics(value: &serde_json::Value) -> Option<CameraIntrinsics> {
+    let fx = json_f32_path(value, &["intrinsics", "fx"])
+        .or_else(|| json_f32_path(value, &["camera", "intrinsics", "fx"]))?;
+    let fy = json_f32_path(value, &["intrinsics", "fy"])
+        .or_else(|| json_f32_path(value, &["camera", "intrinsics", "fy"]))?;
+    let cx = json_f32_path(value, &["intrinsics", "cx"])
+        .or_else(|| json_f32_path(value, &["camera", "intrinsics", "cx"]))?;
+    let cy = json_f32_path(value, &["intrinsics", "cy"])
+        .or_else(|| json_f32_path(value, &["camera", "intrinsics", "cy"]))?;
+    Some(CameraIntrinsics {
+        fx,
+        fy,
+        cx,
+        cy,
+        skew: json_f32_path(value, &["intrinsics", "skew"])
+            .or_else(|| json_f32_path(value, &["camera", "intrinsics", "skew"]))
+            .unwrap_or(0.0),
+    })
+}
+
+fn parse_camera_projection(value: &serde_json::Value) -> CameraProjection {
+    let projection = value.get("projection").or_else(|| {
+        value
+            .get("camera")
+            .and_then(|camera| camera.get("projection"))
+    });
+    let projection_type = projection
+        .and_then(|projection| projection.as_str())
+        .or_else(|| {
+            projection.and_then(|projection| {
+                projection
+                    .get("type")
+                    .and_then(|projection_type| projection_type.as_str())
+            })
+        })
+        .unwrap_or("perspective");
+    if !projection_type.eq_ignore_ascii_case("orthographic") {
+        return CameraProjection::Perspective;
+    }
+
+    let projection_object = projection.and_then(|projection| projection.as_object());
+    let size_m = projection_object
+        .and_then(|_| json_f32_path(value, &["projection", "sizeM"]))
+        .or_else(|| projection_object.and_then(|_| json_f32_path(value, &["projection", "size"])))
+        .or_else(|| json_f32_path(value, &["orthographicSizeM"]))
+        .or_else(|| json_f32_path(value, &["orthographicSize"]))
+        .or_else(|| json_f32_path(value, &["camera", "orthographicSizeM"]))
+        .or_else(|| json_f32_path(value, &["camera", "orthographicSize"]))
+        .unwrap_or(1.0)
+        .max(1.0e-6);
+    CameraProjection::Orthographic { size_m }
+}
+
+fn parse_camera_distortion(value: &serde_json::Value) -> Option<CameraDistortion> {
+    let distortion = value.get("distortion").or_else(|| {
+        value
+            .get("camera")
+            .and_then(|camera| camera.get("distortion"))
+    })?;
+    Some(CameraDistortion {
+        k1: json_f32_path(distortion, &["k1"]).unwrap_or(0.0),
+        k2: json_f32_path(distortion, &["k2"]).unwrap_or(0.0),
+        p1: json_f32_path(distortion, &["p1"]).unwrap_or(0.0),
+        p2: json_f32_path(distortion, &["p2"]).unwrap_or(0.0),
+        k3: json_f32_path(distortion, &["k3"]).unwrap_or(0.0),
+    })
+}
+
+fn parse_camera_sensor_effects(value: &serde_json::Value) -> Option<CameraSensorEffects> {
+    let sensor = value
+        .get("sensor")
+        .or_else(|| value.get("camera").and_then(|camera| camera.get("sensor")))
+        .or_else(|| value.get("effects"))
+        .or_else(|| value.get("camera").and_then(|camera| camera.get("effects")))?;
+    Some(CameraSensorEffects {
+        exposure: json_f32_path(sensor, &["exposure"]).unwrap_or(1.0),
+        gamma: json_f32_path(sensor, &["gamma"]).unwrap_or(1.0),
+        rgb_noise_stddev: json_f32_path(sensor, &["rgbNoiseStddev"])
+            .or_else(|| json_f32_path(sensor, &["rgbNoiseStddevRgb"]))
+            .unwrap_or(0.0),
+        depth_noise_stddev_m: json_f32_path(sensor, &["depthNoiseStddevM"]).unwrap_or(0.0),
+        depth_quantization_m: json_f32_path(sensor, &["depthQuantizationM"]).unwrap_or(0.0),
+        noise_seed: json_u32_path(sensor, &["noiseSeed"]).unwrap_or(0),
+    })
 }
 
 fn parse_hex_color(value: &str) -> Option<[u8; 3]> {
@@ -1712,11 +1952,207 @@ fn parse_project_camera_config(value: &serde_json::Value) -> Option<ProjectCamer
             .or_else(|| json_f32_path(value, &["fovDeg"]))
             .or_else(|| json_f32_path(value, &["camera", "fov"]))
             .unwrap_or(58.0),
+        projection: parse_camera_projection(value),
         rate: json_string_path(value, &["rate"])
             .unwrap_or("30 Hz")
             .to_string(),
         resolution: json_vec2_u32_path(value, &["resolution"])
             .or_else(|| json_vec2_u32_path(value, &["camera", "resolution"])),
+        intrinsics: parse_camera_intrinsics(value),
+        distortion: parse_camera_distortion(value),
+        depth_range_m: json_vec2_f32_path(value, &["depthRangeM"])
+            .or_else(|| json_vec2_f32_path(value, &["camera", "depthRangeM"]))
+            .or_else(|| json_vec2_f32_path(value, &["depth", "rangeM"])),
+        sensor_effects: parse_camera_sensor_effects(value),
+    })
+}
+
+fn parse_project_reflection_probe_settings(
+    value: &serde_json::Value,
+) -> Option<ReflectionProbeSettings> {
+    Some(ReflectionProbeSettings {
+        map: json_string_path(value, &["map"])
+            .or_else(|| json_string_path(value, &["path"]))
+            .or_else(|| json_string_path(value, &["asset"]))?
+            .to_string(),
+        rotation_deg: json_f32_path(value, &["rotationDeg"]).unwrap_or(0.0),
+        intensity: json_f32_path(value, &["intensity"]).unwrap_or(1.0),
+        ambient_intensity: json_f32_path(value, &["ambientIntensity"]).unwrap_or(0.35),
+        position: json_vec3_path(value, &["position"])
+            .or_else(|| json_vec3_path(value, &["transform", "position"])),
+        box_size_m: json_vec3_path(value, &["boxSizeM"])
+            .or_else(|| json_vec3_path(value, &["box", "sizeM"]))
+            .or_else(|| json_vec3_path(value, &["box", "size"])),
+        influence_radius_m: json_f32_path(value, &["influenceRadiusM"])
+            .or_else(|| json_f32_path(value, &["radiusM"])),
+        falloff_power: json_f32_path(value, &["falloffPower"]),
+    })
+}
+
+fn parse_project_environment_settings(value: &serde_json::Value) -> EnvironmentSettings {
+    EnvironmentSettings {
+        sky_top_rgb: json_color_path(value, &["skyTopRgb"]).unwrap_or([96, 160, 255]),
+        sky_horizon_rgb: json_color_path(value, &["skyHorizonRgb"]).unwrap_or([180, 205, 235]),
+        ground_rgb: json_color_path(value, &["groundRgb"]).unwrap_or([70, 72, 68]),
+        map: json_string_path(value, &["map"]).map(str::to_string),
+        map_rotation_deg: json_f32_path(value, &["mapRotationDeg"]).unwrap_or(0.0),
+        intensity: json_f32_path(value, &["intensity"]).unwrap_or(1.0),
+        ambient_intensity: json_f32_path(value, &["ambientIntensity"]).unwrap_or(0.35),
+    }
+}
+
+fn parse_project_tone_mapping(value: &serde_json::Value) -> Option<ToneMapping> {
+    match value.as_str()? {
+        "Linear" | "linear" => Some(ToneMapping::Linear),
+        "Reinhard" | "reinhard" => Some(ToneMapping::Reinhard),
+        "Aces" | "ACES" | "aces" => Some(ToneMapping::Aces),
+        _ => None,
+    }
+}
+
+fn parse_project_render_settings(value: &serde_json::Value) -> RenderSettings {
+    let mut settings = RenderSettings::default();
+    if let Some(background_rgb) = json_color_path(value, &["backgroundRgb"]) {
+        settings.background_rgb = background_rgb;
+    }
+    if let Some(ambient_rgb) = json_color_path(value, &["ambientRgb"]) {
+        settings.ambient_rgb = ambient_rgb;
+    }
+    if let Some(ambient_intensity) = json_f32_path(value, &["ambientIntensity"]) {
+        settings.ambient_intensity = ambient_intensity;
+    }
+    if let Some(samples) = json_u32_path(value, &["debugRgbSamplesPerPixel"]) {
+        settings.debug_rgb_samples_per_pixel = samples.max(1);
+    }
+    if let Some(samples) = json_u32_path(value, &["ambientOcclusionSamples"]) {
+        settings.ambient_occlusion_samples = samples;
+    }
+    if let Some(radius) = json_f32_path(value, &["ambientOcclusionRadiusM"]) {
+        settings.ambient_occlusion_radius_m = radius.max(0.0);
+    }
+    if let Some(intensity) = json_f32_path(value, &["ambientOcclusionIntensity"]) {
+        settings.ambient_occlusion_intensity = intensity.max(0.0);
+    }
+    if let Some(samples) = json_u32_path(value, &["indirectDiffuseSamples"]) {
+        settings.indirect_diffuse_samples = samples;
+    }
+    if let Some(radius) = json_f32_path(value, &["indirectDiffuseRadiusM"]) {
+        settings.indirect_diffuse_radius_m = radius.max(0.0);
+    }
+    if let Some(intensity) = json_f32_path(value, &["indirectDiffuseIntensity"]) {
+        settings.indirect_diffuse_intensity = intensity.max(0.0);
+    }
+    if let Some(bounces) = json_u32_path(value, &["indirectDiffuseBounces"]) {
+        settings.indirect_diffuse_bounces = bounces;
+    }
+    if let Some(samples) = json_u32_path(value, &["softShadowSamples"]) {
+        settings.soft_shadow_samples = samples.max(1);
+    }
+    if let Some(radius) = json_f32_path(value, &["softShadowRadiusM"]) {
+        settings.soft_shadow_radius_m = radius.max(0.0);
+    }
+    if let Some(samples) = json_u32_path(value, &["areaLightSamples"]) {
+        settings.area_light_samples = samples.max(1);
+    }
+    if let Some(samples) = json_u32_path(value, &["roughTransmissionSamples"]) {
+        settings.rough_transmission_samples = samples.max(1);
+    }
+    if let Some(samples) = json_u32_path(value, &["roughReflectionSamples"]) {
+        settings.rough_reflection_samples = samples.max(1);
+    }
+    if let Some(bounces) = json_u32_path(value, &["specularReflectionBounces"]) {
+        settings.specular_reflection_bounces = bounces;
+    }
+    if let Some(variant) = json_string_path(value, &["gltfMaterialVariant"]) {
+        settings.gltf_material_variant = Some(variant.to_string());
+    }
+    if let Some(environment) = value.get("environment") {
+        settings.environment = Some(parse_project_environment_settings(environment));
+    }
+    settings.reflection_probe = value
+        .get("reflectionProbe")
+        .and_then(parse_project_reflection_probe_settings);
+    settings.reflection_probes = value
+        .get("reflectionProbes")
+        .and_then(|reflection_probes| reflection_probes.as_array())
+        .map(|reflection_probes| {
+            reflection_probes
+                .iter()
+                .filter_map(parse_project_reflection_probe_settings)
+                .collect()
+        })
+        .unwrap_or_default();
+    if let Some(white_balance_rgb) = json_vec3_path(value, &["whiteBalanceRgb"]) {
+        settings.white_balance_rgb = white_balance_rgb;
+    }
+    settings.color_temperature_kelvin = json_f32_path(value, &["colorTemperatureKelvin"]);
+    if let Some(tone_mapping) = value
+        .get("toneMapping")
+        .and_then(parse_project_tone_mapping)
+    {
+        settings.tone_mapping = tone_mapping;
+    }
+    if let Some(tone_exposure) = json_f32_path(value, &["toneExposure"]) {
+        settings.tone_exposure = tone_exposure;
+    }
+    settings
+}
+
+fn parse_project_light_config(value: &serde_json::Value) -> Option<ProjectLightConfig> {
+    let id = json_string_path(value, &["id"])?.to_string();
+    let name = json_string_path(value, &["name"])
+        .map(str::to_string)
+        .unwrap_or_else(|| id.clone());
+    let kind_name = json_string_path(value, &["kind"])
+        .or_else(|| json_string_path(value, &["light", "kind"]))
+        .or_else(|| json_string_path(value, &["type"]))
+        .unwrap_or("directional");
+    let direction = json_vec3_path(value, &["direction"])
+        .or_else(|| json_vec3_path(value, &["light", "direction"]))
+        .unwrap_or([0.0, 0.0, -1.0]);
+    let range_m = json_f32_path(value, &["rangeM"]).or_else(|| json_f32_path(value, &["range"]));
+    let angular_radius_deg = json_f32_path(value, &["angularRadiusDeg"])
+        .or_else(|| json_f32_path(value, &["light", "angularRadiusDeg"]))
+        .or_else(|| json_f32_path(value, &["sunAngularRadiusDeg"]))
+        .unwrap_or(0.0);
+    let kind = match kind_name {
+        "point" | "Point" => LightKind::Point { range_m },
+        "spot" | "Spot" => LightKind::Spot {
+            direction,
+            inner_cone_deg: json_f32_path(value, &["innerConeDeg"])
+                .or_else(|| json_f32_path(value, &["light", "innerConeDeg"]))
+                .unwrap_or(15.0),
+            outer_cone_deg: json_f32_path(value, &["outerConeDeg"])
+                .or_else(|| json_f32_path(value, &["light", "outerConeDeg"]))
+                .unwrap_or(35.0),
+            range_m,
+        },
+        "directional" | "Directional" | "sun" | "Sun" | "light" => LightKind::Directional {
+            direction,
+            angular_radius_deg,
+        },
+        _ => LightKind::Directional {
+            direction,
+            angular_radius_deg,
+        },
+    };
+
+    Some(ProjectLightConfig {
+        id,
+        name,
+        kind,
+        color_rgb: json_color_path(value, &["color"])
+            .or_else(|| json_color_path(value, &["light", "color"]))
+            .unwrap_or([255, 255, 255]),
+        intensity: json_f32_path(value, &["intensity"])
+            .or_else(|| json_f32_path(value, &["light", "intensity"]))
+            .unwrap_or(1.0),
+        position: json_vec3_path(value, &["position"])
+            .or_else(|| json_vec3_path(value, &["transform", "position"]))
+            .unwrap_or([0.0, 0.0, 0.0]),
+        rotation: json_vec3_path(value, &["rotation"])
+            .or_else(|| json_vec3_path(value, &["transform", "rotation"]))
+            .unwrap_or([0.0, 0.0, 0.0]),
     })
 }
 
@@ -1743,7 +2179,39 @@ fn parse_project_scene_config(value: &serde_json::Value) -> ProjectSceneConfig {
                 .collect()
         })
         .unwrap_or_default();
-    ProjectSceneConfig { objects, cameras }
+    let lights = value
+        .get("scene")
+        .and_then(|scene| scene.get("lights"))
+        .and_then(|lights| lights.as_array())
+        .map(|lights| {
+            lights
+                .iter()
+                .filter_map(parse_project_light_config)
+                .collect()
+        })
+        .unwrap_or_default();
+    let render_settings = value
+        .get("scene")
+        .and_then(|scene| scene.get("renderSettings"))
+        .map(parse_project_render_settings);
+    let reflection_probes = value
+        .get("scene")
+        .and_then(|scene| scene.get("reflectionProbes"))
+        .and_then(|reflection_probes| reflection_probes.as_array())
+        .map(|reflection_probes| {
+            reflection_probes
+                .iter()
+                .filter_map(parse_project_reflection_probe_settings)
+                .collect()
+        })
+        .unwrap_or_default();
+    ProjectSceneConfig {
+        objects,
+        cameras,
+        lights,
+        render_settings,
+        reflection_probes,
+    }
 }
 
 fn parse_project_robot_model_config(value: &serde_json::Value) -> Option<ProjectRobotModelConfig> {
@@ -1990,6 +2458,83 @@ mod tests {
     }
 
     #[test]
+    fn project_camera_parses_calibration_fields() {
+        let project_path = write_temp_project(
+            "camera-calibration",
+            serde_json::json!({
+                "format": ROBOT_DREAMS_PROJECT_FORMAT,
+                "name": "Camera Calibration",
+                "modelProfile": puppyarm_model_profile_path(),
+                "scene": {
+                    "cameras": [{
+                        "id": "tcp_camera",
+                        "name": "TCP Camera",
+                        "mountedOn": {
+                            "robot": "puppyarm",
+                            "link": "part_1_4"
+                        },
+                        "projection": {
+                            "type": "orthographic",
+                            "sizeM": 0.75
+                        },
+                        "resolution": [640, 480],
+                        "intrinsics": {
+                            "fx": 410.0,
+                            "fy": 420.0,
+                            "cx": 319.5,
+                            "cy": 239.5,
+                            "skew": 0.25
+                        },
+                        "distortion": {
+                            "k1": 0.1,
+                            "k2": 0.2,
+                            "p1": 0.3,
+                            "p2": 0.4,
+                            "k3": 0.5
+                        },
+                        "depthRangeM": [0.15, 3.5],
+                        "sensor": {
+                            "exposure": 1.5,
+                            "gamma": 2.2,
+                            "rgbNoiseStddev": 4.0,
+                            "depthNoiseStddevM": 0.02,
+                            "depthQuantizationM": 0.005,
+                            "noiseSeed": 123
+                        }
+                    }]
+                },
+                "robots": [
+                    {
+                        "id": "puppyarm",
+                        "name": "PuppyArm",
+                        "model": {
+                            "type": "urdf",
+                            "path": puppyarm_urdf_path()
+                        }
+                    }
+                ]
+            }),
+        );
+
+        let model = RobotDreamsModel::open(&project_path).expect("load temp project");
+        let camera = &model.project().unwrap().scene.cameras[0];
+
+        assert_eq!(camera.intrinsics.unwrap().fx, 410.0);
+        assert_eq!(
+            camera.projection,
+            CameraProjection::Orthographic { size_m: 0.75 }
+        );
+        assert_eq!(camera.intrinsics.unwrap().skew, 0.25);
+        assert_eq!(camera.distortion.unwrap().k3, 0.5);
+        assert_eq!(camera.depth_range_m, Some([0.15, 3.5]));
+        assert_eq!(camera.sensor_effects.unwrap().exposure, 1.5);
+        assert_eq!(camera.sensor_effects.unwrap().depth_quantization_m, 0.005);
+        assert_eq!(camera.sensor_effects.unwrap().noise_seed, 123);
+
+        let _ = std::fs::remove_dir_all(project_path.parent().expect("temp project parent"));
+    }
+
+    #[test]
     fn project_joint_names_override_model_profile_joint_names() {
         let project_path = write_temp_project(
             "project-joint-name-override",
@@ -2044,6 +2589,156 @@ mod tests {
         let transform = robot.model.model_transformation.expect("model transform");
         assert_eq!(transform.translation, [1.0, 2.0, 3.0]);
         assert_eq!(transform.rotation, [0.1, 0.2, 0.3]);
+    }
+
+    #[test]
+    fn project_scene_reflection_probes_parse_from_scene_config() {
+        let project = parse_project_config(
+            &serde_json::json!({
+                "format": ROBOT_DREAMS_PROJECT_FORMAT,
+                "name": "Probe Project",
+                "scene": {
+                    "reflectionProbes": [
+                        {
+                            "map": "assets/studio.hdr",
+                            "rotationDeg": 90.0,
+                            "intensity": 1.5,
+                            "ambientIntensity": 0.25,
+                            "position": [1.0, 2.0, 3.0],
+                            "boxSizeM": [4.0, 5.0, 6.0],
+                            "influenceRadiusM": 7.0,
+                            "falloffPower": 2.0
+                        }
+                    ]
+                }
+            }),
+            PathBuf::from("/tmp/robotdreams/probe-project.json"),
+        )
+        .expect("parse project");
+
+        assert_eq!(project.scene.reflection_probes.len(), 1);
+        let probe = &project.scene.reflection_probes[0];
+        assert_eq!(probe.map, "assets/studio.hdr");
+        assert_eq!(probe.rotation_deg, 90.0);
+        assert_eq!(probe.intensity, 1.5);
+        assert_eq!(probe.ambient_intensity, 0.25);
+        assert_eq!(probe.position, Some([1.0, 2.0, 3.0]));
+        assert_eq!(probe.box_size_m, Some([4.0, 5.0, 6.0]));
+        assert_eq!(probe.influence_radius_m, Some(7.0));
+        assert_eq!(probe.falloff_power, Some(2.0));
+    }
+
+    #[test]
+    fn project_scene_render_settings_and_lights_parse_from_scene_config() {
+        let project = parse_project_config(
+            &serde_json::json!({
+                "format": ROBOT_DREAMS_PROJECT_FORMAT,
+                "name": "Lit Project",
+                "scene": {
+                    "renderSettings": {
+                        "backgroundRgb": "#010203",
+                        "ambientRgb": [4, 5, 6],
+                        "ambientIntensity": 0.7,
+                        "environment": {
+                            "skyTopRgb": "#102030",
+                            "skyHorizonRgb": [40, 50, 60],
+                            "groundRgb": [70, 80, 90],
+                            "map": "assets/studio.hdr",
+                            "mapRotationDeg": 15.0,
+                            "intensity": 1.2,
+                            "ambientIntensity": 0.4
+                        },
+                        "whiteBalanceRgb": [1.0, 0.9, 0.8],
+                        "toneMapping": "Aces",
+                        "toneExposure": 1.5,
+                        "debugRgbSamplesPerPixel": 8,
+                        "ambientOcclusionSamples": 12,
+                        "ambientOcclusionRadiusM": 0.5,
+                        "ambientOcclusionIntensity": 0.8,
+                        "indirectDiffuseSamples": 6,
+                        "indirectDiffuseRadiusM": 1.2,
+                        "indirectDiffuseIntensity": 0.45,
+                        "indirectDiffuseBounces": 2,
+                        "softShadowSamples": 8,
+                        "softShadowRadiusM": 0.2,
+                        "areaLightSamples": 10,
+                        "roughTransmissionSamples": 11,
+                        "roughReflectionSamples": 7,
+                        "specularReflectionBounces": 3,
+                        "gltfMaterialVariant": "dirty"
+                    },
+                    "lights": [
+                        {
+                            "id": "sun",
+                            "name": "Sun",
+                            "kind": "directional",
+                            "direction": [0.0, -1.0, -1.0],
+                            "angularRadiusDeg": 0.53,
+                            "color": "#ffffff",
+                            "intensity": 2.5
+                        },
+                        {
+                            "id": "lamp",
+                            "kind": "point",
+                            "position": [1.0, 2.0, 3.0],
+                            "rangeM": 4.0,
+                            "color": [255, 200, 120]
+                        }
+                    ]
+                }
+            }),
+            PathBuf::from("/tmp/robotdreams/lit-project.json"),
+        )
+        .expect("parse project");
+
+        let settings = project
+            .scene
+            .render_settings
+            .as_ref()
+            .expect("render settings");
+        assert_eq!(settings.background_rgb, [1, 2, 3]);
+        assert_eq!(settings.ambient_rgb, [4, 5, 6]);
+        assert_eq!(settings.ambient_intensity, 0.7);
+        assert_eq!(
+            settings
+                .environment
+                .as_ref()
+                .and_then(|environment| environment.map.as_deref()),
+            Some("assets/studio.hdr")
+        );
+        assert_eq!(settings.tone_mapping, ToneMapping::Aces);
+        assert_eq!(settings.tone_exposure, 1.5);
+        assert_eq!(settings.debug_rgb_samples_per_pixel, 8);
+        assert_eq!(settings.ambient_occlusion_samples, 12);
+        assert_eq!(settings.ambient_occlusion_radius_m, 0.5);
+        assert_eq!(settings.ambient_occlusion_intensity, 0.8);
+        assert_eq!(settings.indirect_diffuse_samples, 6);
+        assert_eq!(settings.indirect_diffuse_radius_m, 1.2);
+        assert_eq!(settings.indirect_diffuse_intensity, 0.45);
+        assert_eq!(settings.indirect_diffuse_bounces, 2);
+        assert_eq!(settings.soft_shadow_samples, 8);
+        assert_eq!(settings.soft_shadow_radius_m, 0.2);
+        assert_eq!(settings.area_light_samples, 10);
+        assert_eq!(settings.rough_transmission_samples, 11);
+        assert_eq!(settings.rough_reflection_samples, 7);
+        assert_eq!(settings.specular_reflection_bounces, 3);
+        assert_eq!(settings.gltf_material_variant.as_deref(), Some("dirty"));
+
+        assert_eq!(project.scene.lights.len(), 2);
+        assert_eq!(project.scene.lights[0].id, "sun");
+        assert_eq!(project.scene.lights[0].intensity, 2.5);
+        assert!(matches!(
+            project.scene.lights[0].kind,
+            LightKind::Directional {
+                angular_radius_deg,
+                ..
+            } if angular_radius_deg == 0.53
+        ));
+        assert_eq!(project.scene.lights[1].position, [1.0, 2.0, 3.0]);
+        assert!(matches!(
+            project.scene.lights[1].kind,
+            LightKind::Point { range_m: Some(4.0) }
+        ));
     }
 
     #[test]

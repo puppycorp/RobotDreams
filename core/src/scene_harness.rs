@@ -54,9 +54,14 @@ impl UrdfSceneHarness {
     }
 
     pub fn link_origin_world(&self, link_name: &str) -> Option<[f64; 3]> {
+        self.link_pose_world(link_name)
+            .map(|transform| transform.translation)
+    }
+
+    pub fn link_pose_world(&self, link_name: &str) -> Option<LinkPose> {
         let root = self.root_link_name()?;
         self.link_transform_from(&root, Transform::identity(), link_name)
-            .map(|transform| transform.translation)
+            .map(LinkPose::from)
     }
 
     pub fn link_point_world(&self, link_name: &str, point: [f64; 3]) -> Option<[f64; 3]> {
@@ -111,6 +116,21 @@ impl UrdfSceneHarness {
         }
 
         None
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LinkPose {
+    pub translation: [f64; 3],
+    pub rotation: [[f64; 3]; 3],
+}
+
+impl From<Transform> for LinkPose {
+    fn from(transform: Transform) -> Self {
+        Self {
+            translation: transform.translation,
+            rotation: transform.rotation,
+        }
     }
 }
 

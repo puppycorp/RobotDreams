@@ -24,9 +24,16 @@ use crate::app_controller::{
 use crate::projects_controller::ProjectsController;
 use crate::robot_scene_component::RobotSceneComponent;
 use crate::virtual_bus::WorkbenchVirtualBusHandle;
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use feetech_servo::servo::sim::FeetechServoSnapshot;
 use log::LevelFilter;
+use robotdreams_core::scene_graph::{
+    AUTO_CAMERA_ID, ObservationRequest, ObservationView, RenderSettings, SegmentationPolicy,
+    ShutterPolicy, prepare_observation_scene,
+};
 use robotdreams_core::{VirtualServoSimConfig, run_virtual_servo_sim};
+use robotdreams_renderer::{FrameBuffer, FrameKind, NativeRenderer, SceneGraphSample};
 use roxmltree::Document;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::Mutex as AsyncMutex;
@@ -2952,6 +2959,17 @@ enum DaemonRequest {
         simulation: Option<String>,
         action: String,
     },
+    RenderFrame {
+        project: Option<String>,
+        simulation: Option<String>,
+        camera: Option<String>,
+        views: Option<Vec<ObservationView>>,
+        width: Option<u32>,
+        height: Option<u32>,
+        segmentation_policy: Option<SegmentationPolicy>,
+        shutter_policy: Option<ShutterPolicy>,
+        render_settings: Option<RenderSettings>,
+    },
     BusStart,
     BusStop,
     Close,
@@ -3256,6 +3274,107 @@ fn unique_project_id(base_slug: &str, projects: &HashMap<String, ProjectSession>
 fn project_launch_for_session(path: &Path) -> Result<ProjectLaunch, String> {
     project_launch_for_input_path(path)
         .ok_or_else(|| format!("{} is not a RobotDreams project", path.display()))
+}
+
+fn frame_kind_name(kind: &FrameKind) -> &'static str {
+    match kind {
+        FrameKind::DebugRgb => "debugRgb",
+        FrameKind::Depth => "depth",
+        FrameKind::Segmentation => "segmentation",
+        FrameKind::Normal => "normal",
+        FrameKind::Albedo => "albedo",
+        FrameKind::MaterialProperties => "materialProperties",
+        FrameKind::WorldPosition => "worldPosition",
+    }
+}
+
+fn frame_encoding(kind: &FrameKind) -> &'static str {
+    match kind {
+        FrameKind::DebugRgb => "png/rgb8",
+        FrameKind::Depth => "f32le",
+        FrameKind::Segmentation => "u32le",
+        FrameKind::Normal => "png/rgb8-normal-world",
+        FrameKind::Albedo => "png/rgb8-albedo",
+        FrameKind::MaterialProperties => "png/rgb8-pbr-material",
+        FrameKind::WorldPosition => "f32le-xyz-world",
+    }
+}
+
+fn frame_json(frame: &FrameBuffer) -> serde_json::Value {
+    serde_json::json!({
+        "kind": frame_kind_name(&frame.kind),
+        "width": frame.width,
+        "height": frame.height,
+        "encoding": frame_encoding(&frame.kind),
+        "bytesBase64": BASE64_STANDARD.encode(&frame.bytes),
+    })
+}
+
+fn render_simulation_observation_json(
+    simulation: &SimulationSession,
+    camera: Option<String>,
+    views: Option<Vec<ObservationView>>,
+    width: Option<u32>,
+    height: Option<u32>,
+    segmentation_policy: Option<SegmentationPolicy>,
+    shutter_policy: Option<ShutterPolicy>,
+    render_settings: Option<RenderSettings>,
+) -> Result<serde_json::Value, String> {
+    let views = views.unwrap_or_else(|| vec![ObservationView::DebugRgb]);
+    let resolution = [width.unwrap_or(640).max(1), height.unwrap_or(480).max(1)];
+    let needs_camera = views
+        .iter()
+        .any(|view| !matches!(view, ObservationView::State));
+    let camera_id = if needs_camera {
+        Some(match camera.as_deref() {
+            Some("auto") | None => AUTO_CAMERA_ID.to_string(),
+            Some(camera) => camera.to_string(),
+        })
+    } else {
+        None
+    };
+
+    let samples = simulation.virtual_bus.robotdreams_observation_samples();
+    let samples = if samples.is_empty() {
+        return Err(
+            "simulation is not backed by RobotDreams core; reopen the project as a RobotDreams project"
+                .to_string()
+        );
+    } else {
+        samples
+    };
+    let request = ObservationRequest {
+        camera_id,
+        views,
+        resolution,
+        segmentation_policy,
+        shutter_policy,
+        render_settings,
+    };
+    let samples = samples
+        .into_iter()
+        .map(|(scene, snapshot)| SceneGraphSample {
+            scene: prepare_observation_scene(scene, &request),
+            state: Some(snapshot),
+        })
+        .collect::<Vec<_>>();
+    let output = NativeRenderer::new()
+        .render_scene_samples(&samples, &request)
+        .map_err(|err| format!("render frame failed: {err}"))?;
+    let snapshot = output.state.as_ref().cloned().unwrap_or_default();
+
+    Ok(serde_json::json!({
+        "schema": "robotdreams.observation.v1",
+        "simulationId": simulation.simulation_id,
+        "metadata": output.metadata,
+        "frames": output.frames.iter().map(frame_json).collect::<Vec<_>>(),
+        "state": {
+            "clockSec": snapshot.clock_sec,
+            "robotCount": snapshot.robots.len(),
+            "servoBusCount": snapshot.servo_snapshots.len(),
+            "servoSnapshotCount": snapshot.servo_snapshots.iter().map(|bus| bus.snapshots.len()).sum::<usize>(),
+        },
+    }))
 }
 
 fn make_project_session(
@@ -4133,6 +4252,57 @@ async fn handle_daemon_request(
                         data,
                     )
                 }
+                Err(err) => DaemonState::error(err),
+            }
+        }
+        DaemonRequest::RenderFrame {
+            project,
+            simulation,
+            camera,
+            views,
+            width,
+            height,
+            segmentation_policy,
+            shutter_policy,
+            render_settings,
+        } => {
+            let mut state = state.lock().await;
+            let project_id = match state.resolve_project_id(project.as_deref()) {
+                Ok(project_id) => project_id,
+                Err(err) => return DaemonState::error(err),
+            };
+            let simulation_id = {
+                let project = state
+                    .projects
+                    .get_mut(&project_id)
+                    .expect("project resolved");
+                match project.ensure_simulation(simulation.as_deref()) {
+                    Ok(simulation_id) => simulation_id,
+                    Err(err) => return DaemonState::error(err),
+                }
+            };
+            let project = state.projects.get(&project_id).expect("project resolved");
+            let simulation = match project.simulation(&simulation_id) {
+                Ok(simulation) => simulation,
+                Err(err) => return DaemonState::error(err),
+            };
+            match render_simulation_observation_json(
+                simulation,
+                camera,
+                views,
+                width,
+                height,
+                segmentation_policy,
+                shutter_policy,
+                render_settings,
+            ) {
+                Ok(data) => DaemonState::response_with_data_for_project(
+                    project,
+                    simulation,
+                    Some("render frame".to_string()),
+                    true,
+                    data,
+                ),
                 Err(err) => DaemonState::error(err),
             }
         }
@@ -5036,6 +5206,59 @@ mod tests {
 
         assert!(simulation.virtual_bus.is_robotdreams_backed());
         assert_eq!(simulation.virtual_bus.snapshots().len(), 4);
+    }
+
+    #[test]
+    fn render_frame_uses_live_robotdreams_simulation_state() {
+        let mut state = test_state();
+        let (project_id, _) =
+            open_project_session(&mut state, &repo_path("examples/puppyarm/project.json")).unwrap();
+        let project = state.projects.get(&project_id).unwrap();
+        let simulation = project.default_simulation().unwrap();
+
+        let before = render_simulation_observation_json(
+            simulation,
+            Some("auto".to_string()),
+            Some(vec![ObservationView::DebugRgb]),
+            Some(32),
+            Some(24),
+            None,
+            None,
+            None,
+        )
+        .expect("render initial frame");
+        let before_clock = before
+            .pointer("/metadata/timestamp_sec")
+            .and_then(|value| value.as_f64())
+            .expect("initial timestamp");
+        let frame_bytes = before
+            .pointer("/frames/0/bytesBase64")
+            .and_then(|value| value.as_str())
+            .expect("initial frame bytes");
+        assert!(!frame_bytes.is_empty());
+
+        simulation.virtual_bus.set_target_position(1, 2200);
+
+        let after = render_simulation_observation_json(
+            simulation,
+            Some("auto".to_string()),
+            Some(vec![ObservationView::DebugRgb]),
+            Some(32),
+            Some(24),
+            None,
+            None,
+            None,
+        )
+        .expect("render frame after live update");
+        let after_clock = after
+            .pointer("/metadata/timestamp_sec")
+            .and_then(|value| value.as_f64())
+            .expect("updated timestamp");
+
+        assert!(
+            after_clock > before_clock,
+            "live render should use the RobotDreams core snapshot advanced by servo commands"
+        );
     }
 
     #[test]

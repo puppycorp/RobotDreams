@@ -10,12 +10,14 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "1"
 async-trait = "0.1"
+base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 libc = "0.2"
 log = "0.4"
 rapier3d = { version = "0.23", default-features = false, features = ["dim3", "f32"] }
 feetech-servo = { path = "../crates/feetech-servo" }
 robotdreams-core = { path = "../core" }
+robotdreams-renderer = { path = "../renderer" }
 roxmltree = "0.20"
 serialport = "4"
 serde = { version = "1", features = ["derive"] }
