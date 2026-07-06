@@ -19,6 +19,7 @@ use crate::scene_graph::{
 use crate::urdf::{UrdfModel, load_urdf};
 use feetech_servo::servo::protocol::serial_bus::ProtocolError;
 use feetech_servo::servo::sim::{FeetechBusEvent, FeetechBusSim, FeetechServoSnapshot};
+use pge_core as pge;
 
 pub mod physics;
 pub mod project;
@@ -650,6 +651,10 @@ impl RobotDreams {
         graph
     }
 
+    pub fn world_state(&self) -> pge::WorldState {
+        scene_graph_to_world_state(&self.scene_graph())
+    }
+
     pub fn camera_spec(&self, camera_id: &str) -> Option<CameraSpec> {
         let model = self.model.as_ref()?;
         let project = model.project()?;
@@ -891,6 +896,246 @@ impl RobotDreams {
         for (robot_id, dx, dy, dyaw) in moves {
             model.move_robot_base_flat(&robot_id, dx, dy, dyaw);
         }
+    }
+}
+
+fn scene_graph_to_world_state(graph: &SceneGraph) -> pge::WorldState {
+    let mut world = pge::WorldState::new();
+    let scene = world.scenes.insert(pge::Scene {
+        name: Some(graph.root.name.clone()),
+        gravity_mps2: [0.0, 0.0, -9.81],
+        physics_enabled: true,
+    });
+
+    for metadata in graph.entities.values() {
+        world.push_entity(pge_entity_metadata(metadata));
+    }
+
+    insert_scene_node(&mut world, &graph.root, pge::NodeParent::Scene(scene));
+    world
+}
+
+fn insert_scene_node(
+    world: &mut pge::WorldState,
+    node: &SceneNode,
+    parent: pge::NodeParent,
+) -> pge::ArenaId<pge::Node> {
+    if world.entity(&pge::EntityId(node.entity.0.clone())).is_none() {
+        world.push_entity(pge::EntityMetadata {
+            id: pge::EntityId(node.entity.0.clone()),
+            name: node.name.clone(),
+            kind: scene_node_kind_name(&node.kind).to_string(),
+            robot_id: None,
+            link_name: None,
+        });
+    }
+
+    let mut pge_node = pge::Node {
+        entity: pge::EntityId(node.entity.0.clone()),
+        name: Some(node.name.clone()),
+        parent,
+        transform: pge_transform(node.transform),
+        mesh: None,
+        camera: None,
+        light: None,
+        body: None,
+        collider: None,
+    };
+
+    match &node.kind {
+        SceneNodeKind::Group => {}
+        SceneNodeKind::Mesh { geometry, material } => {
+            let material = world.materials.insert(pge_material(material));
+            let mesh = world.meshes.insert(pge::Mesh {
+                name: Some(node.name.clone()),
+                source: pge_mesh_source(geometry),
+                material: Some(material),
+            });
+            pge_node.mesh = Some(mesh);
+            pge_node.collider = pge_collider(geometry);
+        }
+        SceneNodeKind::Camera(camera) => {
+            let camera = world.cameras.insert(pge_camera(camera));
+            pge_node.camera = Some(camera);
+        }
+        SceneNodeKind::Light(light) => {
+            let light = world.lights.insert(pge_light(light));
+            pge_node.light = Some(light);
+        }
+    }
+
+    let node_id = world.nodes.insert(pge_node);
+    for child in &node.children {
+        insert_scene_node(world, child, pge::NodeParent::Node(node_id));
+    }
+    node_id
+}
+
+fn scene_node_kind_name(kind: &SceneNodeKind) -> &'static str {
+    match kind {
+        SceneNodeKind::Group => "group",
+        SceneNodeKind::Mesh { .. } => "mesh",
+        SceneNodeKind::Camera(_) => "camera",
+        SceneNodeKind::Light(_) => "light",
+    }
+}
+
+fn pge_entity_metadata(metadata: &EntityMetadata) -> pge::EntityMetadata {
+    pge::EntityMetadata {
+        id: pge::EntityId(metadata.id.0.clone()),
+        name: metadata.name.clone(),
+        kind: metadata.kind.clone(),
+        robot_id: metadata.robot_id.clone(),
+        link_name: metadata.link_name.clone(),
+    }
+}
+
+fn pge_transform(transform: Transform) -> pge::Transform {
+    pge::Transform {
+        translation: transform.translation,
+        rotation: transform.rotation,
+        rotation_matrix: transform.rotation_matrix,
+    }
+}
+
+fn pge_geometry_bounds(bounds: GeometryBounds) -> pge::GeometryBounds {
+    pge::GeometryBounds {
+        min: bounds.min,
+        max: bounds.max,
+    }
+}
+
+fn centered_bounds(size: [f32; 3]) -> pge::GeometryBounds {
+    pge::GeometryBounds {
+        min: [-size[0] * 0.5, -size[1] * 0.5, -size[2] * 0.5],
+        max: [size[0] * 0.5, size[1] * 0.5, size[2] * 0.5],
+    }
+}
+
+fn pge_mesh_source(geometry: &Geometry) -> pge::MeshSource {
+    match geometry {
+        Geometry::Box { size } => pge::MeshSource::Procedural(pge::Geometry::Box { size: *size }),
+        Geometry::Sphere { radius } => pge::MeshSource::Procedural(pge::Geometry::Sphere {
+            radius: *radius,
+        }),
+        Geometry::Cylinder { radius, height } => {
+            pge::MeshSource::Procedural(pge::Geometry::Cylinder {
+                radius: *radius,
+                height: *height,
+            })
+        }
+        Geometry::MeshBounds { size, asset } => pge::MeshSource::Asset {
+            path: asset.clone(),
+            scale: [1.0, 1.0, 1.0],
+            bounds: Some(centered_bounds(*size)),
+        },
+        Geometry::MeshAsset {
+            asset,
+            scale,
+            bounds,
+        } => pge::MeshSource::Asset {
+            path: asset.clone(),
+            scale: *scale,
+            bounds: bounds.map(pge_geometry_bounds),
+        },
+    }
+}
+
+fn pge_collider(geometry: &Geometry) -> Option<pge::Collider> {
+    match geometry {
+        Geometry::Box { size } => Some(pge::Collider::Box { size: *size }),
+        Geometry::Sphere { radius } => Some(pge::Collider::Sphere { radius: *radius }),
+        Geometry::Cylinder { radius, height } => Some(pge::Collider::Cylinder {
+            radius: *radius,
+            height: *height,
+        }),
+        Geometry::MeshBounds { size, .. } => Some(pge::Collider::MeshBounds { size: *size }),
+        Geometry::MeshAsset { bounds, .. } => bounds.map(|bounds| pge::Collider::MeshBounds {
+            size: [
+                bounds.max[0] - bounds.min[0],
+                bounds.max[1] - bounds.min[1],
+                bounds.max[2] - bounds.min[2],
+            ],
+        }),
+    }
+}
+
+fn pge_material(material: &Material) -> pge::Material {
+    pge::Material {
+        name: None,
+        base_color_factor: [
+            f32::from(material.color_rgb[0]) / 255.0,
+            f32::from(material.color_rgb[1]) / 255.0,
+            f32::from(material.color_rgb[2]) / 255.0,
+            1.0,
+        ],
+        ..pge::Material::default()
+    }
+}
+
+fn pge_camera(camera: &CameraSpec) -> pge::Camera {
+    pge::Camera {
+        name: Some(camera.name.clone()),
+        fov_deg: camera.fov_deg,
+        projection: match camera.projection {
+            scene_graph::CameraProjection::Perspective => pge::CameraProjection::Perspective,
+            scene_graph::CameraProjection::Orthographic { size_m } => {
+                pge::CameraProjection::Orthographic { size_m }
+            }
+        },
+        resolution: camera.resolution,
+        intrinsics: camera.intrinsics.map(|intrinsics| pge::CameraIntrinsics {
+            fx: intrinsics.fx,
+            fy: intrinsics.fy,
+            cx: intrinsics.cx,
+            cy: intrinsics.cy,
+            skew: intrinsics.skew,
+        }),
+        distortion: camera.distortion.map(|distortion| pge::CameraDistortion {
+            k1: distortion.k1,
+            k2: distortion.k2,
+            p1: distortion.p1,
+            p2: distortion.p2,
+            k3: distortion.k3,
+        }),
+        depth_range_m: camera.depth_range_m,
+        sensor_effects: camera.sensor_effects.map(|effects| pge::CameraSensorEffects {
+            exposure: effects.exposure,
+            gamma: effects.gamma,
+            rgb_noise_stddev: effects.rgb_noise_stddev,
+            depth_noise_stddev_m: effects.depth_noise_stddev_m,
+            depth_quantization_m: effects.depth_quantization_m,
+            noise_seed: effects.noise_seed,
+        }),
+    }
+}
+
+fn pge_light(light: &SceneLightSpec) -> pge::Light {
+    pge::Light {
+        name: Some(light.name.clone()),
+        kind: match light.kind {
+            scene_graph::LightKind::Directional {
+                direction,
+                angular_radius_deg,
+            } => pge::LightKind::Directional {
+                direction,
+                angular_radius_deg,
+            },
+            scene_graph::LightKind::Point { range_m } => pge::LightKind::Point { range_m },
+            scene_graph::LightKind::Spot {
+                direction,
+                inner_cone_deg,
+                outer_cone_deg,
+                range_m,
+            } => pge::LightKind::Spot {
+                direction,
+                inner_cone_deg,
+                outer_cone_deg,
+                range_m,
+            },
+        },
+        color_rgb: light.color_rgb,
+        intensity: light.intensity,
     }
 }
 
@@ -1355,6 +1600,42 @@ mod robotdreams_tests {
         assert!(
             max[0] - min[0] < 2.0 && max[2] - min[2] < 2.0,
             "fit bounds should exclude the 5 m floor, got min {min:?} max {max:?}"
+        );
+    }
+
+    #[test]
+    fn exports_scene_graph_as_pge_world_state() {
+        let dreams = RobotDreams::open(puppyarm_project_path()).expect("open PuppyArm project");
+        let world = dreams.world_state();
+
+        assert_eq!(world.scenes.len(), 1);
+        assert!(
+            world
+                .entity(&pge_core::EntityId("object:trashbin".to_string()))
+                .is_some(),
+            "PGE world should preserve RobotDreams entity metadata"
+        );
+        assert!(
+            world.nodes.iter().any(|(_, node)| node.name.as_deref() == Some("Trash Bin")
+                && node.mesh.is_some()
+                && node.collider.is_some()),
+            "PGE world should include the trash bin mesh node with bounds"
+        );
+        assert!(
+            world
+                .cameras
+                .iter()
+                .any(|(_, camera)| camera.name.as_deref() == Some("Overhead Camera")),
+            "PGE world should include project cameras"
+        );
+        assert!(
+            world
+                .entities
+                .iter()
+                .filter(|entity| entity.kind == "robotVisual")
+                .count()
+                > 10,
+            "PGE world should include URDF visual entities"
         );
     }
 
