@@ -7,7 +7,7 @@ edition = "2024"
 libc = "0.2"
 feetech-servo = { path = "../crates/feetech-servo" }
 gltf = "1"
-pge-core = { git = "https://github.com/puppycorp/pge.git", rev = "a62b1ced2b4b6a73a482d51c9fd0689db6109a1c" }
+pge-core = { git = "https://github.com/puppycorp/pge.git", rev = "b332faf79fcc75c5ae4a9673512065c222fc4700" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 roxmltree = "0.20"
