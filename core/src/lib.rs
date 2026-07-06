@@ -899,6 +899,10 @@ impl RobotDreams {
     }
 }
 
+pub fn world_state_from_scene_graph(graph: &SceneGraph) -> pge::WorldState {
+    scene_graph_to_world_state(graph)
+}
+
 fn scene_graph_to_world_state(graph: &SceneGraph) -> pge::WorldState {
     let mut world = pge::WorldState::new();
     let scene = world.scenes.insert(pge::Scene {
