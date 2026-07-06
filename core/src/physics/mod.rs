@@ -42,6 +42,14 @@ impl PhysicsWorld {
     }
 
     pub fn step(&mut self) {
+        if self.bodies.is_empty()
+            && self.colliders.is_empty()
+            && self.impulse_joints.is_empty()
+            && self.multibody_joints.iter().next().is_none()
+        {
+            return;
+        }
+
         let physics_hooks = ();
         let event_handler = ();
         self.pipeline.step(

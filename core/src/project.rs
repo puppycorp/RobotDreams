@@ -1098,6 +1098,18 @@ impl RobotDreamsModel {
             .map(robot_state)
     }
 
+    pub fn robot_base_yaw(&self, robot_id_or_name: &str) -> Option<f64> {
+        self.robots
+            .iter()
+            .find(|robot| {
+                matches_query(
+                    robot_id_or_name,
+                    &string_candidates(&[&robot.config.id, &robot.config.name]),
+                )
+            })
+            .map(|robot| f64::from(robot.config.base_rotation[2]))
+    }
+
     pub fn robot_states(&self) -> Vec<RobotState> {
         self.robots.iter().map(robot_state).collect()
     }

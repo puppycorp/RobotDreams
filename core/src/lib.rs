@@ -500,6 +500,14 @@ impl RobotDreams {
         self.physics.step();
     }
 
+    pub fn advance_rover_drive_seconds(&mut self, dt: f32) {
+        if dt <= 0.0 {
+            return;
+        }
+        self.clock_sec += f64::from(dt);
+        self.integrate_rover_drives(f64::from(dt));
+    }
+
     pub fn snapshot(&self) -> RobotDreamsSnapshot {
         RobotDreamsSnapshot {
             clock_sec: self.clock_sec,
@@ -871,9 +879,7 @@ impl RobotDreams {
             let yaw = self
                 .model
                 .as_ref()
-                .and_then(|model| model.robot_state(&drive.robot_id))
-                .and_then(|state| state.base.rotation)
-                .map(|rotation| rotation[2])
+                .and_then(|model| model.robot_base_yaw(&drive.robot_id))
                 .unwrap_or(0.0);
             let steering_rad = (drive.steering_angle_deg - drive.steering_center_deg).to_radians();
             let yaw_rate = if drive.wheelbase_m > 0.0 {
@@ -924,7 +930,10 @@ fn insert_scene_node(
     node: &SceneNode,
     parent: pge::NodeParent,
 ) -> pge::ArenaId<pge::Node> {
-    if world.entity(&pge::EntityId(node.entity.0.clone())).is_none() {
+    if world
+        .entity(&pge::EntityId(node.entity.0.clone()))
+        .is_none()
+    {
         world.push_entity(pge::EntityMetadata {
             id: pge::EntityId(node.entity.0.clone()),
             name: node.name.clone(),
@@ -1019,9 +1028,9 @@ fn centered_bounds(size: [f32; 3]) -> pge::GeometryBounds {
 fn pge_mesh_source(geometry: &Geometry) -> pge::MeshSource {
     match geometry {
         Geometry::Box { size } => pge::MeshSource::Procedural(pge::Geometry::Box { size: *size }),
-        Geometry::Sphere { radius } => pge::MeshSource::Procedural(pge::Geometry::Sphere {
-            radius: *radius,
-        }),
+        Geometry::Sphere { radius } => {
+            pge::MeshSource::Procedural(pge::Geometry::Sphere { radius: *radius })
+        }
         Geometry::Cylinder { radius, height } => {
             pge::MeshSource::Procedural(pge::Geometry::Cylinder {
                 radius: *radius,
@@ -1103,14 +1112,16 @@ fn pge_camera(camera: &CameraSpec) -> pge::Camera {
             k3: distortion.k3,
         }),
         depth_range_m: camera.depth_range_m,
-        sensor_effects: camera.sensor_effects.map(|effects| pge::CameraSensorEffects {
-            exposure: effects.exposure,
-            gamma: effects.gamma,
-            rgb_noise_stddev: effects.rgb_noise_stddev,
-            depth_noise_stddev_m: effects.depth_noise_stddev_m,
-            depth_quantization_m: effects.depth_quantization_m,
-            noise_seed: effects.noise_seed,
-        }),
+        sensor_effects: camera
+            .sensor_effects
+            .map(|effects| pge::CameraSensorEffects {
+                exposure: effects.exposure,
+                gamma: effects.gamma,
+                rgb_noise_stddev: effects.rgb_noise_stddev,
+                depth_noise_stddev_m: effects.depth_noise_stddev_m,
+                depth_quantization_m: effects.depth_quantization_m,
+                noise_seed: effects.noise_seed,
+            }),
     }
 }
 
@@ -1620,9 +1631,12 @@ mod robotdreams_tests {
             "PGE world should preserve RobotDreams entity metadata"
         );
         assert!(
-            world.nodes.iter().any(|(_, node)| node.name.as_deref() == Some("Trash Bin")
-                && node.mesh.is_some()
-                && node.collider.is_some()),
+            world
+                .nodes
+                .iter()
+                .any(|(_, node)| node.name.as_deref() == Some("Trash Bin")
+                    && node.mesh.is_some()
+                    && node.collider.is_some()),
             "PGE world should include the trash bin mesh node with bounds"
         );
         assert!(
