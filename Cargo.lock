@@ -1238,7 +1238,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 [[package]]
 name = "pge-core"
 version = "0.1.0"
-source = "git+https://github.com/puppycorp/pge.git?rev=753b0ee72f681bf61ddff8c98b10538992526500#753b0ee72f681bf61ddff8c98b10538992526500"
+source = "git+https://github.com/puppycorp/pge.git?rev=d0c0e7231b92af47c9dd2daa2cb53b2ceae61c6a#d0c0e7231b92af47c9dd2daa2cb53b2ceae61c6a"
 dependencies = [
  "serde",
 ]
