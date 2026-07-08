@@ -6,7 +6,7 @@ use crate::scene_graph::{
     CameraDistortion, CameraIntrinsics, CameraProjection, CameraSensorEffects, EnvironmentSettings,
     LightKind, ReflectionProbeSettings, RenderSettings, ToneMapping,
 };
-use crate::scene_harness::UrdfSceneHarness;
+use crate::scene_harness::{LinkPose, UrdfSceneHarness};
 
 pub const ROBOT_DREAMS_MODEL_FORMAT: &str = "robotdreams.model.v1";
 pub const ROBOT_DREAMS_PROJECT_FORMAT: &str = "robotdreams.project.v1";
@@ -154,6 +154,12 @@ pub struct DeviceMapping {
 }
 
 #[derive(Clone, Debug)]
+pub struct SteeringMapping {
+    pub robot: String,
+    pub joints: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
 pub struct ServoCalibrationConfig {
     pub zero_offset: i16,
     pub direction: i8,
@@ -165,6 +171,7 @@ pub struct ServoDeviceConfig {
     pub name: String,
     pub profile: String,
     pub drives: Option<DeviceMapping>,
+    pub steers: Option<SteeringMapping>,
     pub calibration: ServoCalibrationConfig,
 }
 
@@ -311,6 +318,12 @@ pub struct RobotVisualMesh {
     pub name: String,
     pub asset: PathBuf,
     pub scale: [f32; 3],
+    pub translation: [f32; 3],
+    pub rotation_matrix: [[f32; 3]; 3],
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct RobotVisualTransform {
     pub translation: [f32; 3],
     pub rotation_matrix: [[f32; 3]; 3],
 }
@@ -793,18 +806,29 @@ fn tcp_state(robot: &LoadedRobotModel) -> Option<FrameState> {
     })
 }
 
+fn robot_visual_link_transform(
+    robot_transform: ([f64; 3], [[f64; 3]; 3]),
+    link_poses: &HashMap<String, LinkPose>,
+    link_name: &str,
+) -> Option<([f64; 3], [[f64; 3]; 3])> {
+    let link_pose = link_poses.get(link_name)?;
+    let link_transform = (link_pose.translation, link_pose.rotation);
+    Some(transform_then(robot_transform, link_transform))
+}
+
 fn robot_visual_meshes(robot: &LoadedRobotModel) -> Vec<RobotVisualMesh> {
     let base_transform = robot_base_transform(robot);
     let model_transform = model_transform(robot);
     let robot_transform = transform_then(base_transform, model_transform);
+    let link_poses = robot.harness.link_poses_world();
     let mut meshes = Vec::new();
 
     for link in &robot.harness.robot().links {
-        let Some(link_pose) = robot.harness.link_pose_world(&link.name) else {
+        let Some(link_transform) =
+            robot_visual_link_transform(robot_transform, &link_poses, &link.name)
+        else {
             continue;
         };
-        let link_transform = (link_pose.translation, link_pose.rotation);
-        let link_transform = transform_then(robot_transform, link_transform);
 
         for (index, visual) in link.visual.iter().enumerate() {
             let urdf_rs::Geometry::Mesh { filename, scale } = &visual.geometry else {
@@ -831,6 +855,36 @@ fn robot_visual_meshes(robot: &LoadedRobotModel) -> Vec<RobotVisualMesh> {
     }
 
     meshes
+}
+
+fn robot_visual_transforms(robot: &LoadedRobotModel) -> Vec<RobotVisualTransform> {
+    let base_transform = robot_base_transform(robot);
+    let model_transform = model_transform(robot);
+    let robot_transform = transform_then(base_transform, model_transform);
+    let link_poses = robot.harness.link_poses_world();
+    let mut transforms = Vec::new();
+
+    for link in &robot.harness.robot().links {
+        let Some(link_transform) =
+            robot_visual_link_transform(robot_transform, &link_poses, &link.name)
+        else {
+            continue;
+        };
+
+        for visual in &link.visual {
+            if !matches!(&visual.geometry, urdf_rs::Geometry::Mesh { .. }) {
+                continue;
+            }
+            let visual_transform = (*visual.origin.xyz, rpy_rotation(*visual.origin.rpy));
+            let transform = transform_then(link_transform, visual_transform);
+            transforms.push(RobotVisualTransform {
+                translation: f64_vec3_to_f32(transform.0),
+                rotation_matrix: f64_matrix_to_f32(transform.1),
+            });
+        }
+    }
+
+    transforms
 }
 
 fn robot_state(robot: &LoadedRobotModel) -> RobotState {
@@ -1116,6 +1170,13 @@ impl RobotDreamsModel {
 
     pub fn robot_visual_meshes(&self) -> Vec<RobotVisualMesh> {
         self.robots.iter().flat_map(robot_visual_meshes).collect()
+    }
+
+    pub fn robot_visual_transforms(&self) -> Vec<RobotVisualTransform> {
+        self.robots
+            .iter()
+            .flat_map(robot_visual_transforms)
+            .collect()
     }
 
     pub fn set_joint_angle(
@@ -1724,6 +1785,27 @@ fn parse_device_mapping(
     })
 }
 
+fn parse_steering_mapping(value: &serde_json::Value) -> Option<SteeringMapping> {
+    let mapping = value.get("steers").or_else(|| value.get("steering"))?;
+    let robot = json_string_path(mapping, &["robot"])
+        .unwrap_or("puppybot")
+        .to_string();
+    let joints = mapping
+        .get("joints")
+        .and_then(|joints| joints.as_array())
+        .map(|joints| {
+            joints
+                .iter()
+                .filter_map(|joint| joint.as_str().map(str::to_string))
+                .collect::<Vec<_>>()
+        })
+        .or_else(|| json_string_path(mapping, &["joint"]).map(|joint| vec![joint.to_string()]))?;
+    if joints.is_empty() {
+        return None;
+    }
+    Some(SteeringMapping { robot, joints })
+}
+
 fn parse_servo_calibration(value: &serde_json::Value) -> ServoCalibrationConfig {
     ServoCalibrationConfig {
         zero_offset: json_i16_path(value, &["calibration", "zeroOffset"]).unwrap_or(2048),
@@ -1754,6 +1836,7 @@ fn parse_device_config(value: &serde_json::Value) -> Option<DeviceConfig> {
             name,
             profile,
             drives: parse_device_mapping(value, "drives", "joint"),
+            steers: parse_steering_mapping(value),
             calibration: parse_servo_calibration(value),
         })),
         "dcMotor" | "dc_motor" | "hbridgeMotor" | "hbridge_motor" => {

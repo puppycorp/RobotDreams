@@ -8,8 +8,8 @@ libc = "0.2"
 feetech-servo = { path = "../crates/feetech-servo" }
 gltf = "1"
 pge-core = { git = "https://github.com/puppycorp/pge.git", rev = "d0c0e7231b92af47c9dd2daa2cb53b2ceae61c6a" }
+pge-physics = { git = "https://github.com/puppycorp/pge.git", rev = "d0c0e7231b92af47c9dd2daa2cb53b2ceae61c6a" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 roxmltree = "0.20"
 urdf-rs = "0.7"
-rapier3d = { version = "0.23", default-features = false, features = ["dim3", "f32"] }

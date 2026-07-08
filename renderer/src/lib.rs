@@ -9777,16 +9777,17 @@ fn rough_environment_radiance_rgb_without_probe(
 
     let (tangent, bitangent) = orthonormal_basis(axis);
     let spread = (roughness * roughness * 0.95).clamp(0.0, 0.95);
+    let diagonal = std::f32::consts::FRAC_1_SQRT_2;
     let samples = [
         (0.0, 0.0, 1.0),
         (1.0, 0.0, 0.72),
         (-1.0, 0.0, 0.72),
         (0.0, 1.0, 0.72),
         (0.0, -1.0, 0.72),
-        (0.7071, 0.7071, 0.45),
-        (-0.7071, 0.7071, 0.45),
-        (0.7071, -0.7071, 0.45),
-        (-0.7071, -0.7071, 0.45),
+        (diagonal, diagonal, 0.45),
+        (-diagonal, diagonal, 0.45),
+        (diagonal, -diagonal, 0.45),
+        (-diagonal, -diagonal, 0.45),
     ];
 
     let mut rgb = [0.0_f32; 3];

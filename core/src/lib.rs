@@ -92,6 +92,8 @@ pub struct HardwareServoRuntime {
     pub profile: String,
     pub drives_robot: String,
     pub drives_joint: String,
+    pub steers_robot: String,
+    pub steers_joints: Vec<String>,
     pub zero_offset: i16,
     pub direction: i8,
     pub target_position: i16,
@@ -159,6 +161,7 @@ struct MeshBoundsCacheKey {
 
 fn servo_runtime_from_config(config: &crate::project::ServoDeviceConfig) -> HardwareServoRuntime {
     let drives = config.drives.as_ref();
+    let steers = config.steers.as_ref();
     HardwareServoRuntime {
         id: config.id,
         name: config.name.clone(),
@@ -168,6 +171,12 @@ fn servo_runtime_from_config(config: &crate::project::ServoDeviceConfig) -> Hard
             .unwrap_or_default(),
         drives_joint: drives
             .map(|mapping| mapping.target.clone())
+            .unwrap_or_default(),
+        steers_robot: steers
+            .map(|mapping| mapping.robot.clone())
+            .unwrap_or_default(),
+        steers_joints: steers
+            .map(|mapping| mapping.joints.clone())
             .unwrap_or_default(),
         zero_offset: config.calibration.zero_offset,
         direction: config.calibration.direction,
@@ -397,6 +406,29 @@ fn apply_servo_snapshots_to_model(
             servo.direction,
         );
         let _ = model.set_joint_angle(&servo.drives_joint, radians);
+    }
+}
+
+fn apply_steering_angle_to_model(
+    model: &mut RobotDreamsModel,
+    hardware: &HardwareRuntime,
+    robot_id: &str,
+    steering_angle_deg: f64,
+    steering_center_deg: f64,
+) {
+    let radians = (steering_angle_deg - steering_center_deg).to_radians();
+    for bus in &hardware.buses {
+        for device in &bus.devices {
+            let HardwareDeviceRuntime::Servo(servo) = device else {
+                continue;
+            };
+            if servo.steers_robot != robot_id {
+                continue;
+            }
+            for joint in &servo.steers_joints {
+                let _ = model.set_joint_angle(joint, radians);
+            }
+        }
     }
 }
 
@@ -816,6 +848,15 @@ impl RobotDreams {
                 steering_center_deg,
                 wheelbase_m: DEFAULT_ROVER_WHEELBASE_M,
             });
+        }
+        if let Some(model) = &mut self.model {
+            apply_steering_angle_to_model(
+                model,
+                &self.hardware,
+                robot_id,
+                steering_angle_deg,
+                steering_center_deg,
+            );
         }
         true
     }

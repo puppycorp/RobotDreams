@@ -2,21 +2,35 @@ use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use pge_core::EntityId as PgeEntityId;
+use pge_renderer::{
+    FrameKind as PgeFrameKind, RenderRequest as PgeRenderRequest, RenderView as PgeRenderView,
+    Renderer as PgeRenderer,
+};
+use pge_wgpu_renderer::WgpuRenderer;
 use robotdreams_core::scene_graph::{
-    AUTO_CAMERA_ID, EnvironmentSettings, ObservationMetadata, ReflectionProbeSettings,
+    AUTO_CAMERA_ID, CameraSpec, EnvironmentSettings, ObservationMetadata, ReflectionProbeSettings,
     RenderSettings, SceneNode, SceneNodeKind, SegmentationPolicy, ShutterMode, ShutterPolicy,
     ToneMapping, prepare_observation_scene,
 };
-use robotdreams_core::{ObservationRequest, ObservationView, RobotDreams, RobotDreamsSnapshot};
+use robotdreams_core::{
+    ObservationRequest, ObservationView, RobotDreams, RobotDreamsSnapshot,
+    world_state_from_scene_graph,
+};
 use robotdreams_recorder::{NativeRecorder, RecordingArtifact, RecordingRequest};
 use robotdreams_renderer::{FrameBuffer, FrameKind, NativeRenderer, RenderOutput};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs::File;
 use std::io::{BufRead, Write};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, Stdio};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicUsize, Ordering},
+};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 const DEFAULT_SOCKET: &str = "/tmp/robotdreams-daemon.sock";
@@ -90,6 +104,9 @@ struct RenderFrameArgs {
 
     #[arg(long, value_enum, default_value_t = NativeView::DebugRgb)]
     view: NativeView,
+
+    #[arg(long, value_enum, default_value_t = RendererBackend::Auto)]
+    renderer: RendererBackend,
 
     #[arg(long, default_value_t = 1800)]
     width: u32,
@@ -264,6 +281,13 @@ enum NativeView {
     MaterialProperties,
     WorldPosition,
     State,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum RendererBackend {
+    Auto,
+    Gpu,
+    Cpu,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -517,6 +541,9 @@ struct SimulationRenderFrameArgs {
     #[arg(long, value_enum, default_value_t = NativeView::DebugRgb)]
     view: NativeView,
 
+    #[arg(long, value_enum, default_value_t = RendererBackend::Auto)]
+    renderer: RendererBackend,
+
     #[arg(long, default_value_t = 640)]
     width: u32,
 
@@ -705,6 +732,9 @@ struct SimulationRecordArgs {
 
     #[arg(long, value_enum, default_value_t = NativeView::DebugRgb)]
     view: NativeView,
+
+    #[arg(long, value_enum, default_value_t = RendererBackend::Auto)]
+    renderer: RendererBackend,
 
     #[arg(long, default_value_t = 10.0)]
     seconds: f32,
@@ -1395,6 +1425,8 @@ mod tests {
             "examples/puppyarm/project.json",
             "--out",
             "frame.bin",
+            "--renderer",
+            "cpu",
             "--camera",
             "overhead_camera",
             "--view",
@@ -1495,6 +1527,7 @@ mod tests {
         };
         assert_eq!(args.camera.as_deref(), Some("overhead_camera"));
         assert_eq!(args.view, NativeView::Depth);
+        assert_eq!(args.renderer, RendererBackend::Cpu);
         assert_eq!(args.width, 8);
         assert_eq!(args.height, 6);
         assert_eq!(args.segmentation_min_alpha, Some(1.0));
@@ -1691,6 +1724,8 @@ mod tests {
             "overhead_camera",
             "--view",
             "debug-rgb",
+            "--renderer",
+            "gpu",
             "--seconds",
             "1",
             "--fps",
@@ -1704,6 +1739,7 @@ mod tests {
         assert_eq!(args.out.as_deref(), Some(Path::new("recording.mp4")));
         assert_eq!(args.camera.as_deref(), Some("overhead_camera"));
         assert_eq!(args.view, NativeView::DebugRgb);
+        assert_eq!(args.renderer, RendererBackend::Gpu);
         assert_eq!(args.fps, 2);
     }
 
@@ -1865,6 +1901,50 @@ mod tests {
                 .pointer("/frames/0/path")
                 .and_then(|value| value.as_str()),
             Some("frames/frame-00000.png")
+        );
+    }
+
+    #[test]
+    fn daemon_trace_sample_data_promotes_observation_state_for_recording_tools() {
+        let data = serde_json::json!({
+            "schema": "robotdreams.observation.v1",
+            "state": {
+                "servoSnapshots": [{
+                    "id": 1,
+                    "presentPosition": 2048,
+                    "targetPosition": 2100,
+                }],
+                "virtualBus": {
+                    "buses": [{
+                        "id": "main_bus",
+                        "snapshots": [{
+                            "id": 1,
+                            "presentPosition": 2048,
+                            "targetPosition": 2100,
+                        }]
+                    }]
+                }
+            },
+            "frames": [],
+        });
+
+        let sample = daemon_trace_sample_data(&data, None);
+
+        assert_eq!(
+            sample
+                .pointer("/servoSnapshots/0/presentPosition")
+                .and_then(|value| value.as_i64()),
+            Some(2048)
+        );
+        assert_eq!(
+            sample
+                .pointer("/virtualBus/buses/0/snapshots/0/targetPosition")
+                .and_then(|value| value.as_i64()),
+            Some(2100)
+        );
+        assert_eq!(
+            sample.get("status").and_then(|value| value.as_str()),
+            Some("running")
         );
     }
 
@@ -2915,6 +2995,15 @@ fn write_trace_line(file: &mut std::fs::File, value: serde_json::Value) -> Resul
     Ok(())
 }
 
+type SharedTraceFile = Arc<Mutex<File>>;
+
+fn write_shared_trace_line(file: &SharedTraceFile, value: serde_json::Value) -> Result<()> {
+    let mut file = file
+        .lock()
+        .map_err(|_| anyhow!("recording trace file lock poisoned"))?;
+    write_trace_line(&mut file, value)
+}
+
 #[cfg(test)]
 fn filter_new_bus_events(
     mut data: serde_json::Value,
@@ -2971,9 +3060,121 @@ fn camera_id_from_scene(node: &SceneNode) -> Option<String> {
     node.children.iter().find_map(camera_id_from_scene)
 }
 
+fn camera_spec_from_scene<'a>(node: &'a SceneNode, camera_id: &str) -> Option<&'a CameraSpec> {
+    if let SceneNodeKind::Camera(camera) = &node.kind
+        && camera.id == camera_id
+    {
+        return Some(camera);
+    }
+    node.children
+        .iter()
+        .find_map(|child| camera_spec_from_scene(child, camera_id))
+}
+
 fn default_camera_id(dreams: &RobotDreams) -> Result<String> {
     let scene = dreams.scene_graph();
     camera_id_from_scene(&scene.root).ok_or_else(|| anyhow!("project does not define a camera"))
+}
+
+fn pge_camera_entity_id(request: &ObservationRequest) -> Option<PgeEntityId> {
+    request
+        .camera_id
+        .as_ref()
+        .map(|camera_id| PgeEntityId(format!("camera:{camera_id}")))
+}
+
+fn pge_render_request(request: &ObservationRequest) -> PgeRenderRequest {
+    PgeRenderRequest {
+        camera_id: pge_camera_entity_id(request),
+        views: vec![PgeRenderView::Rgb],
+        resolution: request.resolution,
+        settings: None,
+    }
+}
+
+fn gpu_debug_rgb_render(
+    dreams: &RobotDreams,
+    request: &ObservationRequest,
+) -> Result<RenderOutput> {
+    let scene = prepare_observation_scene(dreams.scene_graph(), request);
+    let world = world_state_from_scene_graph(&scene);
+    let pge_request = pge_render_request(request);
+    let mut renderer = WgpuRenderer::new().map_err(|err| anyhow!("{err}"))?;
+    let output = renderer
+        .render(&world, &pge_request)
+        .map_err(|err| anyhow!("{err}"))?;
+    let frame = output
+        .frames
+        .into_iter()
+        .find(|frame| frame.kind == PgeFrameKind::Rgb)
+        .ok_or_else(|| anyhow!("WGPU renderer did not produce RGB frame"))?;
+    let camera = request
+        .camera_id
+        .as_deref()
+        .and_then(|camera_id| camera_spec_from_scene(&scene.root, camera_id));
+    Ok(RenderOutput {
+        metadata: ObservationMetadata {
+            timestamp_sec: dreams.snapshot().clock_sec,
+            camera_id: camera.map(|camera| camera.id.clone()),
+            camera_pose: camera.map(|camera| camera.transform),
+            camera_projection: camera.map(|camera| camera.projection),
+            camera_intrinsics: camera.map(|camera| {
+                robotdreams_core::scene_graph::camera_intrinsics_for_resolution(
+                    camera,
+                    request.resolution,
+                )
+            }),
+            camera_distortion: camera.and_then(|camera| camera.distortion),
+            camera_extrinsics_matrix: camera
+                .map(|camera| robotdreams_core::scene_graph::transform_matrix(camera.transform)),
+            depth_range_m: camera.and_then(|camera| camera.depth_range_m),
+            sensor_effects: camera.and_then(|camera| camera.sensor_effects),
+            resolution: request.resolution,
+            views: request.views.clone(),
+            segmentation_policy: request.segmentation_policy,
+            shutter_policy: request.shutter_policy,
+            render_settings: request.render_settings.clone(),
+            entities: scene.entities.clone(),
+        },
+        frames: vec![FrameBuffer {
+            kind: FrameKind::DebugRgb,
+            width: frame.width,
+            height: frame.height,
+            bytes: frame.bytes,
+        }],
+        state: Some(dreams.snapshot()),
+    })
+}
+
+fn cpu_render(dreams: &RobotDreams, request: &ObservationRequest) -> Result<RenderOutput> {
+    let scene = prepare_observation_scene(dreams.scene_graph(), request);
+    NativeRenderer::new()
+        .render(&scene, Some(dreams.snapshot()), request)
+        .map_err(|err| anyhow!(err))
+}
+
+fn render_with_backend(
+    dreams: &RobotDreams,
+    request: &ObservationRequest,
+    view: NativeView,
+    backend: RendererBackend,
+) -> Result<RenderOutput> {
+    let gpu_supported = matches!(view, NativeView::DebugRgb);
+    if matches!(backend, RendererBackend::Gpu) && !gpu_supported {
+        bail!("GPU renderer currently supports debug-rgb only; use --renderer cpu for {view:?}");
+    }
+    if gpu_supported && !matches!(backend, RendererBackend::Cpu) {
+        match gpu_debug_rgb_render(dreams, request) {
+            Ok(output) => return Ok(output),
+            Err(err) if matches!(backend, RendererBackend::Gpu) => {
+                return Err(err).context("GPU renderer failed");
+            }
+            Err(err) => {
+                eprintln!("GPU renderer unavailable, falling back to CPU renderer: {err}");
+            }
+        }
+    }
+    cpu_render(dreams, request)
 }
 
 fn observation_view(view: NativeView) -> ObservationView {
@@ -3669,6 +3870,23 @@ fn daemon_trace_sample_data(
     frame_path: Option<&Path>,
 ) -> serde_json::Value {
     let mut data = data.clone();
+    if let Some(state) = data.get("state").cloned()
+        && let Some(object) = data.as_object_mut()
+    {
+        object
+            .entry("status".to_string())
+            .or_insert_with(|| serde_json::Value::String("running".to_string()));
+        if let Some(snapshots) = state.get("servoSnapshots") {
+            object
+                .entry("servoSnapshots".to_string())
+                .or_insert_with(|| snapshots.clone());
+        }
+        if let Some(virtual_bus) = state.get("virtualBus") {
+            object
+                .entry("virtualBus".to_string())
+                .or_insert_with(|| virtual_bus.clone());
+        }
+    }
     if let Some(frames) = data
         .get_mut("frames")
         .and_then(|frames| frames.as_array_mut())
@@ -3686,6 +3904,74 @@ fn daemon_trace_sample_data(
         }
     }
     data
+}
+
+async fn write_live_state_trace_samples(
+    socket: PathBuf,
+    project_path: PathBuf,
+    bind: String,
+    project: Option<String>,
+    seconds: f32,
+    trace_hz: f32,
+    trace_file: SharedTraceFile,
+    next_sample_index: Arc<AtomicUsize>,
+) -> Result<usize> {
+    let trace_hz = trace_hz.max(0.1);
+    let sample_count = (seconds.max(0.0) * trace_hz).ceil() as usize + 1;
+    let interval = std::time::Duration::from_secs_f32(1.0 / trace_hz);
+    let started = tokio::time::Instant::now();
+
+    for sample_index in 0..sample_count {
+        if sample_index > 0 {
+            tokio::time::sleep_until(started + interval.mul_f32(sample_index as f32)).await;
+        }
+        let response = send_request_or_start(
+            &socket,
+            &DaemonRequest::ProjectState {
+                project: project.clone(),
+                item: Some("simulation".to_string()),
+            },
+            &project_path,
+            &bind,
+        )
+        .await?;
+        if !response.ok {
+            bail!(
+                "{}",
+                response
+                    .message
+                    .unwrap_or_else(|| "daemon live state sample failed".to_string())
+            );
+        }
+        let data = response
+            .data
+            .ok_or_else(|| anyhow!("daemon state response did not include data"))?;
+        let virtual_bus_running = response.virtual_bus_running
+            || data
+                .pointer("/virtualBus/running")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false);
+        let virtual_bus_path = response.virtual_bus_path.or_else(|| {
+            data.pointer("/virtualBus/path")
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+        });
+        let index = next_sample_index.fetch_add(1, Ordering::Relaxed);
+        write_shared_trace_line(
+            &trace_file,
+            serde_json::json!({
+                "type": "sample",
+                "index": index,
+                "elapsedSec": started.elapsed().as_secs_f64(),
+                "ok": true,
+                "virtualBusRunning": virtual_bus_running,
+                "virtualBusPath": virtual_bus_path,
+                "data": data,
+            }),
+        )?;
+    }
+
+    Ok(sample_count)
 }
 
 fn write_daemon_render_frame(
@@ -3823,16 +4109,81 @@ fn render_frame(args: RenderFrameArgs) -> Result<()> {
             dreams.scene_graph().render_settings.clone(),
         )?,
     )?;
-    let scene = prepare_observation_scene(dreams.scene_graph(), &request);
-    let output = NativeRenderer::new()
-        .render(&scene, Some(dreams.snapshot()), &request)
-        .map_err(|err| anyhow!(err))?;
+    let output = render_with_backend(&dreams, &request, args.view, args.renderer)?;
     let frame = frame_for_view(&output, args.view)?;
     write_frame_buffer(&args.out, frame)?;
     let metadata = write_metadata(&args.out, &output.metadata)?;
 
     println!("Wrote {}", args.out.display());
     println!("Metadata {}", metadata.display());
+    Ok(())
+}
+
+fn record_simulation_gpu_debug_rgb(
+    dreams: &mut RobotDreams,
+    project_path: &Path,
+    args: &SimulationRecordArgs,
+    recording_request: &RecordingRequest,
+    trace_path: Option<&Path>,
+    fps: u32,
+    seconds: f32,
+) -> Result<()> {
+    let video_out = args
+        .out
+        .as_ref()
+        .context("debug-rgb recording requires --out unless --keep-frames or --trace-only is set")?;
+    let frame_count = (seconds * fps as f32).ceil() as usize + 1;
+    let dt = 1.0 / fps as f32;
+    let frame_dir = unique_temp_dir("robotdreams-gpu-record-frames");
+    std::fs::create_dir_all(&frame_dir)
+        .with_context(|| format!("create frame directory {}", frame_dir.display()))?;
+    let mut renderer = WgpuRenderer::new().map_err(|err| anyhow!("{err}"))?;
+    let mut snapshots = Vec::new();
+
+    for index in 0..frame_count {
+        if index > 0 {
+            dreams.advance_seconds(dt);
+        }
+        let snapshot = dreams.snapshot();
+        snapshots.push(snapshot);
+        let scene = prepare_observation_scene(dreams.scene_graph(), &recording_request.observation);
+        let world = world_state_from_scene_graph(&scene);
+        let pge_request = pge_render_request(&recording_request.observation);
+        let output = renderer
+            .render(&world, &pge_request)
+            .map_err(|err| anyhow!("{err}"))?;
+        let frame = output
+            .frames
+            .into_iter()
+            .find(|frame| frame.kind == PgeFrameKind::Rgb)
+            .ok_or_else(|| anyhow!("WGPU renderer did not produce RGB frame"))?;
+        write_frame_buffer(
+            &frame_dir.join(frame_file_name(index, NativeView::DebugRgb)),
+            &FrameBuffer {
+                kind: FrameKind::DebugRgb,
+                width: frame.width,
+                height: frame.height,
+                bytes: frame.bytes,
+            },
+        )?;
+    }
+
+    if let Some(trace_path) = trace_path {
+        write_native_trace(
+            trace_path,
+            project_path,
+            args.out.as_deref(),
+            recording_request,
+            &snapshots,
+        )?;
+        println!("Trace {}", trace_path.display());
+    }
+
+    encode_frames_to_mp4(&frame_dir, frame_count as u32, fps, video_out)?;
+    let _ = std::fs::remove_dir_all(&frame_dir);
+
+    println!("Frames: {frame_count} at {fps} fps");
+    println!("Wrote {}", video_out.display());
     Ok(())
 }
 
@@ -3938,6 +4289,30 @@ fn record_simulation(project_path: &Path, args: SimulationRecordArgs) -> Result<
         seconds,
         artifacts,
     };
+    if !args.trace_only
+        && !is_state
+        && args.keep_frames.is_none()
+        && matches!(args.view, NativeView::DebugRgb)
+        && !matches!(args.renderer, RendererBackend::Cpu)
+    {
+        match record_simulation_gpu_debug_rgb(
+            &mut dreams,
+            project_path,
+            &args,
+            &recording_request,
+            trace_path.as_deref(),
+            fps,
+            seconds,
+        ) {
+            Ok(()) => return Ok(()),
+            Err(err) if matches!(args.renderer, RendererBackend::Gpu) => {
+                return Err(err).context("GPU recording failed");
+            }
+            Err(err) => {
+                eprintln!("GPU recording unavailable, falling back to CPU renderer: {err}");
+            }
+        }
+    }
     let output = NativeRecorder::new()
         .record(&mut dreams, &recording_request)
         .map_err(|err| anyhow!(err))?;
@@ -4077,18 +4452,18 @@ async fn record_live_simulation(
         None
     };
 
-    let mut trace_file = if let Some(trace_path) = trace_path.as_ref() {
+    let trace_file = if let Some(trace_path) = trace_path.as_ref() {
         create_parent_dir(trace_path)?;
-        Some(
+        Some(Arc::new(Mutex::new(
             std::fs::File::create(trace_path)
                 .with_context(|| format!("create trace {}", trace_path.display()))?,
-        )
+        )))
     } else {
         None
     };
 
-    if let Some(file) = trace_file.as_mut() {
-        write_trace_line(
+    if let Some(file) = trace_file.as_ref() {
+        write_shared_trace_line(
             file,
             serde_json::json!({
                 "type": "recordingStart",
@@ -4104,55 +4479,71 @@ async fn record_live_simulation(
                 "height": args.height.max(1),
                 "native": true,
                 "liveDaemon": true,
+                "traceHz": args.trace_hz,
             }),
         )?;
     }
 
-    let mut start_clock = None;
+    let next_sample_index = Arc::new(AtomicUsize::new(0));
+    let state_trace_task = trace_file.as_ref().map(|file| {
+        tokio::spawn(write_live_state_trace_samples(
+            socket.to_path_buf(),
+            project_path.to_path_buf(),
+            bind.to_string(),
+            args.project.clone(),
+            seconds,
+            args.trace_hz,
+            file.clone(),
+            next_sample_index.clone(),
+        ))
+    });
+
     let mut written_frames = 0_usize;
-    for index in 0..frame_count {
-        if index > 0 {
-            tokio::time::sleep(frame_interval).await;
-        }
+    if wants_frames {
+        let mut frame_started = tokio::time::Instant::now();
+        for index in 0..frame_count {
+            if index > 0 {
+                tokio::time::sleep_until(frame_started + frame_interval).await;
+                frame_started += frame_interval;
+            }
 
-        let response = send_request_or_start(
-            socket,
-            &DaemonRequest::RenderFrame {
-                project: args.project.clone(),
-                simulation: args.simulation.clone(),
-                camera: args.camera.clone(),
-                views: Some(vec![observation_view(args.view)]),
-                width: Some(args.width.max(1)),
-                height: Some(args.height.max(1)),
-                segmentation_policy: segmentation_policy(args.segmentation_min_alpha),
-                shutter_policy: shutter_policy(
-                    args.shutter_exposure_sec,
-                    args.shutter_samples,
-                    args.shutter_mode,
-                    args.shutter_readout_sec,
-                ),
-                render_settings: render_settings.clone(),
-            },
-            project_path,
-            bind,
-        )
-        .await?;
-        if !response.ok {
-            bail!(
-                "{}",
-                response
-                    .message
-                    .unwrap_or_else(|| "daemon live recording sample failed".to_string())
-            );
-        }
-        let virtual_bus_running = response.virtual_bus_running;
-        let data = response
-            .data
-            .ok_or_else(|| anyhow!("daemon render-frame response did not include data"))?;
+            let response = send_request_or_start(
+                socket,
+                &DaemonRequest::RenderFrame {
+                    project: args.project.clone(),
+                    simulation: args.simulation.clone(),
+                    camera: args.camera.clone(),
+                    views: Some(vec![observation_view(args.view)]),
+                    width: Some(args.width.max(1)),
+                    height: Some(args.height.max(1)),
+                    segmentation_policy: segmentation_policy(args.segmentation_min_alpha),
+                    shutter_policy: shutter_policy(
+                        args.shutter_exposure_sec,
+                        args.shutter_samples,
+                        args.shutter_mode,
+                        args.shutter_readout_sec,
+                    ),
+                    render_settings: render_settings.clone(),
+                },
+                project_path,
+                bind,
+            )
+            .await?;
+            if !response.ok {
+                bail!(
+                    "{}",
+                    response
+                        .message
+                        .unwrap_or_else(|| "daemon live recording sample failed".to_string())
+                );
+            }
+            let virtual_bus_running = response.virtual_bus_running;
+            let data = response
+                .data
+                .ok_or_else(|| anyhow!("daemon render-frame response did not include data"))?;
 
-        let frame_path = if wants_frames {
             let frame_dir = args.keep_frames.as_ref().or(temp_frame_dir.as_ref());
-            if let Some(frame_dir) = frame_dir {
+            let frame_path = if let Some(frame_dir) = frame_dir {
                 std::fs::create_dir_all(frame_dir)
                     .with_context(|| format!("create frame directory {}", frame_dir.display()))?;
                 let path = frame_dir.join(frame_file_name(index, args.view));
@@ -4163,40 +4554,45 @@ async fn record_live_simulation(
                 Some(path)
             } else {
                 None
-            }
-        } else {
-            None
-        };
+            };
 
-        let timestamp_sec = data
-            .pointer("/metadata/timestamp_sec")
-            .and_then(|value| value.as_f64())
-            .unwrap_or(index as f64 / fps as f64);
-        let start = *start_clock.get_or_insert(timestamp_sec);
-        if let Some(file) = trace_file.as_mut() {
-            write_trace_line(
-                file,
-                serde_json::json!({
-                    "type": "sample",
-                    "index": index,
-                    "elapsedSec": timestamp_sec - start,
-                    "ok": true,
-                    "virtualBusRunning": virtual_bus_running,
-                    "framePath": frame_path.as_ref().map(|path| path.display().to_string()),
-                    "data": daemon_trace_sample_data(&data, frame_path.as_deref()),
-                }),
-            )?;
+            let timestamp_sec = data
+                .pointer("/metadata/timestamp_sec")
+                .and_then(|value| value.as_f64())
+                .unwrap_or(index as f64 / fps as f64);
+            if let Some(file) = trace_file.as_ref() {
+                write_shared_trace_line(
+                    file,
+                    serde_json::json!({
+                        "type": "frameSample",
+                        "index": index,
+                        "elapsedSec": timestamp_sec,
+                        "ok": true,
+                        "virtualBusRunning": virtual_bus_running,
+                        "framePath": frame_path.as_ref().map(|path| path.display().to_string()),
+                        "data": daemon_trace_sample_data(&data, frame_path.as_deref()),
+                    }),
+                )?;
+            }
         }
     }
 
-    if let Some(file) = trace_file.as_mut() {
-        write_trace_line(
+    let state_samples = if let Some(task) = state_trace_task {
+        task.await
+            .map_err(|err| anyhow!("live state trace task failed: {err}"))??
+    } else {
+        0
+    };
+
+    if let Some(file) = trace_file.as_ref() {
+        write_shared_trace_line(
             file,
             serde_json::json!({
                 "type": "recordingEnd",
                 "endedUnixMs": unix_time_millis(),
                 "elapsedSec": seconds,
-                "samples": frame_count,
+                "samples": state_samples,
+                "frameSamples": written_frames,
             }),
         )?;
     }

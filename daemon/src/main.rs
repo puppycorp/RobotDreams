@@ -22,17 +22,30 @@ use crate::app_controller::{
     AppController, SimulationRuntimeHandle, SimulationStatus, ViewportController,
 };
 use crate::projects_controller::ProjectsController;
-use crate::robot_scene_component::RobotSceneComponent;
+use crate::robot_scene_component::{RobotSceneComponent, servo_snapshots_json};
 use crate::virtual_bus::WorkbenchVirtualBusHandle;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use feetech_servo::servo::sim::FeetechServoSnapshot;
 use log::LevelFilter;
-use robotdreams_core::scene_graph::{
-    AUTO_CAMERA_ID, ObservationRequest, ObservationView, RenderSettings, SegmentationPolicy,
-    ShutterPolicy, prepare_observation_scene,
+use pge_app::{
+    Node as PgeAppNode, OrbitController, State as PgeAppState, Vec2, Vec3, WindowRenderConfig,
+    run_windowed,
 };
-use robotdreams_core::{VirtualServoSimConfig, run_virtual_servo_sim};
+use pge_core::{
+    ArenaId, EntityId as PgeEntityId, Node as PgeNode, Transform as PgeTransform, WorldState,
+};
+use pge_renderer::{RenderRequest, RenderView};
+use pge_wgpu_renderer::{WgpuRenderTimings, WgpuRenderer};
+use robotdreams_core::scene_graph::{
+    AUTO_CAMERA_ID, CameraProjection, CameraSpec, EntityId, EntityMetadata, ObservationRequest,
+    ObservationView, RenderSettings, SceneNode, SceneNodeKind, SegmentationPolicy, ShutterPolicy,
+    Transform, prepare_observation_scene,
+};
+use robotdreams_core::{
+    RobotDreams, RobotDreamsSnapshot, VirtualServoSimConfig, run_virtual_servo_sim,
+    world_state_from_scene_graph,
+};
 use robotdreams_renderer::{FrameBuffer, FrameKind, NativeRenderer, SceneGraphSample};
 use roxmltree::Document;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -87,10 +100,27 @@ struct Args {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Start the WGUI web server and print project/simulation URLs.
+    #[command(alias = "web", alias = "view")]
+    Serve(ServeArgs),
     /// Run a headless virtual servo bus and print its PTY path.
     Vbus(VbusArgs),
     /// Load a project/model and run the workbench runtime without WGUI.
     Headless(HeadlessArgs),
+    /// Run a project with a virtual servo bus, daemon socket, and native realtime preview.
+    Realtime(RealtimeArgs),
+    /// Profile the native realtime preview frame path without opening a window.
+    #[command(hide = true)]
+    ProfileRealtime(ProfileRealtimeArgs),
+}
+
+#[derive(Debug, ClapArgs)]
+struct ServeArgs {
+    #[arg(
+        value_name = "PROJECT_OR_URDF_PATH",
+        help = "RobotDreams project/model JSON, URDF file, or folder to open in the web server"
+    )]
+    path: Option<PathBuf>,
 }
 
 #[derive(Debug, ClapArgs)]
@@ -127,6 +157,72 @@ struct HeadlessArgs {
 
     #[arg(long)]
     json: bool,
+}
+
+#[derive(Debug, ClapArgs)]
+struct RealtimeArgs {
+    #[arg(
+        value_name = "PROJECT_OR_URDF_PATH",
+        help = "RobotDreams project/model JSON, URDF file, or folder to load"
+    )]
+    path: PathBuf,
+
+    #[arg(long, default_value_t = 640)]
+    width: u32,
+
+    #[arg(long, default_value_t = 360)]
+    height: u32,
+
+    #[arg(long, default_value_t = 0.03)]
+    target_x: f32,
+
+    #[arg(long, default_value_t = 0.08)]
+    target_y: f32,
+
+    #[arg(long, default_value_t = 0.16)]
+    target_z: f32,
+
+    #[arg(long, default_value_t = 0.82)]
+    camera_radius_m: f32,
+
+    #[arg(long, default_value_t = 35.0)]
+    camera_elevation_deg: f32,
+}
+
+#[derive(Debug, ClapArgs)]
+struct ProfileRealtimeArgs {
+    #[arg(
+        value_name = "PROJECT_OR_URDF_PATH",
+        help = "RobotDreams project/model JSON, URDF file, or folder to load"
+    )]
+    path: PathBuf,
+
+    #[arg(long, default_value_t = 640)]
+    width: u32,
+
+    #[arg(long, default_value_t = 360)]
+    height: u32,
+
+    #[arg(long, default_value_t = 0.03)]
+    target_x: f32,
+
+    #[arg(long, default_value_t = 0.08)]
+    target_y: f32,
+
+    #[arg(long, default_value_t = 0.16)]
+    target_z: f32,
+
+    #[arg(long, default_value_t = 0.82)]
+    camera_radius_m: f32,
+
+    #[arg(long, default_value_t = 35.0)]
+    camera_elevation_deg: f32,
+
+    #[arg(long, default_value_t = 5)]
+    warmup_frames: usize,
+
+    #[arg(long, default_value_t = 60)]
+    frames: usize,
 }
 
 #[derive(Clone)]
@@ -2991,6 +3087,7 @@ struct DaemonResponse {
 
 const DEFAULT_SIMULATION_ID: &str = "default";
 
+#[derive(Clone)]
 pub(crate) struct SimulationSession {
     pub(crate) simulation_id: String,
     pub(crate) url: String,
@@ -3310,6 +3407,263 @@ fn frame_json(frame: &FrameBuffer) -> serde_json::Value {
     })
 }
 
+fn snapshot_trace_state_json(snapshot: &RobotDreamsSnapshot) -> serde_json::Value {
+    let servo_buses = serde_json::Value::Array(
+        snapshot
+            .servo_snapshots
+            .iter()
+            .map(|bus| {
+                serde_json::json!({
+                    "id": bus.bus_id,
+                    "snapshots": servo_snapshots_json(&bus.snapshots),
+                })
+            })
+            .collect(),
+    );
+    let servo_snapshot_count = snapshot
+        .servo_snapshots
+        .iter()
+        .map(|bus| bus.snapshots.len())
+        .sum::<usize>();
+
+    serde_json::json!({
+        "clockSec": snapshot.clock_sec,
+        "robotCount": snapshot.robots.len(),
+        "servoBusCount": snapshot.servo_snapshots.len(),
+        "servoSnapshotCount": servo_snapshot_count,
+        "servoSnapshots": servo_buses.clone(),
+        "virtualBus": {
+            "buses": servo_buses,
+        },
+    })
+}
+
+const REALTIME_CAMERA_ID: &str = "realtime_preview_camera";
+
+fn add_realtime_camera(
+    scene: &mut robotdreams_core::scene_graph::SceneGraph,
+    eye: [f32; 3],
+    target: [f32; 3],
+    resolution: [u32; 2],
+) {
+    let entity = EntityId(format!("camera:{REALTIME_CAMERA_ID}"));
+    scene.entities.insert(
+        entity.clone(),
+        EntityMetadata {
+            id: entity.clone(),
+            name: "Realtime Preview Camera".to_string(),
+            kind: "camera".to_string(),
+            robot_id: None,
+            link_name: None,
+        },
+    );
+    scene.root.children.retain(
+        |node| !matches!(&node.kind, SceneNodeKind::Camera(camera) if camera.id == REALTIME_CAMERA_ID),
+    );
+    scene.root.children.push(SceneNode::camera(
+        entity.0,
+        "Realtime Preview Camera",
+        CameraSpec {
+            id: REALTIME_CAMERA_ID.to_string(),
+            name: "Realtime Preview Camera".to_string(),
+            transform: Transform::matrix(eye, look_at_matrix(eye, target, [0.0, 0.0, 1.0])),
+            fov_deg: 55.0,
+            projection: CameraProjection::Perspective,
+            resolution,
+            intrinsics: None,
+            distortion: None,
+            depth_range_m: None,
+            sensor_effects: None,
+        },
+    ));
+}
+
+fn robotdreams_to_orbit_space(position: [f32; 3]) -> Vec3 {
+    Vec3::new(position[0], position[2], position[1])
+}
+
+fn orbit_to_robotdreams_space(position: Vec3) -> [f32; 3] {
+    [position.x, position.z, position.y]
+}
+
+fn realtime_orbit_transform(
+    orbit_state: &PgeAppState,
+    camera_node_id: pge_app::ArenaId<PgeAppNode>,
+    orbit_controller: &OrbitController,
+) -> Transform {
+    let eye = orbit_state
+        .nodes
+        .get(&camera_node_id)
+        .map(|node| orbit_to_robotdreams_space(node.translation))
+        .unwrap_or_else(|| orbit_to_robotdreams_space(orbit_controller.target));
+    let target = orbit_to_robotdreams_space(orbit_controller.target);
+    Transform::matrix(eye, look_at_matrix(eye, target, [0.0, 0.0, 1.0]))
+}
+
+fn cross(left: [f32; 3], right: [f32; 3]) -> [f32; 3] {
+    [
+        left[1] * right[2] - left[2] * right[1],
+        left[2] * right[0] - left[0] * right[2],
+        left[0] * right[1] - left[1] * right[0],
+    ]
+}
+
+fn index_world_nodes(world: &WorldState) -> HashMap<String, ArenaId<PgeNode>> {
+    world
+        .nodes
+        .iter()
+        .map(|(node_id, node)| (node.entity.0.clone(), node_id))
+        .collect()
+}
+
+fn length(vector: [f32; 3]) -> f32 {
+    (vector[0] * vector[0] + vector[1] * vector[1] + vector[2] * vector[2]).sqrt()
+}
+
+fn look_at_matrix(eye: [f32; 3], target: [f32; 3], world_up: [f32; 3]) -> [[f32; 3]; 3] {
+    let forward = normalize(sub(eye, target));
+    let mut left = cross(world_up, forward);
+    if length(left) < 1.0e-5 {
+        left = [0.0, 1.0, 0.0];
+    }
+    left = normalize(left);
+    let up = normalize(cross(forward, left));
+    [
+        [-forward[0], left[0], up[0]],
+        [-forward[1], left[1], up[1]],
+        [-forward[2], left[2], up[2]],
+    ]
+}
+
+fn normalize(vector: [f32; 3]) -> [f32; 3] {
+    let len = length(vector).max(f32::EPSILON);
+    [vector[0] / len, vector[1] / len, vector[2] / len]
+}
+
+fn pge_transform(transform: Transform) -> PgeTransform {
+    PgeTransform {
+        translation: transform.translation,
+        rotation: transform.rotation,
+        rotation_matrix: transform.rotation_matrix,
+    }
+}
+
+fn set_world_node_transform(
+    world: &mut WorldState,
+    index: &HashMap<String, ArenaId<PgeNode>>,
+    entity: &str,
+    transform: PgeTransform,
+) {
+    if let Some(node_id) = index.get(entity)
+        && let Some(world_node) = world.nodes.get_mut(node_id)
+    {
+        world_node.transform = transform;
+    }
+}
+
+#[derive(Clone, Debug)]
+struct RealtimeVisualBinding {
+    entity: String,
+}
+
+fn realtime_visual_bindings(
+    visual_meshes: &[robotdreams_core::project::RobotVisualMesh],
+) -> Vec<RealtimeVisualBinding> {
+    visual_meshes
+        .iter()
+        .enumerate()
+        .map(|(visual_index, visual)| RealtimeVisualBinding {
+            entity: format!(
+                "robot:{}:visual:{}:{visual_index}",
+                visual.robot_id, visual.link_name
+            ),
+        })
+        .collect()
+}
+
+fn sub(left: [f32; 3], right: [f32; 3]) -> [f32; 3] {
+    [left[0] - right[0], left[1] - right[1], left[2] - right[2]]
+}
+
+fn sync_robot_visual_transforms(
+    world: &mut WorldState,
+    visual_bindings: &[RealtimeVisualBinding],
+    visual_transforms: &[robotdreams_core::project::RobotVisualTransform],
+    index: &HashMap<String, ArenaId<PgeNode>>,
+) {
+    for (binding, visual) in visual_bindings.iter().zip(visual_transforms.iter()) {
+        set_world_node_transform(
+            world,
+            index,
+            &binding.entity,
+            PgeTransform {
+                translation: visual.translation,
+                rotation: [0.0, 0.0, 0.0],
+                rotation_matrix: Some(visual.rotation_matrix),
+            },
+        );
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct RealtimeProfileTimings {
+    total: std::time::Duration,
+    visual_transforms: std::time::Duration,
+    sync_transforms: std::time::Duration,
+    render: WgpuRenderTimings,
+}
+
+fn duration_ms(duration: std::time::Duration) -> f64 {
+    duration.as_secs_f64() * 1000.0
+}
+
+fn averaged_duration_ms(duration: std::time::Duration, frames: usize) -> f64 {
+    if frames == 0 {
+        return 0.0;
+    }
+    duration_ms(duration) / frames as f64
+}
+
+fn realtime_profile_json(
+    label: &str,
+    timings: RealtimeProfileTimings,
+    frames: usize,
+) -> serde_json::Value {
+    serde_json::json!({
+        "label": label,
+        "frames": frames,
+        "avgMs": {
+            "total": averaged_duration_ms(timings.total, frames),
+            "visualTransforms": averaged_duration_ms(timings.visual_transforms, frames),
+            "syncTransforms": averaged_duration_ms(timings.sync_transforms, frames),
+            "renderTotal": averaged_duration_ms(timings.render.total, frames),
+            "renderCamera": averaged_duration_ms(timings.render.camera, frames),
+            "renderCollectObjects": averaged_duration_ms(timings.render.collect_objects, frames),
+            "renderMeshKeys": averaged_duration_ms(timings.render.mesh_keys, frames),
+            "renderEnsureGpuMeshes": averaged_duration_ms(timings.render.ensure_gpu_meshes, frames),
+            "renderObjectUniforms": averaged_duration_ms(timings.render.object_uniforms, frames),
+            "renderSubmit": averaged_duration_ms(timings.render.render_submit, frames),
+        },
+        "objectCount": timings.render.object_count,
+        "drawItemCount": timings.render.draw_item_count,
+    })
+}
+
+fn add_realtime_profile_timing(sum: &mut RealtimeProfileTimings, timing: RealtimeProfileTimings) {
+    sum.total += timing.total;
+    sum.visual_transforms += timing.visual_transforms;
+    sum.sync_transforms += timing.sync_transforms;
+    sum.render.total += timing.render.total;
+    sum.render.camera += timing.render.camera;
+    sum.render.collect_objects += timing.render.collect_objects;
+    sum.render.mesh_keys += timing.render.mesh_keys;
+    sum.render.ensure_gpu_meshes += timing.render.ensure_gpu_meshes;
+    sum.render.object_uniforms += timing.render.object_uniforms;
+    sum.render.render_submit += timing.render.render_submit;
+    sum.render.object_count = timing.render.object_count;
+    sum.render.draw_item_count = timing.render.draw_item_count;
+}
+
 fn render_simulation_observation_json(
     simulation: &SimulationSession,
     camera: Option<String>,
@@ -3368,12 +3722,7 @@ fn render_simulation_observation_json(
         "simulationId": simulation.simulation_id,
         "metadata": output.metadata,
         "frames": output.frames.iter().map(frame_json).collect::<Vec<_>>(),
-        "state": {
-            "clockSec": snapshot.clock_sec,
-            "robotCount": snapshot.robots.len(),
-            "servoBusCount": snapshot.servo_snapshots.len(),
-            "servoSnapshotCount": snapshot.servo_snapshots.iter().map(|bus| bus.snapshots.len()).sum::<usize>(),
-        },
+        "state": snapshot_trace_state_json(&snapshot),
     }))
 }
 
@@ -3381,6 +3730,15 @@ fn make_project_session(
     path: &Path,
     bind_addr: SocketAddr,
     projects: &HashMap<String, ProjectSession>,
+) -> Result<ProjectSession, String> {
+    make_project_session_with_virtual_bus(path, bind_addr, projects, None)
+}
+
+fn make_project_session_with_virtual_bus(
+    path: &Path,
+    bind_addr: SocketAddr,
+    projects: &HashMap<String, ProjectSession>,
+    virtual_bus_override: Option<WorkbenchVirtualBusHandle>,
 ) -> Result<ProjectSession, String> {
     let manifest_path = project_manifest_for_input_path(path)
         .ok_or_else(|| format!("{} is not a RobotDreams project", path.display()))?;
@@ -3400,7 +3758,9 @@ fn make_project_session(
             simulation_id: DEFAULT_SIMULATION_ID.to_string(),
             url: simulation_url,
             viewport_url,
-            virtual_bus: robotdreams_virtual_bus_for_project(&source_path),
+            virtual_bus: virtual_bus_override
+                .clone()
+                .unwrap_or_else(|| robotdreams_virtual_bus_for_project(&source_path)),
             simulation_runtime: SimulationRuntimeHandle::new(),
         },
     );
@@ -4266,28 +4626,35 @@ async fn handle_daemon_request(
             shutter_policy,
             render_settings,
         } => {
-            let mut state = state.lock().await;
-            let project_id = match state.resolve_project_id(project.as_deref()) {
-                Ok(project_id) => project_id,
-                Err(err) => return DaemonState::error(err),
-            };
-            let simulation_id = {
-                let project = state
-                    .projects
-                    .get_mut(&project_id)
-                    .expect("project resolved");
-                match project.ensure_simulation(simulation.as_deref()) {
-                    Ok(simulation_id) => simulation_id,
+            let (project_id, workbench_url, simulation) = {
+                let mut state = state.lock().await;
+                let project_id = match state.resolve_project_id(project.as_deref()) {
+                    Ok(project_id) => project_id,
                     Err(err) => return DaemonState::error(err),
-                }
-            };
-            let project = state.projects.get(&project_id).expect("project resolved");
-            let simulation = match project.simulation(&simulation_id) {
-                Ok(simulation) => simulation,
-                Err(err) => return DaemonState::error(err),
+                };
+                let simulation_id = {
+                    let project = state
+                        .projects
+                        .get_mut(&project_id)
+                        .expect("project resolved");
+                    match project.ensure_simulation(simulation.as_deref()) {
+                        Ok(simulation_id) => simulation_id,
+                        Err(err) => return DaemonState::error(err),
+                    }
+                };
+                let project = state.projects.get(&project_id).expect("project resolved");
+                let simulation = match project.simulation(&simulation_id) {
+                    Ok(simulation) => simulation.clone(),
+                    Err(err) => return DaemonState::error(err),
+                };
+                (
+                    project.project_id.clone(),
+                    project.workbench_url.clone(),
+                    simulation,
+                )
             };
             match render_simulation_observation_json(
-                simulation,
+                &simulation,
                 camera,
                 views,
                 width,
@@ -4296,13 +4663,16 @@ async fn handle_daemon_request(
                 shutter_policy,
                 render_settings,
             ) {
-                Ok(data) => DaemonState::response_with_data_for_project(
-                    project,
-                    simulation,
-                    Some("render frame".to_string()),
-                    true,
-                    data,
-                ),
+                Ok(data) => DaemonResponse {
+                    ok: true,
+                    message: Some("render frame".to_string()),
+                    project_id: Some(project_id),
+                    url: Some(workbench_url),
+                    already_open: true,
+                    virtual_bus_running: simulation.virtual_bus.is_running(),
+                    virtual_bus_path: simulation.virtual_bus.path(),
+                    data: Some(data),
+                },
                 Err(err) => DaemonState::error(err),
             }
         }
@@ -4429,6 +4799,16 @@ fn ensure_ui_bind_available(bind_addr: SocketAddr) -> Result<(), Box<dyn std::er
     Ok(())
 }
 
+fn init_logging() {
+    simple_logger::SimpleLogger::new()
+        .with_level(LevelFilter::Info)
+        .with_module_level("wgpu_core", LevelFilter::Warn)
+        .with_module_level("wgpu_hal", LevelFilter::Warn)
+        .without_timestamps()
+        .init()
+        .unwrap();
+}
+
 async fn run_app(
     path: Option<PathBuf>,
     bind_addr: SocketAddr,
@@ -4458,9 +4838,12 @@ async fn run_app(
         && let Some(project) = projects.get(project_id)
     {
         println!(
-            "Project URL: {} ({})",
+            "Workbench URL: {} ({})",
             project.workbench_url, project.project_id
         );
+        if let Ok(simulation) = project.default_simulation() {
+            println!("Simulation URL: {}", simulation.viewport_url);
+        }
     }
     if let Some(urdf_path) = urdf_path.as_ref() {
         println!("URDF file: {}", urdf_path.display());
@@ -4727,6 +5110,310 @@ async fn run_headless(args: HeadlessArgs) -> Result<(), Box<dyn std::error::Erro
     Ok(())
 }
 
+fn run_profile_realtime(args: ProfileRealtimeArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let project_path = project_manifest_for_input_path(&args.path)
+        .ok_or_else(|| format!("{} is not a RobotDreams project", args.path.display()))?;
+    let project_path = canonical_input_path(&project_path);
+    let robotdreams = Arc::new(StdMutex::new(
+        RobotDreams::open(&project_path).map_err(|err| format!("{err}"))?,
+    ));
+    let resolution = [args.width.max(1), args.height.max(1)];
+    let target = [args.target_x, args.target_y, args.target_z];
+    let elevation_rad = args.camera_elevation_deg.to_radians();
+    let initial_offset = [
+        args.camera_radius_m * elevation_rad.cos(),
+        -args.camera_radius_m * 0.35,
+        args.camera_radius_m * elevation_rad.sin(),
+    ];
+    let eye = [
+        target[0] + initial_offset[0],
+        target[1] + initial_offset[1],
+        target[2] + initial_offset[2],
+    ];
+    let mut orbit_controller = OrbitController::default();
+    orbit_controller.rot_speed = 0.008;
+    orbit_controller.min_dist = 0.08;
+    orbit_controller.max_dist = 20.0;
+    orbit_controller.set_from_target_and_position(
+        robotdreams_to_orbit_space(target),
+        robotdreams_to_orbit_space(eye),
+    );
+    let mut orbit_state = PgeAppState::default();
+    let orbit_camera_node_id = orbit_state.nodes.insert(PgeAppNode::default());
+    orbit_controller.process(&mut orbit_state, orbit_camera_node_id, 0.0);
+
+    let mut scene = {
+        let dreams = robotdreams
+            .lock()
+            .map_err(|_| "RobotDreams realtime profile lock poisoned")?;
+        dreams.scene_graph()
+    };
+    add_realtime_camera(&mut scene, eye, target, resolution);
+    let mut world = world_state_from_scene_graph(&scene);
+    let world_node_index = index_world_nodes(&world);
+    let camera_entity = format!("camera:{REALTIME_CAMERA_ID}");
+    set_world_node_transform(
+        &mut world,
+        &world_node_index,
+        &camera_entity,
+        pge_transform(realtime_orbit_transform(
+            &orbit_state,
+            orbit_camera_node_id,
+            &orbit_controller,
+        )),
+    );
+
+    let request = RenderRequest {
+        camera_id: Some(PgeEntityId(camera_entity)),
+        views: vec![RenderView::Rgb],
+        resolution,
+        settings: None,
+    };
+    let mut renderer = WgpuRenderer::new().map_err(|err| format!("{err}"))?;
+    let visual_bindings = {
+        let dreams = robotdreams
+            .lock()
+            .map_err(|_| "RobotDreams realtime profile lock poisoned")?;
+        dreams
+            .model()
+            .map(|model| realtime_visual_bindings(&model.robot_visual_meshes()))
+            .unwrap_or_default()
+    };
+    let mut first_frame = None;
+    let mut warmup_sum = RealtimeProfileTimings::default();
+    let mut measured_sum = RealtimeProfileTimings::default();
+    let total_frames = args.warmup_frames + args.frames.max(1);
+
+    for frame_index in 0..total_frames {
+        let frame_start = std::time::Instant::now();
+
+        let visual_transform_start = std::time::Instant::now();
+        let visual_transforms = {
+            let dreams = robotdreams
+                .lock()
+                .map_err(|_| "RobotDreams realtime profile lock poisoned")?;
+            dreams
+                .model()
+                .map(|model| model.robot_visual_transforms())
+                .unwrap_or_default()
+        };
+        let visual_transform_elapsed = visual_transform_start.elapsed();
+
+        let sync_start = std::time::Instant::now();
+        sync_robot_visual_transforms(
+            &mut world,
+            &visual_bindings,
+            &visual_transforms,
+            &world_node_index,
+        );
+        let sync_elapsed = sync_start.elapsed();
+
+        let render_timing = renderer.render_profile(&world, &request)?;
+        let frame_timing = RealtimeProfileTimings {
+            total: frame_start.elapsed(),
+            visual_transforms: visual_transform_elapsed,
+            sync_transforms: sync_elapsed,
+            render: render_timing,
+        };
+
+        if frame_index == 0 {
+            first_frame = Some(frame_timing);
+        }
+        if frame_index < args.warmup_frames {
+            add_realtime_profile_timing(&mut warmup_sum, frame_timing);
+        } else {
+            add_realtime_profile_timing(&mut measured_sum, frame_timing);
+        }
+    }
+
+    let mut results = Vec::new();
+    if let Some(first_frame) = first_frame {
+        results.push(realtime_profile_json("firstFrame", first_frame, 1));
+    }
+    if args.warmup_frames > 0 {
+        results.push(realtime_profile_json(
+            "warmupAverage",
+            warmup_sum,
+            args.warmup_frames,
+        ));
+    }
+    results.push(realtime_profile_json(
+        "steadyAverage",
+        measured_sum,
+        args.frames.max(1),
+    ));
+
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "project": project_path,
+            "resolution": resolution,
+            "warmupFrames": args.warmup_frames,
+            "measuredFrames": args.frames.max(1),
+            "results": results,
+        }))?
+    );
+    Ok(())
+}
+
+async fn run_realtime(
+    args: RealtimeArgs,
+    bind_addr: SocketAddr,
+    socket_path: PathBuf,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let project_path = project_manifest_for_input_path(&args.path)
+        .ok_or_else(|| format!("{} is not a RobotDreams project", args.path.display()))?;
+    let project_path = canonical_input_path(&project_path);
+    let robotdreams = Arc::new(StdMutex::new(
+        RobotDreams::open(&project_path).map_err(|err| format!("{err}"))?,
+    ));
+    let virtual_bus = WorkbenchVirtualBusHandle::new_with_robotdreams(robotdreams.clone());
+
+    let mut projects = HashMap::new();
+    let project = make_project_session_with_virtual_bus(
+        &project_path,
+        bind_addr,
+        &projects,
+        Some(virtual_bus.clone()),
+    )?;
+    let project_id = project.project_id.clone();
+    {
+        let simulation = project.default_simulation()?;
+        let mut controller = DaemonState::controller_for_project(&project, simulation);
+        match controller.start_virtual_bus()? {
+            Some(path) => println!("Virtual servo bus: {path}"),
+            None => println!("Virtual servo bus: no virtual bus configured"),
+        }
+    }
+    projects.insert(project_id.clone(), project);
+
+    let daemon_state = Arc::new(AsyncMutex::new(DaemonState {
+        bind_addr,
+        projects,
+        scenario_sessions: HashMap::new(),
+        active_scenarios: HashMap::new(),
+    }));
+    tokio::spawn(run_daemon_socket(socket_path.clone(), daemon_state));
+    println!("RobotDreams daemon socket: {}", socket_path.display());
+    println!("Project: {}", project_path.display());
+    println!("Controls: right-drag orbit, middle-drag pan, mouse wheel zoom.");
+    println!("Close the preview window or press Ctrl-C to stop.");
+
+    let resolution = [args.width.max(1), args.height.max(1)];
+    let target = [args.target_x, args.target_y, args.target_z];
+    let elevation_rad = args.camera_elevation_deg.to_radians();
+    let initial_offset = [
+        args.camera_radius_m * elevation_rad.cos(),
+        -args.camera_radius_m * 0.35,
+        args.camera_radius_m * elevation_rad.sin(),
+    ];
+    let eye = [
+        target[0] + initial_offset[0],
+        target[1] + initial_offset[1],
+        target[2] + initial_offset[2],
+    ];
+    let mut orbit_controller = OrbitController::default();
+    orbit_controller.rot_speed = 0.008;
+    orbit_controller.min_dist = 0.08;
+    orbit_controller.max_dist = 20.0;
+    orbit_controller.set_from_target_and_position(
+        robotdreams_to_orbit_space(target),
+        robotdreams_to_orbit_space(eye),
+    );
+    let mut orbit_state = PgeAppState::default();
+    let orbit_camera_node_id = orbit_state.nodes.insert(PgeAppNode::default());
+    orbit_controller.process(&mut orbit_state, orbit_camera_node_id, 0.0);
+    let mut scene = {
+        let dreams = robotdreams
+            .lock()
+            .map_err(|_| "RobotDreams realtime lock poisoned")?;
+        dreams.scene_graph()
+    };
+    add_realtime_camera(&mut scene, eye, target, resolution);
+    let mut world = world_state_from_scene_graph(&scene);
+    let world_node_index = index_world_nodes(&world);
+    let camera_entity = format!("camera:{REALTIME_CAMERA_ID}");
+    set_world_node_transform(
+        &mut world,
+        &world_node_index,
+        &camera_entity,
+        pge_transform(realtime_orbit_transform(
+            &orbit_state,
+            orbit_camera_node_id,
+            &orbit_controller,
+        )),
+    );
+
+    let request = RenderRequest {
+        camera_id: Some(PgeEntityId(camera_entity.clone())),
+        views: vec![RenderView::Rgb],
+        resolution,
+        settings: None,
+    };
+    let visual_bindings = {
+        let dreams = robotdreams
+            .lock()
+            .map_err(|_| "RobotDreams realtime lock poisoned")?;
+        dreams
+            .model()
+            .map(|model| realtime_visual_bindings(&model.robot_visual_meshes()))
+            .unwrap_or_default()
+    };
+    let robotdreams_for_render = robotdreams.clone();
+    run_windowed(
+        world,
+        request,
+        WindowRenderConfig {
+            title: "RobotDreams Realtime".to_string(),
+            resolution,
+        },
+        move |world, context| {
+            let [dx, dy] = context.input.right_drag_delta_px;
+            if dx != 0.0 || dy != 0.0 {
+                orbit_controller.orbit(Vec2::new(dx, dy));
+            }
+            let [dx, dy] = context.input.middle_drag_delta_px;
+            if dx != 0.0 || dy != 0.0 {
+                orbit_controller.pan(Vec2::new(dx, dy));
+            }
+            if context.input.scroll_delta_lines != 0.0 {
+                orbit_controller.zoom(context.input.scroll_delta_lines);
+            }
+            orbit_controller.process(&mut orbit_state, orbit_camera_node_id, 0.0);
+            set_world_node_transform(
+                world,
+                &world_node_index,
+                &camera_entity,
+                pge_transform(realtime_orbit_transform(
+                    &orbit_state,
+                    orbit_camera_node_id,
+                    &orbit_controller,
+                )),
+            );
+            let visual_transforms = {
+                let dreams = robotdreams_for_render.lock().map_err(|_| {
+                    pge_renderer::RenderError::new("RobotDreams realtime lock poisoned")
+                })?;
+                dreams
+                    .model()
+                    .map(|model| model.robot_visual_transforms())
+                    .unwrap_or_default()
+            };
+            sync_robot_visual_transforms(
+                world,
+                &visual_bindings,
+                &visual_transforms,
+                &world_node_index,
+            );
+            Ok(true)
+        },
+    )
+    .map_err(|err| format!("{err}"))?;
+
+    virtual_bus.stop();
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let Args {
@@ -4737,6 +5424,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } = Args::parse();
 
     match command {
+        Some(Command::Serve(serve_args)) => {
+            let bind_addr: SocketAddr = bind.parse().map_err(|err| {
+                format!(
+                    "invalid --bind value '{}': {} (expected host:port)",
+                    bind, err
+                )
+            })?;
+
+            init_logging();
+
+            run_app(serve_args.path, bind_addr, socket).await?;
+            return Ok(());
+        }
         Some(Command::Vbus(vbus_args)) => {
             let config = VirtualServoSimConfig {
                 first_servo_id: vbus_args.first_servo_id,
@@ -4751,6 +5451,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             run_headless(headless_args).await?;
             return Ok(());
         }
+        Some(Command::Realtime(realtime_args)) => {
+            let bind_addr: SocketAddr = bind.parse().map_err(|err| {
+                format!(
+                    "invalid --bind value '{}': {} (expected host:port)",
+                    bind, err
+                )
+            })?;
+
+            init_logging();
+
+            run_realtime(realtime_args, bind_addr, socket).await?;
+            return Ok(());
+        }
+        Some(Command::ProfileRealtime(profile_args)) => {
+            init_logging();
+            run_profile_realtime(profile_args)?;
+            return Ok(());
+        }
         None => {
             let bind_addr: SocketAddr = bind.parse().map_err(|err| {
                 format!(
@@ -4759,11 +5477,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 )
             })?;
 
-            simple_logger::SimpleLogger::new()
-                .with_level(LevelFilter::Info)
-                .without_timestamps()
-                .init()
-                .unwrap();
+            init_logging();
 
             run_app(path, bind_addr, socket).await?;
             return Ok(());
@@ -5236,6 +5950,25 @@ mod tests {
             .and_then(|value| value.as_str())
             .expect("initial frame bytes");
         assert!(!frame_bytes.is_empty());
+        assert_eq!(
+            before
+                .pointer("/state/servoSnapshotCount")
+                .and_then(|value| value.as_u64()),
+            Some(4)
+        );
+        assert_eq!(
+            before
+                .pointer("/state/virtualBus/buses/0/snapshots/0/id")
+                .and_then(|value| value.as_u64()),
+            Some(1)
+        );
+        assert!(
+            before
+                .pointer("/state/virtualBus/buses/0/snapshots/0/presentPosition")
+                .and_then(|value| value.as_i64())
+                .is_some(),
+            "render-frame state should include traceable servo snapshots"
+        );
 
         simulation.virtual_bus.set_target_position(1, 2200);
 

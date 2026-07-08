@@ -64,6 +64,18 @@ impl UrdfSceneHarness {
             .map(LinkPose::from)
     }
 
+    pub fn link_poses_world(&self) -> HashMap<String, LinkPose> {
+        let Some(root) = self.root_link_name() else {
+            return HashMap::new();
+        };
+        let mut poses = HashMap::new();
+        self.collect_link_transforms(&root, Transform::identity(), &mut poses);
+        poses
+            .into_iter()
+            .map(|(link, transform)| (link, LinkPose::from(transform)))
+            .collect()
+    }
+
     pub fn link_point_world(&self, link_name: &str, point: [f64; 3]) -> Option<[f64; 3]> {
         let root = self.root_link_name()?;
         self.link_transform_from(&root, Transform::identity(), link_name)
@@ -116,6 +128,31 @@ impl UrdfSceneHarness {
         }
 
         None
+    }
+
+    fn collect_link_transforms(
+        &self,
+        current_link: &str,
+        current_transform: Transform,
+        poses: &mut HashMap<String, Transform>,
+    ) {
+        poses.insert(current_link.to_string(), current_transform);
+
+        for joint in self
+            .robot
+            .joints
+            .iter()
+            .filter(|joint| joint.parent.link == current_link)
+        {
+            let child_transform = current_transform.then(joint_transform(
+                joint,
+                self.joint_values_rad
+                    .get(&joint.name)
+                    .copied()
+                    .unwrap_or_default(),
+            ));
+            self.collect_link_transforms(&joint.child.link, child_transform, poses);
+        }
     }
 }
 
