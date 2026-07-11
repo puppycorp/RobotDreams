@@ -12,14 +12,16 @@ use std::thread;
 use crate::physics::PhysicsWorld;
 use crate::project::{BusConfig, DeviceConfig, ProjectConfig};
 use crate::scene_graph::{
-    CameraSpec, EntityId, EntityMetadata, Geometry, GeometryBounds, LightSpec as SceneLightSpec,
-    Material, ReflectionProbeSettings, RenderSettings as SceneRenderSettings, SceneGraph,
-    SceneNode, Transform,
+    CameraProjection, CameraSpec, EntityId, EntityMetadata, Geometry, GeometryBounds,
+    LightSpec as SceneLightSpec, Material, ReflectionProbeSettings,
+    RenderSettings as SceneRenderSettings, SceneGraph, SceneNode, Transform,
 };
 use crate::urdf::{UrdfModel, load_urdf};
 use feetech_servo::servo::protocol::serial_bus::ProtocolError;
 use feetech_servo::servo::sim::{FeetechBusEvent, FeetechBusSim, FeetechServoSnapshot};
 use pge_core as pge;
+use pge_renderer::{RenderRequest, RenderView, RgbaFrame};
+use pge_wgpu_renderer::WgpuRenderer;
 
 pub mod physics;
 pub mod project;
@@ -28,13 +30,44 @@ pub mod scene_harness;
 pub mod urdf;
 
 pub use project::{
-    FrameState, JointState, LinkState, ModelEntityKind, RobotDreamsEntity, RobotDreamsModel,
-    RobotState, SceneLocation,
+    FrameState, JointState, LinkState, ModelEntityKind, ResolvedFrameState, RigidTransform,
+    RobotDreamsEntity, RobotDreamsModel, RobotState, SceneLocation,
 };
 pub use scene_graph::{
     EnvironmentSettings, LightKind, LightSpec, ObservationMetadata, ObservationRequest,
     ObservationView, RenderSettings, SceneNodeKind, SegmentationPolicy, ShutterPolicy, ToneMapping,
 };
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CoordinateDebugOverlayOptions {
+    pub enabled: bool,
+    pub grid_half_extent_m: f32,
+    pub grid_step_m: f32,
+    pub axis_length_m: f32,
+    pub line_thickness_m: f32,
+    pub marker_radius_m: f32,
+}
+
+impl Default for CoordinateDebugOverlayOptions {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            grid_half_extent_m: 0.5,
+            grid_step_m: 0.05,
+            axis_length_m: 0.55,
+            line_thickness_m: 0.004,
+            marker_radius_m: 0.028,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct CoordinateDebugMarkerPositions {
+    pub robot_id: String,
+    pub floor_z: f32,
+    pub current_tcp: Option<[f32; 3]>,
+    pub target_tcp: Option<[f32; 3]>,
+}
 
 pub struct RobotDreams {
     physics: PhysicsWorld,
@@ -507,6 +540,16 @@ impl RobotDreams {
         self.model.as_ref()?.robot_state(robot_id_or_name)
     }
 
+    pub fn frame_state(
+        &self,
+        robot_id_or_name: &str,
+        frame_name: &str,
+    ) -> Option<ResolvedFrameState> {
+        self.model
+            .as_ref()?
+            .frame_state(robot_id_or_name, frame_name)
+    }
+
     pub fn set_joint_angle(
         &mut self,
         name: impl AsRef<str>,
@@ -691,8 +734,105 @@ impl RobotDreams {
         graph
     }
 
+    pub fn scene_graph_with_coordinate_debug_overlay(
+        &self,
+        options: CoordinateDebugOverlayOptions,
+    ) -> SceneGraph {
+        let mut graph = self.scene_graph();
+        if options.enabled {
+            self.append_coordinate_debug_overlay(&mut graph, options);
+        }
+        graph
+    }
+
+    pub fn coordinate_debug_marker_positions(
+        &self,
+        options: CoordinateDebugOverlayOptions,
+    ) -> Vec<CoordinateDebugMarkerPositions> {
+        let Some(model) = &self.model else {
+            return Vec::new();
+        };
+        let target_model = self.target_model_state();
+        let overlay_z = options.line_thickness_m.max(0.001) * 2.0;
+        model
+            .robot_states()
+            .into_iter()
+            .filter_map(|robot| {
+                let current_tcp = robot
+                    .tcp
+                    .as_ref()
+                    .and_then(|tcp| tcp.location.as_ref())
+                    .map(|location| f64_vec3_to_f32(location.position));
+                let target_tcp = target_model
+                    .as_ref()
+                    .and_then(|target_model| target_model.robot_state(&robot.id))
+                    .and_then(|target_robot| target_robot.tcp)
+                    .and_then(|tcp| tcp.location)
+                    .map(|location| f64_vec3_to_f32(location.position));
+                if current_tcp.is_none() && target_tcp.is_none() {
+                    return None;
+                }
+                Some(CoordinateDebugMarkerPositions {
+                    robot_id: robot.id,
+                    floor_z: f64_vec3_to_f32(robot.base.position)[2] + overlay_z,
+                    current_tcp,
+                    target_tcp,
+                })
+            })
+            .collect()
+    }
+
     pub fn world_state(&self) -> pge::WorldState {
         scene_graph_to_world_state(&self.scene_graph())
+    }
+
+    fn append_coordinate_debug_overlay(
+        &self,
+        graph: &mut SceneGraph,
+        options: CoordinateDebugOverlayOptions,
+    ) {
+        let Some(model) = &self.model else {
+            return;
+        };
+        let target_model = self.target_model_state();
+        for robot in model.robot_states() {
+            let Some(base_rotation) = robot.base.rotation else {
+                continue;
+            };
+            let current_tcp = robot.tcp.as_ref().and_then(|tcp| tcp.location.as_ref());
+            let target_tcp = target_model
+                .as_ref()
+                .and_then(|target_model| target_model.robot_state(&robot.id))
+                .and_then(|target_robot| target_robot.tcp)
+                .and_then(|tcp| tcp.location);
+            append_robot_coordinate_debug_overlay(
+                graph,
+                &robot.id,
+                f64_vec3_to_f32(robot.base.position),
+                f64_vec3_to_f32(base_rotation),
+                robot.frames.get("armBase"),
+                current_tcp.map(|location| f64_vec3_to_f32(location.position)),
+                target_tcp.map(|location| f64_vec3_to_f32(location.position)),
+                options,
+            );
+        }
+    }
+
+    fn target_model_state(&self) -> Option<RobotDreamsModel> {
+        let mut model = self.model.clone()?;
+        for bus in &self.virtual_buses {
+            let snapshots = bus
+                .sim
+                .servo_snapshots()
+                .into_iter()
+                .map(|mut snapshot| {
+                    snapshot.present_position = snapshot.target_position;
+                    snapshot
+                })
+                .collect::<Vec<_>>();
+            apply_servo_snapshots_to_model(&mut model, &self.hardware, &bus.id, &snapshots);
+        }
+        Some(model)
     }
 
     pub fn camera_spec(&self, camera_id: &str) -> Option<CameraSpec> {
@@ -948,6 +1088,588 @@ impl RobotDreams {
 
 pub fn world_state_from_scene_graph(graph: &SceneGraph) -> pge::WorldState {
     scene_graph_to_world_state(graph)
+}
+
+pub const ROBOTDREAMS_PGE_CAMERA_ID: &str = "robotdreams_pge_camera";
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct RobotDreamsPgeTextLabel {
+    pub id: String,
+    pub text: String,
+    pub position: [f32; 3],
+    pub color: [f32; 4],
+    pub background_color: [f32; 4],
+    pub font_size_px: f32,
+    pub billboard: bool,
+}
+
+impl RobotDreamsPgeTextLabel {
+    pub fn overlay(id: impl Into<String>, text: impl Into<String>, row: usize) -> Self {
+        Self {
+            id: id.into(),
+            text: text.into(),
+            position: [12.0, 12.0 + row as f32 * 18.0, 0.0],
+            color: [0.86, 0.94, 1.0, 1.0],
+            background_color: [0.02, 0.05, 0.08, 0.78],
+            font_size_px: 1.0,
+            billboard: false,
+        }
+    }
+
+    pub fn overlay_with_color(
+        id: impl Into<String>,
+        text: impl Into<String>,
+        row: usize,
+        color: [f32; 4],
+    ) -> Self {
+        let mut label = Self::overlay(id, text, row);
+        label.color = color;
+        label
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct RobotDreamsPgeFrameOptions {
+    pub resolution: [u32; 2],
+    pub target: [f32; 3],
+    pub camera_radius_m: f32,
+    pub camera_elevation_deg: f32,
+    pub debug_coordinate_overlay: bool,
+    pub text_labels: Vec<RobotDreamsPgeTextLabel>,
+}
+
+impl Default for RobotDreamsPgeFrameOptions {
+    fn default() -> Self {
+        Self {
+            resolution: [960, 540],
+            target: [0.0, 0.0, 0.16],
+            camera_radius_m: 1.2,
+            camera_elevation_deg: 35.0,
+            debug_coordinate_overlay: true,
+            text_labels: Vec::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct RobotDreamsPgeFrame {
+    pub world: pge::WorldState,
+    pub request: RenderRequest,
+    pub camera_entity: pge::EntityId,
+}
+
+pub fn robotdreams_pge_frame(
+    dreams: &RobotDreams,
+    options: RobotDreamsPgeFrameOptions,
+) -> RobotDreamsPgeFrame {
+    let elevation_rad = options.camera_elevation_deg.to_radians();
+    let eye = [
+        options.target[0] + options.camera_radius_m * elevation_rad.cos(),
+        options.target[1] - options.camera_radius_m * 0.45,
+        options.target[2] + options.camera_radius_m * elevation_rad.sin(),
+    ];
+    let mut scene =
+        dreams.scene_graph_with_coordinate_debug_overlay(CoordinateDebugOverlayOptions {
+            enabled: options.debug_coordinate_overlay,
+            ..CoordinateDebugOverlayOptions::default()
+        });
+    add_pge_camera(&mut scene, eye, options.target, options.resolution);
+    let mut world = world_state_from_scene_graph(&scene);
+    if options.debug_coordinate_overlay {
+        for label in coordinate_debug_legend_labels(0) {
+            world.text_labels.push(pge::TextLabel {
+                entity: pge::EntityId(format!("label:{}", label.id)),
+                text: label.text,
+                position: label.position,
+                color: label.color,
+                background_color: label.background_color,
+                font_size_px: label.font_size_px,
+                billboard: label.billboard,
+            });
+        }
+    }
+    for label in options.text_labels {
+        world.text_labels.push(pge::TextLabel {
+            entity: pge::EntityId(format!("label:{}", label.id)),
+            text: label.text,
+            position: label.position,
+            color: label.color,
+            background_color: label.background_color,
+            font_size_px: label.font_size_px,
+            billboard: label.billboard,
+        });
+    }
+    let camera_entity = pge::EntityId(format!("camera:{ROBOTDREAMS_PGE_CAMERA_ID}"));
+    let request = RenderRequest {
+        camera_id: Some(camera_entity.clone()),
+        views: vec![RenderView::Rgb],
+        resolution: options.resolution,
+        settings: None,
+    };
+    RobotDreamsPgeFrame {
+        world,
+        request,
+        camera_entity,
+    }
+}
+
+pub fn render_robotdreams_pge_frame(
+    frame: &RobotDreamsPgeFrame,
+) -> Result<RgbaFrame, pge_renderer::RenderError> {
+    let mut renderer = WgpuRenderer::new()?;
+    renderer.render_rgba(&frame.world, &frame.request)
+}
+
+fn add_pge_camera(scene: &mut SceneGraph, eye: [f32; 3], target: [f32; 3], resolution: [u32; 2]) {
+    let entity = EntityId(format!("camera:{ROBOTDREAMS_PGE_CAMERA_ID}"));
+    scene.entities.insert(
+        entity.clone(),
+        EntityMetadata {
+            id: entity.clone(),
+            name: "RobotDreams PGE Camera".to_string(),
+            kind: "camera".to_string(),
+            robot_id: None,
+            link_name: None,
+        },
+    );
+    scene.root.children.push(SceneNode::camera(
+        entity.0,
+        "RobotDreams PGE Camera",
+        CameraSpec {
+            id: ROBOTDREAMS_PGE_CAMERA_ID.to_string(),
+            name: "RobotDreams PGE Camera".to_string(),
+            transform: Transform::matrix(eye, look_at_matrix_f32(eye, target, [0.0, 0.0, 1.0])),
+            fov_deg: 55.0,
+            projection: CameraProjection::Perspective,
+            resolution,
+            intrinsics: None,
+            distortion: None,
+            depth_range_m: None,
+            sensor_effects: None,
+        },
+    ));
+}
+
+fn look_at_matrix_f32(eye: [f32; 3], target: [f32; 3], up: [f32; 3]) -> [[f32; 3]; 3] {
+    let forward = normalize_f32_vec3(sub_f32_vec3(target, eye));
+    let right = normalize_f32_vec3(cross_f32_vec3(up, forward));
+    let up = cross_f32_vec3(forward, right);
+    [
+        [right[0], up[0], forward[0]],
+        [right[1], up[1], forward[1]],
+        [right[2], up[2], forward[2]],
+    ]
+}
+
+fn append_robot_coordinate_debug_overlay(
+    graph: &mut SceneGraph,
+    robot_id: &str,
+    base_translation: [f32; 3],
+    base_rotation: [f32; 3],
+    arm_base: Option<&ResolvedFrameState>,
+    current_tcp: Option<[f32; 3]>,
+    target_tcp: Option<[f32; 3]>,
+    options: CoordinateDebugOverlayOptions,
+) {
+    let prefix = format!("debug:{robot_id}:frame:base");
+    let mut group = SceneNode::group(prefix.clone(), format!("{robot_id} Base Frame Debug"));
+    group.transform = Transform::matrix(base_translation, rpy_matrix_f32(base_rotation));
+    group.include_in_fit = false;
+
+    let half_extent = options.grid_half_extent_m.max(options.grid_step_m);
+    let step = options.grid_step_m.max(0.001);
+    let line_thickness = options.line_thickness_m.max(0.001);
+    let overlay_z = line_thickness * 2.0;
+    let mut grid_index = 0_u32;
+    let steps = (half_extent / step).ceil() as i32;
+    for index in -steps..=steps {
+        let offset = index as f32 * step;
+        let is_axis = index == 0;
+        let color = if is_axis {
+            [95, 150, 210]
+        } else {
+            [55, 82, 105]
+        };
+        group.children.push(debug_box_node(
+            format!("{prefix}:grid:x:{grid_index}"),
+            "Base grid X",
+            [0.0, offset, overlay_z],
+            [half_extent * 2.0, line_thickness, line_thickness],
+            color,
+            None,
+        ));
+        group.children.push(debug_box_node(
+            format!("{prefix}:grid:y:{grid_index}"),
+            "Base grid Y",
+            [offset, 0.0, overlay_z],
+            [line_thickness, half_extent * 2.0, line_thickness],
+            color,
+            None,
+        ));
+        grid_index += 1;
+    }
+
+    let axis_length = options.axis_length_m.max(0.01);
+    group.children.push(debug_box_node(
+        format!("{prefix}:axis:x"),
+        "X forward",
+        [axis_length * 0.5, 0.0, overlay_z],
+        [axis_length, line_thickness * 2.0, line_thickness * 2.0],
+        [255, 70, 70],
+        None,
+    ));
+    group.children.push(debug_box_node(
+        format!("{prefix}:axis:y"),
+        "Y left",
+        [0.0, axis_length * 0.5, overlay_z],
+        [line_thickness * 2.0, axis_length, line_thickness * 2.0],
+        [40, 220, 110],
+        None,
+    ));
+    group.children.push(debug_box_node(
+        format!("{prefix}:axis:z"),
+        "Z up",
+        [0.0, 0.0, overlay_z + axis_length * 0.5],
+        [line_thickness * 2.0, line_thickness * 2.0, axis_length],
+        [80, 160, 255],
+        None,
+    ));
+    append_axis_letter_nodes(
+        &mut group.children,
+        &prefix,
+        'X',
+        [axis_length + 0.045, 0.0, overlay_z],
+        0.055,
+        line_thickness * 1.5,
+        [255, 70, 70],
+    );
+    append_axis_letter_nodes(
+        &mut group.children,
+        &prefix,
+        'Y',
+        [0.0, axis_length + 0.045, overlay_z],
+        0.055,
+        line_thickness * 1.5,
+        [40, 220, 110],
+    );
+    append_axis_letter_nodes(
+        &mut group.children,
+        &prefix,
+        'Z',
+        [0.0, 0.0, overlay_z + axis_length + 0.045],
+        0.055,
+        line_thickness * 1.5,
+        [80, 160, 255],
+    );
+
+    register_debug_node(graph, &group, robot_id);
+    graph.root.children.push(group);
+
+    if let Some(arm_base) = arm_base {
+        append_compact_frame_debug_overlay(graph, robot_id, arm_base, options);
+    }
+
+    if let Some(position) = current_tcp {
+        push_debug_node(
+            graph,
+            robot_id,
+            debug_sphere_node(
+                format!("debug:{robot_id}:tcp:current"),
+                "Current TCP",
+                position,
+                options.marker_radius_m,
+                [0, 220, 255],
+            ),
+        );
+        push_debug_node(
+            graph,
+            robot_id,
+            debug_box_node(
+                format!("debug:{robot_id}:tcp:current:floor"),
+                "Current TCP floor projection",
+                [position[0], position[1], base_translation[2] + overlay_z],
+                [
+                    options.marker_radius_m * 0.9,
+                    options.marker_radius_m * 0.9,
+                    line_thickness,
+                ],
+                [0, 140, 180],
+                None,
+            ),
+        );
+    }
+    if let Some(position) = target_tcp {
+        push_debug_node(
+            graph,
+            robot_id,
+            debug_box_node(
+                format!("debug:{robot_id}:tcp:target"),
+                "Target TCP",
+                position,
+                [
+                    options.marker_radius_m * 1.5,
+                    options.marker_radius_m * 1.5,
+                    options.marker_radius_m * 1.5,
+                ],
+                [255, 190, 0],
+                None,
+            ),
+        );
+        push_debug_node(
+            graph,
+            robot_id,
+            debug_box_node(
+                format!("debug:{robot_id}:tcp:target:floor"),
+                "Target TCP floor projection",
+                [position[0], position[1], base_translation[2] + overlay_z],
+                [
+                    options.marker_radius_m * 0.9,
+                    options.marker_radius_m * 0.9,
+                    line_thickness,
+                ],
+                [210, 130, 0],
+                None,
+            ),
+        );
+    }
+    if let (Some(current), Some(target)) = (current_tcp, target_tcp)
+        && distance_f32(current, target) > 0.001
+    {
+        push_debug_node(
+            graph,
+            robot_id,
+            debug_line_node(
+                format!("debug:{robot_id}:tcp:delta"),
+                "Current to target TCP",
+                current,
+                target,
+                options.line_thickness_m * 1.5,
+                [255, 255, 255],
+            ),
+        );
+    }
+}
+
+fn append_compact_frame_debug_overlay(
+    graph: &mut SceneGraph,
+    robot_id: &str,
+    frame: &ResolvedFrameState,
+    options: CoordinateDebugOverlayOptions,
+) {
+    let prefix = format!("debug:{robot_id}:frame:{}", frame.id);
+    let mut group = SceneNode::group(
+        prefix.clone(),
+        format!("{} {} Frame Debug", robot_id, frame.name),
+    );
+    group.transform = Transform::matrix(
+        f64_vec3_to_f32(frame.world_transform.translation_m),
+        f64_matrix_to_f32(frame.world_transform.rotation),
+    );
+    group.include_in_fit = false;
+
+    let axis_length = (options.axis_length_m * 0.3).max(0.04);
+    let line_thickness = options.line_thickness_m.max(0.001) * 1.5;
+    group.children.push(debug_sphere_node(
+        format!("{prefix}:origin"),
+        &format!("{} origin", frame.name),
+        [0.0, 0.0, 0.0],
+        options.marker_radius_m.max(line_thickness * 2.0),
+        [255, 235, 120],
+    ));
+    group.children.push(debug_box_node(
+        format!("{prefix}:axis:x"),
+        &format!("{} X axis", frame.name),
+        [axis_length * 0.5, 0.0, 0.0],
+        [axis_length, line_thickness, line_thickness],
+        [255, 70, 70],
+        None,
+    ));
+    group.children.push(debug_box_node(
+        format!("{prefix}:axis:y"),
+        &format!("{} Y axis", frame.name),
+        [0.0, axis_length * 0.5, 0.0],
+        [line_thickness, axis_length, line_thickness],
+        [40, 220, 110],
+        None,
+    ));
+    group.children.push(debug_box_node(
+        format!("{prefix}:axis:z"),
+        &format!("{} Z axis", frame.name),
+        [0.0, 0.0, axis_length * 0.5],
+        [line_thickness, line_thickness, axis_length],
+        [80, 160, 255],
+        None,
+    ));
+    group.children.push(debug_box_node(
+        format!("{prefix}:label"),
+        &format!("{} frame label", frame.name),
+        [axis_length * 0.6, 0.0, line_thickness],
+        [
+            axis_length * 0.45,
+            line_thickness * 2.0,
+            line_thickness * 2.0,
+        ],
+        [255, 235, 120],
+        None,
+    ));
+    register_debug_node(graph, &group, robot_id);
+    graph.root.children.push(group);
+}
+
+pub fn coordinate_debug_legend_labels(row_start: usize) -> Vec<RobotDreamsPgeTextLabel> {
+    vec![
+        RobotDreamsPgeTextLabel::overlay_with_color(
+            "coordinate_debug_legend_current",
+            "CYAN SPHERE = CURRENT TCP",
+            row_start,
+            [0.0, 0.86, 1.0, 1.0],
+        ),
+        RobotDreamsPgeTextLabel::overlay_with_color(
+            "coordinate_debug_legend_target",
+            "YELLOW CUBE = TARGET TCP",
+            row_start + 1,
+            [1.0, 0.75, 0.0, 1.0],
+        ),
+        RobotDreamsPgeTextLabel::overlay_with_color(
+            "coordinate_debug_legend_floor",
+            "SMALL FLAT MARKS = FLOOR XY",
+            row_start + 2,
+            [0.86, 0.94, 1.0, 1.0],
+        ),
+    ]
+}
+
+fn append_axis_letter_nodes(
+    nodes: &mut Vec<SceneNode>,
+    prefix: &str,
+    letter: char,
+    center: [f32; 3],
+    size: f32,
+    thickness: f32,
+    color_rgb: [u8; 3],
+) {
+    let half = size * 0.5;
+    let strokes: &[([f32; 3], [f32; 3])] = match letter {
+        'X' => &[
+            ([-half, -half, 0.0], [half, half, 0.0]),
+            ([-half, half, 0.0], [half, -half, 0.0]),
+        ],
+        'Y' => &[
+            ([-half, half, 0.0], [0.0, 0.0, 0.0]),
+            ([half, half, 0.0], [0.0, 0.0, 0.0]),
+            ([0.0, 0.0, 0.0], [0.0, -half, 0.0]),
+        ],
+        'Z' => &[
+            ([-half, half, 0.0], [half, half, 0.0]),
+            ([half, half, 0.0], [-half, -half, 0.0]),
+            ([-half, -half, 0.0], [half, -half, 0.0]),
+        ],
+        _ => &[],
+    };
+
+    for (index, (start, end)) in strokes.iter().enumerate() {
+        nodes.push(debug_line_node(
+            format!("{prefix}:axis:label:{letter}:{index}"),
+            &format!("{letter} axis label"),
+            add_f32_vec3(center, *start),
+            add_f32_vec3(center, *end),
+            thickness,
+            color_rgb,
+        ));
+    }
+}
+
+fn push_debug_node(graph: &mut SceneGraph, robot_id: &str, node: SceneNode) {
+    register_debug_node(graph, &node, robot_id);
+    graph.root.children.push(node);
+}
+
+fn register_debug_node(graph: &mut SceneGraph, node: &SceneNode, robot_id: &str) {
+    graph.add_entity(EntityMetadata {
+        id: node.entity.clone(),
+        name: node.name.clone(),
+        kind: "debugOverlay".to_string(),
+        robot_id: Some(robot_id.to_string()),
+        link_name: None,
+    });
+    for child in &node.children {
+        register_debug_node(graph, child, robot_id);
+    }
+}
+
+fn debug_box_node(
+    entity: String,
+    name: &str,
+    translation: [f32; 3],
+    size: [f32; 3],
+    color_rgb: [u8; 3],
+    rotation_matrix: Option<[[f32; 3]; 3]>,
+) -> SceneNode {
+    let mut node = SceneNode::mesh(
+        entity,
+        name.to_string(),
+        Geometry::Box { size },
+        Material { color_rgb },
+        Transform {
+            translation,
+            rotation: [0.0, 0.0, 0.0],
+            rotation_matrix,
+        },
+    );
+    node.include_in_fit = false;
+    node
+}
+
+fn debug_sphere_node(
+    entity: String,
+    name: &str,
+    translation: [f32; 3],
+    radius: f32,
+    color_rgb: [u8; 3],
+) -> SceneNode {
+    let mut node = SceneNode::mesh(
+        entity,
+        name.to_string(),
+        Geometry::Sphere {
+            radius: radius.max(0.001),
+        },
+        Material { color_rgb },
+        Transform::translated(translation),
+    );
+    node.include_in_fit = false;
+    node
+}
+
+fn debug_line_node(
+    entity: String,
+    name: &str,
+    start: [f32; 3],
+    end: [f32; 3],
+    thickness: f32,
+    color_rgb: [u8; 3],
+) -> SceneNode {
+    let delta = sub_f32_vec3(end, start);
+    let length = length_f32(delta).max(0.001);
+    debug_box_node(
+        entity,
+        name,
+        scale_add_f32_vec3(start, delta, 0.5),
+        [length, thickness.max(0.001), thickness.max(0.001)],
+        color_rgb,
+        Some(line_rotation_matrix(delta)),
+    )
+}
+
+fn line_rotation_matrix(delta: [f32; 3]) -> [[f32; 3]; 3] {
+    let x_axis = normalize_f32_vec3(delta);
+    let reference = if x_axis[2].abs() > 0.95 {
+        [0.0, 1.0, 0.0]
+    } else {
+        [0.0, 0.0, 1.0]
+    };
+    let y_axis = normalize_f32_vec3(cross_f32_vec3(reference, x_axis));
+    let z_axis = normalize_f32_vec3(cross_f32_vec3(x_axis, y_axis));
+    [x_axis, y_axis, z_axis]
 }
 
 fn scene_graph_to_world_state(graph: &SceneGraph) -> pge::WorldState {
@@ -1389,8 +2111,53 @@ fn f64_vec3_to_f32(value: [f64; 3]) -> [f32; 3] {
     [value[0] as f32, value[1] as f32, value[2] as f32]
 }
 
+fn f64_matrix_to_f32(value: [[f64; 3]; 3]) -> [[f32; 3]; 3] {
+    [
+        [value[0][0] as f32, value[0][1] as f32, value[0][2] as f32],
+        [value[1][0] as f32, value[1][1] as f32, value[1][2] as f32],
+        [value[2][0] as f32, value[2][1] as f32, value[2][2] as f32],
+    ]
+}
+
 fn add_f32_vec3(left: [f32; 3], right: [f32; 3]) -> [f32; 3] {
     [left[0] + right[0], left[1] + right[1], left[2] + right[2]]
+}
+
+fn sub_f32_vec3(left: [f32; 3], right: [f32; 3]) -> [f32; 3] {
+    [left[0] - right[0], left[1] - right[1], left[2] - right[2]]
+}
+
+fn scale_add_f32_vec3(origin: [f32; 3], delta: [f32; 3], scale: f32) -> [f32; 3] {
+    [
+        origin[0] + delta[0] * scale,
+        origin[1] + delta[1] * scale,
+        origin[2] + delta[2] * scale,
+    ]
+}
+
+fn length_f32(value: [f32; 3]) -> f32 {
+    (value[0] * value[0] + value[1] * value[1] + value[2] * value[2]).sqrt()
+}
+
+fn distance_f32(left: [f32; 3], right: [f32; 3]) -> f32 {
+    length_f32(sub_f32_vec3(left, right))
+}
+
+fn normalize_f32_vec3(value: [f32; 3]) -> [f32; 3] {
+    let length = length_f32(value);
+    if length <= f32::EPSILON {
+        [1.0, 0.0, 0.0]
+    } else {
+        [value[0] / length, value[1] / length, value[2] / length]
+    }
+}
+
+fn cross_f32_vec3(left: [f32; 3], right: [f32; 3]) -> [f32; 3] {
+    [
+        left[1] * right[2] - left[2] * right[1],
+        left[2] * right[0] - left[0] * right[2],
+        left[0] * right[1] - left[1] * right[0],
+    ]
 }
 
 fn native_camera_rotation_matrix(
@@ -1466,9 +2233,14 @@ impl Default for RobotDreams {
 mod robotdreams_tests {
     use std::path::{Path, PathBuf};
 
-    use crate::scene_graph::{Geometry, LightKind, SceneNodeKind, ToneMapping, scene_bounds};
+    use crate::scene_graph::{
+        Geometry, LightKind, SceneNode, SceneNodeKind, ToneMapping, scene_bounds,
+    };
 
-    use super::{ModelEntityKind, RobotDreams};
+    use super::{
+        CoordinateDebugOverlayOptions, ModelEntityKind, RobotDreams, RobotDreamsPgeFrameOptions,
+        f64_vec3_to_f32, robotdreams_pge_frame,
+    };
 
     fn project_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1509,6 +2281,15 @@ mod robotdreams_tests {
         let dy = left[1] - right[1];
         let dz = left[2] - right[2];
         (dx * dx + dy * dy + dz * dz).sqrt()
+    }
+
+    fn find_node_by_entity<'a>(node: &'a SceneNode, entity_id: &str) -> Option<&'a SceneNode> {
+        if node.entity.0 == entity_id {
+            return Some(node);
+        }
+        node.children
+            .iter()
+            .find_map(|child| find_node_by_entity(child, entity_id))
     }
 
     #[test]
@@ -1656,6 +2437,170 @@ mod robotdreams_tests {
         assert!(
             max[0] - min[0] < 2.0 && max[2] - min[2] < 2.0,
             "fit bounds should exclude the 5 m floor, got min {min:?} max {max:?}"
+        );
+    }
+
+    #[test]
+    fn coordinate_debug_overlay_adds_base_grid_and_tcp_markers() {
+        let dreams = RobotDreams::open(puppybot_project_path()).expect("open PuppyBot project");
+        let scene =
+            dreams.scene_graph_with_coordinate_debug_overlay(CoordinateDebugOverlayOptions {
+                enabled: true,
+                ..CoordinateDebugOverlayOptions::default()
+            });
+
+        let group = find_node_by_entity(&scene.root, "debug:puppybot:frame:base")
+            .expect("base-frame debug overlay group");
+        assert!(
+            !group.include_in_fit,
+            "debug overlay should not affect camera fitting"
+        );
+        assert!(
+            group.children.iter().any(|node| node.name == "X forward"),
+            "overlay should include ROS X-forward axis"
+        );
+        assert!(
+            group.children.iter().any(|node| node.name == "Y left"),
+            "overlay should include ROS Y-left axis"
+        );
+        assert!(
+            group.children.iter().any(|node| node.name == "Z up"),
+            "overlay should include ROS Z-up axis"
+        );
+        assert!(
+            find_node_by_entity(&scene.root, "debug:puppybot:frame:base:axis:label:X:0").is_some(),
+            "overlay should include an X axis label at the positive X end"
+        );
+        assert!(
+            find_node_by_entity(&scene.root, "debug:puppybot:frame:base:axis:label:Y:0").is_some(),
+            "overlay should include a Y axis label at the positive Y end"
+        );
+        assert!(
+            find_node_by_entity(&scene.root, "debug:puppybot:frame:base:axis:label:Z:0").is_some(),
+            "overlay should include a Z axis label at the positive Z end"
+        );
+        assert!(
+            find_node_by_entity(&scene.root, "debug:puppybot:tcp:current").is_some(),
+            "overlay should include current TCP marker"
+        );
+        assert!(
+            find_node_by_entity(&scene.root, "debug:puppybot:tcp:target").is_some(),
+            "overlay should include target TCP marker"
+        );
+    }
+
+    #[test]
+    fn coordinate_debug_overlay_uses_stable_base_and_arm_base_frame_roots() {
+        let dreams = RobotDreams::open(puppyarm_project_path()).expect("open PuppyArm project");
+        let scene =
+            dreams.scene_graph_with_coordinate_debug_overlay(CoordinateDebugOverlayOptions {
+                enabled: true,
+                ..CoordinateDebugOverlayOptions::default()
+            });
+        let base = find_node_by_entity(&scene.root, "debug:puppyarm:frame:base")
+            .expect("base-frame debug root");
+        let arm_base = find_node_by_entity(&scene.root, "debug:puppyarm:frame:armBase")
+            .expect("arm-base debug root");
+        let frame = dreams
+            .frame_state("puppyarm", "armBase")
+            .expect("resolved arm base state");
+
+        assert!(base.children.iter().any(|node| node.name == "Base grid X"));
+        assert!(
+            arm_base
+                .children
+                .iter()
+                .any(|node| node.name == "Arm Base origin")
+        );
+        assert!(
+            arm_base
+                .children
+                .iter()
+                .any(|node| node.name == "Arm Base frame label")
+        );
+        assert_eq!(
+            arm_base.transform.translation,
+            f64_vec3_to_f32(frame.world_transform.translation_m)
+        );
+    }
+
+    #[test]
+    fn coordinate_debug_overlay_uses_distinct_marker_shapes_and_legend() {
+        let dreams = RobotDreams::open(puppybot_project_path()).expect("open PuppyBot project");
+        let scene =
+            dreams.scene_graph_with_coordinate_debug_overlay(CoordinateDebugOverlayOptions {
+                enabled: true,
+                ..CoordinateDebugOverlayOptions::default()
+            });
+
+        assert!(
+            matches!(
+                find_node_by_entity(&scene.root, "debug:puppybot:tcp:current")
+                    .expect("current TCP marker")
+                    .kind,
+                crate::scene_graph::SceneNodeKind::Mesh {
+                    geometry: crate::scene_graph::Geometry::Sphere { .. },
+                    ..
+                }
+            ),
+            "current TCP marker should be a sphere"
+        );
+        assert!(
+            matches!(
+                find_node_by_entity(&scene.root, "debug:puppybot:tcp:target")
+                    .expect("target TCP marker")
+                    .kind,
+                crate::scene_graph::SceneNodeKind::Mesh {
+                    geometry: crate::scene_graph::Geometry::Box { .. },
+                    ..
+                }
+            ),
+            "target TCP marker should be a cube"
+        );
+
+        let frame = robotdreams_pge_frame(&dreams, RobotDreamsPgeFrameOptions::default());
+        let legend_text: Vec<_> = frame
+            .world
+            .text_labels
+            .iter()
+            .map(|label| label.text.as_str())
+            .collect();
+        assert!(
+            legend_text.contains(&"CYAN SPHERE = CURRENT TCP"),
+            "coordinate overlay should explain current TCP marker"
+        );
+        assert!(
+            legend_text.contains(&"YELLOW CUBE = TARGET TCP"),
+            "coordinate overlay should explain target TCP marker"
+        );
+    }
+
+    #[test]
+    fn coordinate_debug_overlay_target_marker_uses_servo_target_ticks() {
+        let mut dreams = RobotDreams::open(puppybot_project_path()).expect("open PuppyBot project");
+        assert!(dreams.set_virtual_servo_target("main_bus", 1, 3100));
+
+        let scene =
+            dreams.scene_graph_with_coordinate_debug_overlay(CoordinateDebugOverlayOptions {
+                enabled: true,
+                ..CoordinateDebugOverlayOptions::default()
+            });
+        let current = find_node_by_entity(&scene.root, "debug:puppybot:tcp:current")
+            .expect("current TCP marker")
+            .transform
+            .translation;
+        let target = find_node_by_entity(&scene.root, "debug:puppybot:tcp:target")
+            .expect("target TCP marker")
+            .transform
+            .translation;
+
+        assert!(
+            super::distance_f32(current, target) > 0.001,
+            "target marker should move when servo target differs from present tick; current {current:?} target {target:?}"
+        );
+        assert!(
+            find_node_by_entity(&scene.root, "debug:puppybot:tcp:delta").is_some(),
+            "overlay should draw current-to-target delta when they differ"
         );
     }
 

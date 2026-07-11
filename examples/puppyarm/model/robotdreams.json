@@ -20,6 +20,14 @@
     "link": "part_1_1",
     "offset": [-0.043, 0.0, 0.02]
   },
+  "frames": {
+    "armBase": {
+      "name": "Arm Base",
+      "relativeTo": "base",
+      "translation": [0.0, 0.0, 0.0],
+      "rotation": [0.0, 0.0, 0.0]
+    }
+  },
   "jointNames": {
     "revolute_1_1": "wrist",
     "revolute_1_2": "shoulder",

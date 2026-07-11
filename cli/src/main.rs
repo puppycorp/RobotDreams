@@ -14,8 +14,8 @@ use robotdreams_core::scene_graph::{
     ToneMapping, prepare_observation_scene,
 };
 use robotdreams_core::{
-    ObservationRequest, ObservationView, RobotDreams, RobotDreamsSnapshot,
-    world_state_from_scene_graph,
+    CoordinateDebugOverlayOptions, ObservationRequest, ObservationView, RobotDreams,
+    RobotDreamsSnapshot, world_state_from_scene_graph,
 };
 use robotdreams_recorder::{NativeRecorder, RecordingArtifact, RecordingRequest};
 use robotdreams_renderer::{FrameBuffer, FrameKind, NativeRenderer, RenderOutput};
@@ -269,6 +269,12 @@ struct RenderFrameArgs {
 
     #[arg(long, help = "Selected KHR_materials_variants material variant name")]
     gltf_material_variant: Option<String>,
+
+    #[arg(
+        long,
+        help = "Render robot-base coordinate grid and current/target TCP markers"
+    )]
+    debug_coordinate_overlay: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -708,6 +714,12 @@ struct SimulationRenderFrameArgs {
 
     #[arg(long, help = "Selected KHR_materials_variants material variant name")]
     gltf_material_variant: Option<String>,
+
+    #[arg(
+        long,
+        help = "Render robot-base and configured semantic-frame coordinate overlays"
+    )]
+    debug_coordinate_overlay: bool,
 }
 
 #[derive(Debug, Args)]
@@ -904,6 +916,12 @@ struct SimulationRecordArgs {
     #[arg(long, help = "Selected KHR_materials_variants material variant name")]
     gltf_material_variant: Option<String>,
 
+    #[arg(
+        long,
+        help = "Render robot-base coordinate grid and current/target TCP markers"
+    )]
+    debug_coordinate_overlay: bool,
+
     #[arg(long, default_value_t = 3500)]
     wait_ms: u64,
 
@@ -1000,6 +1018,7 @@ enum DaemonRequest {
         segmentation_policy: Option<SegmentationPolicy>,
         shutter_policy: Option<ShutterPolicy>,
         render_settings: Option<RenderSettings>,
+        debug_coordinate_overlay: Option<bool>,
     },
     BusStart,
     BusStop,
@@ -1519,6 +1538,7 @@ mod tests {
             "3",
             "--gltf-material-variant",
             "dirty",
+            "--debug-coordinate-overlay",
         ])
         .expect("parse render-frame");
 
@@ -1584,6 +1604,7 @@ mod tests {
         assert_eq!(args.rough_reflection_samples, Some(15));
         assert_eq!(args.specular_reflection_bounces, Some(3));
         assert_eq!(args.gltf_material_variant.as_deref(), Some("dirty"));
+        assert!(args.debug_coordinate_overlay);
     }
 
     #[test]
@@ -1730,6 +1751,7 @@ mod tests {
             "1",
             "--fps",
             "2",
+            "--debug-coordinate-overlay",
         ])
         .expect("parse simulation record");
 
@@ -1741,6 +1763,7 @@ mod tests {
         assert_eq!(args.view, NativeView::DebugRgb);
         assert_eq!(args.renderer, RendererBackend::Gpu);
         assert_eq!(args.fps, 2);
+        assert!(args.debug_coordinate_overlay);
     }
 
     #[test]
@@ -3092,11 +3115,25 @@ fn pge_render_request(request: &ObservationRequest) -> PgeRenderRequest {
     }
 }
 
+fn render_scene_graph(
+    dreams: &RobotDreams,
+    debug_coordinate_overlay: bool,
+) -> robotdreams_core::scene_graph::SceneGraph {
+    dreams.scene_graph_with_coordinate_debug_overlay(CoordinateDebugOverlayOptions {
+        enabled: debug_coordinate_overlay,
+        ..CoordinateDebugOverlayOptions::default()
+    })
+}
+
 fn gpu_debug_rgb_render(
     dreams: &RobotDreams,
     request: &ObservationRequest,
+    debug_coordinate_overlay: bool,
 ) -> Result<RenderOutput> {
-    let scene = prepare_observation_scene(dreams.scene_graph(), request);
+    let scene = prepare_observation_scene(
+        render_scene_graph(dreams, debug_coordinate_overlay),
+        request,
+    );
     let world = world_state_from_scene_graph(&scene);
     let pge_request = pge_render_request(request);
     let mut renderer = WgpuRenderer::new().map_err(|err| anyhow!("{err}"))?;
@@ -3146,8 +3183,15 @@ fn gpu_debug_rgb_render(
     })
 }
 
-fn cpu_render(dreams: &RobotDreams, request: &ObservationRequest) -> Result<RenderOutput> {
-    let scene = prepare_observation_scene(dreams.scene_graph(), request);
+fn cpu_render(
+    dreams: &RobotDreams,
+    request: &ObservationRequest,
+    debug_coordinate_overlay: bool,
+) -> Result<RenderOutput> {
+    let scene = prepare_observation_scene(
+        render_scene_graph(dreams, debug_coordinate_overlay),
+        request,
+    );
     NativeRenderer::new()
         .render(&scene, Some(dreams.snapshot()), request)
         .map_err(|err| anyhow!(err))
@@ -3158,13 +3202,14 @@ fn render_with_backend(
     request: &ObservationRequest,
     view: NativeView,
     backend: RendererBackend,
+    debug_coordinate_overlay: bool,
 ) -> Result<RenderOutput> {
     let gpu_supported = matches!(view, NativeView::DebugRgb);
     if matches!(backend, RendererBackend::Gpu) && !gpu_supported {
         bail!("GPU renderer currently supports debug-rgb only; use --renderer cpu for {view:?}");
     }
     if gpu_supported && !matches!(backend, RendererBackend::Cpu) {
-        match gpu_debug_rgb_render(dreams, request) {
+        match gpu_debug_rgb_render(dreams, request, debug_coordinate_overlay) {
             Ok(output) => return Ok(output),
             Err(err) if matches!(backend, RendererBackend::Gpu) => {
                 return Err(err).context("GPU renderer failed");
@@ -3174,7 +3219,7 @@ fn render_with_backend(
             }
         }
     }
-    cpu_render(dreams, request)
+    cpu_render(dreams, request, debug_coordinate_overlay)
 }
 
 fn observation_view(view: NativeView) -> ObservationView {
@@ -4109,7 +4154,13 @@ fn render_frame(args: RenderFrameArgs) -> Result<()> {
             dreams.scene_graph().render_settings.clone(),
         )?,
     )?;
-    let output = render_with_backend(&dreams, &request, args.view, args.renderer)?;
+    let output = render_with_backend(
+        &dreams,
+        &request,
+        args.view,
+        args.renderer,
+        args.debug_coordinate_overlay,
+    )?;
     let frame = frame_for_view(&output, args.view)?;
     write_frame_buffer(&args.out, frame)?;
     let metadata = write_metadata(&args.out, &output.metadata)?;
@@ -4128,10 +4179,9 @@ fn record_simulation_gpu_debug_rgb(
     fps: u32,
     seconds: f32,
 ) -> Result<()> {
-    let video_out = args
-        .out
-        .as_ref()
-        .context("debug-rgb recording requires --out unless --keep-frames or --trace-only is set")?;
+    let video_out = args.out.as_ref().context(
+        "debug-rgb recording requires --out unless --keep-frames or --trace-only is set",
+    )?;
     let frame_count = (seconds * fps as f32).ceil() as usize + 1;
     let dt = 1.0 / fps as f32;
     let frame_dir = unique_temp_dir("robotdreams-gpu-record-frames");
@@ -4146,7 +4196,10 @@ fn record_simulation_gpu_debug_rgb(
         }
         let snapshot = dreams.snapshot();
         snapshots.push(snapshot);
-        let scene = prepare_observation_scene(dreams.scene_graph(), &recording_request.observation);
+        let scene = prepare_observation_scene(
+            render_scene_graph(dreams, args.debug_coordinate_overlay),
+            &recording_request.observation,
+        );
         let world = world_state_from_scene_graph(&scene);
         let pge_request = pge_render_request(&recording_request.observation);
         let output = renderer
@@ -4314,7 +4367,14 @@ fn record_simulation(project_path: &Path, args: SimulationRecordArgs) -> Result<
         }
     }
     let output = NativeRecorder::new()
-        .record(&mut dreams, &recording_request)
+        .record_with_coordinate_debug_overlay(
+            &mut dreams,
+            &recording_request,
+            CoordinateDebugOverlayOptions {
+                enabled: args.debug_coordinate_overlay,
+                ..CoordinateDebugOverlayOptions::default()
+            },
+        )
         .map_err(|err| anyhow!(err))?;
 
     if let Some(trace_path) = trace_path.as_ref() {
@@ -4524,6 +4584,7 @@ async fn record_live_simulation(
                         args.shutter_readout_sec,
                     ),
                     render_settings: render_settings.clone(),
+                    debug_coordinate_overlay: Some(args.debug_coordinate_overlay),
                 },
                 project_path,
                 bind,
@@ -4968,6 +5029,7 @@ async fn main() -> Result<()> {
                             specular_reflection_bounces: args.specular_reflection_bounces,
                             gltf_material_variant: args.gltf_material_variant.clone(),
                         })?,
+                        debug_coordinate_overlay: Some(args.debug_coordinate_overlay),
                     },
                     &cli.project,
                     &cli.daemon_bind,

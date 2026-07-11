@@ -1,5 +1,6 @@
 use robotdreams_core::{
-    ObservationRequest, RobotDreams, RobotDreamsSnapshot, scene_graph::prepare_observation_scene,
+    CoordinateDebugOverlayOptions, ObservationRequest, RobotDreams, RobotDreamsSnapshot,
+    scene_graph::prepare_observation_scene,
 };
 use robotdreams_renderer::{
     FrameBuffer, FrameKind, NativeRenderer, RenderOutput, SceneGraphSample,
@@ -61,6 +62,19 @@ impl NativeRecorder {
         dreams: &mut RobotDreams,
         request: &RecordingRequest,
     ) -> Result<RecordingOutput, String> {
+        self.record_with_coordinate_debug_overlay(
+            dreams,
+            request,
+            CoordinateDebugOverlayOptions::default(),
+        )
+    }
+
+    pub fn record_with_coordinate_debug_overlay(
+        &self,
+        dreams: &mut RobotDreams,
+        request: &RecordingRequest,
+        coordinate_debug_overlay: CoordinateDebugOverlayOptions,
+    ) -> Result<RecordingOutput, String> {
         let fps = request.fps;
         if fps <= 0.0 {
             return Err("recording fps must be positive".to_string());
@@ -90,7 +104,10 @@ impl NativeRecorder {
             }
 
             if want_frames || want_video {
-                let scene = prepare_observation_scene(dreams.scene_graph(), &request.observation);
+                let scene = prepare_observation_scene(
+                    dreams.scene_graph_with_coordinate_debug_overlay(coordinate_debug_overlay),
+                    &request.observation,
+                );
                 let current_sample = SceneGraphSample {
                     scene,
                     state: Some(snapshot.clone()),

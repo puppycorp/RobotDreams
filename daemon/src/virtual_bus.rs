@@ -17,7 +17,7 @@ use feetech_servo::servo::protocol::serial_bus::ProtocolError;
 use feetech_servo::servo::protocol::virtual_uart::VirtualUartPort;
 use feetech_servo::servo::sim::{FeetechBusEvent, FeetechBusSim, FeetechServoSnapshot};
 use robotdreams_core::scene_graph::SceneGraph;
-use robotdreams_core::{RobotDreams, RobotDreamsSnapshot};
+use robotdreams_core::{CoordinateDebugOverlayOptions, RobotDreams, RobotDreamsSnapshot};
 
 use crate::hardware_runtime::{HardwareDeviceRuntime, HardwareRuntime, max_servo_count};
 
@@ -705,6 +705,30 @@ impl WorkbenchVirtualBusHandle {
             samples.push(current.clone());
             bus.last_observation = Some(current);
             samples
+        })
+    }
+
+    pub(crate) fn robotdreams_observation_samples_with_coordinate_debug_overlay(
+        &self,
+        enabled: bool,
+    ) -> Vec<(SceneGraph, RobotDreamsSnapshot)> {
+        if !enabled {
+            return self.robotdreams_observation_samples();
+        }
+        self.with_bus(Vec::new(), |bus| {
+            let Some(robotdreams) = bus.robotdreams.clone() else {
+                return Vec::new();
+            };
+            let Ok(dreams) = robotdreams.lock() else {
+                return Vec::new();
+            };
+            vec![(
+                dreams.scene_graph_with_coordinate_debug_overlay(CoordinateDebugOverlayOptions {
+                    enabled: true,
+                    ..CoordinateDebugOverlayOptions::default()
+                }),
+                dreams.snapshot(),
+            )]
         })
     }
 

@@ -43,8 +43,8 @@ use robotdreams_core::scene_graph::{
     Transform, prepare_observation_scene,
 };
 use robotdreams_core::{
-    RobotDreams, RobotDreamsSnapshot, VirtualServoSimConfig, run_virtual_servo_sim,
-    world_state_from_scene_graph,
+    CoordinateDebugOverlayOptions, RobotDreams, RobotDreamsSnapshot, VirtualServoSimConfig,
+    run_virtual_servo_sim, world_state_from_scene_graph,
 };
 use robotdreams_renderer::{FrameBuffer, FrameKind, NativeRenderer, SceneGraphSample};
 use roxmltree::Document;
@@ -187,6 +187,12 @@ struct RealtimeArgs {
 
     #[arg(long, default_value_t = 35.0)]
     camera_elevation_deg: f32,
+
+    #[arg(
+        long,
+        help = "Render robot-base coordinate grid and current/target TCP markers"
+    )]
+    debug_coordinate_overlay: bool,
 }
 
 #[derive(Debug, ClapArgs)]
@@ -3065,6 +3071,7 @@ enum DaemonRequest {
         segmentation_policy: Option<SegmentationPolicy>,
         shutter_policy: Option<ShutterPolicy>,
         render_settings: Option<RenderSettings>,
+        debug_coordinate_overlay: Option<bool>,
     },
     BusStart,
     BusStop,
@@ -3478,6 +3485,16 @@ fn add_realtime_camera(
     ));
 }
 
+fn realtime_scene_graph(
+    dreams: &RobotDreams,
+    debug_coordinate_overlay: bool,
+) -> robotdreams_core::scene_graph::SceneGraph {
+    dreams.scene_graph_with_coordinate_debug_overlay(CoordinateDebugOverlayOptions {
+        enabled: debug_coordinate_overlay,
+        ..CoordinateDebugOverlayOptions::default()
+    })
+}
+
 fn robotdreams_to_orbit_space(position: [f32; 3]) -> Vec3 {
     Vec3::new(position[0], position[2], position[1])
 }
@@ -3673,6 +3690,7 @@ fn render_simulation_observation_json(
     segmentation_policy: Option<SegmentationPolicy>,
     shutter_policy: Option<ShutterPolicy>,
     render_settings: Option<RenderSettings>,
+    debug_coordinate_overlay: Option<bool>,
 ) -> Result<serde_json::Value, String> {
     let views = views.unwrap_or_else(|| vec![ObservationView::DebugRgb]);
     let resolution = [width.unwrap_or(640).max(1), height.unwrap_or(480).max(1)];
@@ -3688,7 +3706,11 @@ fn render_simulation_observation_json(
         None
     };
 
-    let samples = simulation.virtual_bus.robotdreams_observation_samples();
+    let samples = simulation
+        .virtual_bus
+        .robotdreams_observation_samples_with_coordinate_debug_overlay(
+            debug_coordinate_overlay.unwrap_or(false),
+        );
     let samples = if samples.is_empty() {
         return Err(
             "simulation is not backed by RobotDreams core; reopen the project as a RobotDreams project"
@@ -4625,6 +4647,7 @@ async fn handle_daemon_request(
             segmentation_policy,
             shutter_policy,
             render_settings,
+            debug_coordinate_overlay,
         } => {
             let (project_id, workbench_url, simulation) = {
                 let mut state = state.lock().await;
@@ -4662,6 +4685,7 @@ async fn handle_daemon_request(
                 segmentation_policy,
                 shutter_policy,
                 render_settings,
+                debug_coordinate_overlay,
             ) {
                 Ok(data) => DaemonResponse {
                     ok: true,
@@ -5327,11 +5351,11 @@ async fn run_realtime(
         let dreams = robotdreams
             .lock()
             .map_err(|_| "RobotDreams realtime lock poisoned")?;
-        dreams.scene_graph()
+        realtime_scene_graph(&dreams, args.debug_coordinate_overlay)
     };
     add_realtime_camera(&mut scene, eye, target, resolution);
     let mut world = world_state_from_scene_graph(&scene);
-    let world_node_index = index_world_nodes(&world);
+    let mut world_node_index = index_world_nodes(&world);
     let camera_entity = format!("camera:{REALTIME_CAMERA_ID}");
     set_world_node_transform(
         &mut world,
@@ -5360,6 +5384,7 @@ async fn run_realtime(
             .unwrap_or_default()
     };
     let robotdreams_for_render = robotdreams.clone();
+    let debug_coordinate_overlay = args.debug_coordinate_overlay;
     run_windowed(
         world,
         request,
@@ -5380,6 +5405,28 @@ async fn run_realtime(
                 orbit_controller.zoom(context.input.scroll_delta_lines);
             }
             orbit_controller.process(&mut orbit_state, orbit_camera_node_id, 0.0);
+            if debug_coordinate_overlay {
+                let mut scene = {
+                    let dreams = robotdreams_for_render.lock().map_err(|_| {
+                        pge_renderer::RenderError::new("RobotDreams realtime lock poisoned")
+                    })?;
+                    realtime_scene_graph(&dreams, true)
+                };
+                add_realtime_camera(&mut scene, eye, target, resolution);
+                *world = world_state_from_scene_graph(&scene);
+                world_node_index = index_world_nodes(world);
+                set_world_node_transform(
+                    world,
+                    &world_node_index,
+                    &camera_entity,
+                    pge_transform(realtime_orbit_transform(
+                        &orbit_state,
+                        orbit_camera_node_id,
+                        &orbit_controller,
+                    )),
+                );
+                return Ok(true);
+            }
             set_world_node_transform(
                 world,
                 &world_node_index,
@@ -5923,6 +5970,30 @@ mod tests {
     }
 
     #[test]
+    fn live_render_overlay_uses_core_stable_frame_roots() {
+        let mut state = test_state();
+        let (project_id, _) =
+            open_project_session(&mut state, &repo_path("examples/puppyarm/project.json")).unwrap();
+        let project = state.projects.get(&project_id).unwrap();
+        let simulation = project.default_simulation().unwrap();
+        let samples = simulation
+            .virtual_bus
+            .robotdreams_observation_samples_with_coordinate_debug_overlay(true);
+        let scene = &samples[0].0;
+
+        assert!(
+            scene
+                .entities
+                .contains_key(&EntityId("debug:puppyarm:frame:base".to_string()))
+        );
+        assert!(
+            scene
+                .entities
+                .contains_key(&EntityId("debug:puppyarm:frame:armBase".to_string()))
+        );
+    }
+
+    #[test]
     fn render_frame_uses_live_robotdreams_simulation_state() {
         let mut state = test_state();
         let (project_id, _) =
@@ -5936,6 +6007,7 @@ mod tests {
             Some(vec![ObservationView::DebugRgb]),
             Some(32),
             Some(24),
+            None,
             None,
             None,
             None,
@@ -5978,6 +6050,7 @@ mod tests {
             Some(vec![ObservationView::DebugRgb]),
             Some(32),
             Some(24),
+            None,
             None,
             None,
             None,

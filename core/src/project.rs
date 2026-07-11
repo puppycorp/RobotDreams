@@ -214,6 +214,7 @@ pub struct ModelProfile {
     pub robot: ProjectRobotConfig,
     pub joint_names: HashMap<String, String>,
     pub tcp: Option<TcpConfig>,
+    pub frames: Vec<ModelFrameConfig>,
     pub frame_mapping: Option<FrameMappingConfig>,
 }
 
@@ -221,6 +222,15 @@ pub struct ModelProfile {
 pub struct TcpConfig {
     pub link: String,
     pub offset: [f32; 3],
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ModelFrameConfig {
+    pub id: String,
+    pub name: String,
+    pub relative_to: String,
+    pub translation_m: [f64; 3],
+    pub rotation_rpy_rad: [f64; 3],
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -255,6 +265,7 @@ struct LoadedRobotModel {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ModelEntityKind {
     Robot,
+    Frame,
     Joint,
     Link,
     Tcp,
@@ -285,6 +296,7 @@ pub struct RobotState {
     pub id: String,
     pub name: String,
     pub base: SceneLocation,
+    pub frames: BTreeMap<String, ResolvedFrameState>,
     pub joints: BTreeMap<String, JointState>,
     pub links: BTreeMap<String, LinkState>,
     pub tcp: Option<FrameState>,
@@ -309,6 +321,56 @@ pub struct FrameState {
     pub name: String,
     pub link: String,
     pub location: Option<SceneLocation>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RigidTransform {
+    pub translation_m: [f64; 3],
+    pub rotation: [[f64; 3]; 3],
+}
+
+impl RigidTransform {
+    pub fn identity() -> Self {
+        Self {
+            translation_m: [0.0, 0.0, 0.0],
+            rotation: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+        }
+    }
+
+    pub fn from_translation_rpy(translation_m: [f64; 3], rotation_rpy_rad: [f64; 3]) -> Self {
+        Self {
+            translation_m,
+            rotation: rpy_rotation(rotation_rpy_rad),
+        }
+    }
+
+    pub fn compose(self, child: Self) -> Self {
+        Self {
+            translation_m: self.transform_point(child.translation_m),
+            rotation: mat_mul(self.rotation, child.rotation),
+        }
+    }
+
+    pub fn inverse(self) -> Self {
+        let rotation = transpose_matrix(self.rotation);
+        Self {
+            translation_m: negate_vec3(transform_vector(rotation, self.translation_m)),
+            rotation,
+        }
+    }
+
+    pub fn transform_point(self, point_m: [f64; 3]) -> [f64; 3] {
+        vec_add(transform_vector(self.rotation, point_m), self.translation_m)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResolvedFrameState {
+    pub id: String,
+    pub name: String,
+    pub relative_to: Option<String>,
+    pub relative_transform: RigidTransform,
+    pub world_transform: RigidTransform,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -360,9 +422,11 @@ fn joint_candidates(urdf_name: &str, semantic_name: Option<&str>) -> Vec<String>
     candidates
 }
 
-fn project_model_profile(project: &ProjectConfig) -> Option<ModelProfile> {
-    let model_profile_path = project.model_profile_path.as_ref()?;
-    load_model_profile(project.base_dir.join(model_profile_path)).ok()
+fn project_model_profile(project: &ProjectConfig) -> Result<Option<ModelProfile>, Box<dyn Error>> {
+    let Some(model_profile_path) = project.model_profile_path.as_ref() else {
+        return Ok(None);
+    };
+    load_model_profile(project.base_dir.join(model_profile_path)).map(Some)
 }
 
 fn model_profile_matches_robot(profile: &ModelProfile, robot: &ProjectRobotConfig) -> bool {
@@ -407,6 +471,120 @@ fn merge_model_profile_joint_names(
     robot
 }
 
+fn model_frame_configs(robot: &LoadedRobotModel) -> &[ModelFrameConfig] {
+    robot
+        .model_profile
+        .as_ref()
+        .map(|profile| profile.frames.as_slice())
+        .unwrap_or_default()
+}
+
+fn resolve_robot_frames(
+    robot: &LoadedRobotModel,
+) -> Result<BTreeMap<String, ResolvedFrameState>, String> {
+    let configs = model_frame_configs(robot);
+    let mut config_by_name = BTreeMap::new();
+    for config in configs {
+        if config.id == "base" {
+            return Err(
+                "model profile frame 'base' redefines the reserved semantic base".to_string(),
+            );
+        }
+        if config.id.trim().is_empty() || config.name.trim().is_empty() {
+            return Err("model profile frame names must not be empty".to_string());
+        }
+        if config_by_name.insert(config.id.as_str(), config).is_some() {
+            return Err(format!(
+                "model profile frame '{}' is defined more than once",
+                config.id
+            ));
+        }
+        if !config.translation_m.iter().all(|value| value.is_finite())
+            || !config
+                .rotation_rpy_rad
+                .iter()
+                .all(|value| value.is_finite())
+        {
+            return Err(format!(
+                "model profile frame '{}' has non-finite translation or rotation",
+                config.name
+            ));
+        }
+    }
+
+    let base_transform = RigidTransform::from_translation_rpy(
+        f32_vec3_to_f64(robot.config.base_translation),
+        f32_vec3_to_f64(robot.config.base_rotation),
+    );
+    let mut resolved = BTreeMap::new();
+    resolved.insert(
+        "base".to_string(),
+        ResolvedFrameState {
+            id: "base".to_string(),
+            name: "base".to_string(),
+            relative_to: None,
+            relative_transform: RigidTransform::identity(),
+            world_transform: base_transform,
+        },
+    );
+    let mut resolving = Vec::new();
+    for name in config_by_name.keys().copied().collect::<Vec<_>>() {
+        resolve_model_frame(name, &config_by_name, &mut resolved, &mut resolving)?;
+    }
+    Ok(resolved)
+}
+
+fn resolve_model_frame(
+    name: &str,
+    configs: &BTreeMap<&str, &ModelFrameConfig>,
+    resolved: &mut BTreeMap<String, ResolvedFrameState>,
+    resolving: &mut Vec<String>,
+) -> Result<(), String> {
+    if resolved.contains_key(name) {
+        return Ok(());
+    }
+    let config = configs
+        .get(name)
+        .copied()
+        .ok_or_else(|| format!("model profile frame '{name}' is not defined"))?;
+    if let Some(cycle_start) = resolving.iter().position(|frame| frame == name) {
+        let mut cycle = resolving[cycle_start..].to_vec();
+        cycle.push(name.to_string());
+        return Err(format!(
+            "model profile frames contain a cycle: {}",
+            cycle.join(" -> ")
+        ));
+    }
+
+    resolving.push(name.to_string());
+    if !resolved.contains_key(&config.relative_to) {
+        if !configs.contains_key(config.relative_to.as_str()) {
+            return Err(format!(
+                "model profile frame '{}' refers to unknown parent '{}'",
+                config.id, config.relative_to
+            ));
+        }
+        resolve_model_frame(&config.relative_to, configs, resolved, resolving)?;
+    }
+    let parent = resolved
+        .get(&config.relative_to)
+        .expect("configured frame parent resolved")
+        .world_transform;
+    let local = RigidTransform::from_translation_rpy(config.translation_m, config.rotation_rpy_rad);
+    resolved.insert(
+        config.id.clone(),
+        ResolvedFrameState {
+            id: config.id.clone(),
+            name: config.name.clone(),
+            relative_to: Some(config.relative_to.clone()),
+            relative_transform: local,
+            world_transform: parent.compose(local),
+        },
+    );
+    resolving.pop();
+    Ok(())
+}
+
 fn model_transformation(robot: &LoadedRobotModel) -> ModelTransformationConfig {
     robot.config.model.model_transformation.unwrap_or_default()
 }
@@ -426,12 +604,14 @@ fn loaded_robot_from_config(
 
     let urdf_path = project_base_dir.join(&robot.model.path);
     let harness = UrdfSceneHarness::from_urdf_path(&urdf_path)?;
-    Ok(LoadedRobotModel {
+    let loaded = LoadedRobotModel {
         config: robot,
         model_profile,
         urdf_path,
         harness,
-    })
+    };
+    resolve_robot_frames(&loaded).map_err(|err| -> Box<dyn Error> { err.into() })?;
+    Ok(loaded)
 }
 
 fn loaded_robot_from_profile(profile: ModelProfile) -> Result<LoadedRobotModel, Box<dyn Error>> {
@@ -440,7 +620,7 @@ fn loaded_robot_from_profile(profile: ModelProfile) -> Result<LoadedRobotModel, 
 }
 
 fn load_project_model(project: ProjectConfig) -> Result<RobotDreamsModel, Box<dyn Error>> {
-    let model_profile = project_model_profile(&project);
+    let model_profile = project_model_profile(&project)?;
     let robot_configs = if project.robots.is_empty() {
         model_profile
             .as_ref()
@@ -614,8 +794,41 @@ fn mat_mul(left: [[f64; 3]; 3], right: [[f64; 3]; 3]) -> [[f64; 3]; 3] {
     result
 }
 
+fn transpose_matrix(matrix: [[f64; 3]; 3]) -> [[f64; 3]; 3] {
+    [
+        [matrix[0][0], matrix[1][0], matrix[2][0]],
+        [matrix[0][1], matrix[1][1], matrix[2][1]],
+        [matrix[0][2], matrix[1][2], matrix[2][2]],
+    ]
+}
+
 fn vec_add(left: [f64; 3], right: [f64; 3]) -> [f64; 3] {
     [left[0] + right[0], left[1] + right[1], left[2] + right[2]]
+}
+
+fn negate_vec3(value: [f64; 3]) -> [f64; 3] {
+    [-value[0], -value[1], -value[2]]
+}
+
+fn matrix_to_rpy(matrix: [[f64; 3]; 3]) -> [f64; 3] {
+    let pitch = (-matrix[2][0]).asin();
+    let cos_pitch = pitch.cos();
+    if cos_pitch.abs() > 1.0e-6 {
+        [
+            matrix[2][1].atan2(matrix[2][2]),
+            pitch,
+            matrix[1][0].atan2(matrix[0][0]),
+        ]
+    } else {
+        [0.0, pitch, (-matrix[0][1]).atan2(matrix[1][1])]
+    }
+}
+
+fn scene_location_from_transform(transform: RigidTransform) -> SceneLocation {
+    SceneLocation {
+        position: transform.translation_m,
+        rotation: Some(matrix_to_rpy(transform.rotation)),
+    }
 }
 
 fn robot_entity(robot: &LoadedRobotModel) -> RobotDreamsEntity {
@@ -637,6 +850,22 @@ fn robot_entity(robot: &LoadedRobotModel) -> RobotDreamsEntity {
             [0.0, 0.0, 0.0],
             ModelTransformationConfig::default(),
         )),
+        properties,
+    }
+}
+
+fn frame_entity(robot: &LoadedRobotModel, frame: &ResolvedFrameState) -> RobotDreamsEntity {
+    let mut properties = BTreeMap::new();
+    if let Some(relative_to) = &frame.relative_to {
+        properties.insert("relativeTo".to_string(), relative_to.clone());
+    }
+    RobotDreamsEntity {
+        kind: ModelEntityKind::Frame,
+        id: format!("{}:frame:{}", robot.config.id, frame.id),
+        name: frame.name.clone(),
+        robot_id: Some(robot.config.id.clone()),
+        urdf_name: None,
+        location: Some(scene_location_from_transform(frame.world_transform)),
         properties,
     }
 }
@@ -917,6 +1146,7 @@ fn robot_state(robot: &LoadedRobotModel) -> RobotState {
         id: robot.config.id.clone(),
         name: robot.config.name.clone(),
         base: robot_base_location(robot),
+        frames: resolve_robot_frames(robot).expect("loaded robot frames validated"),
         joints,
         links,
         tcp: tcp_state(robot),
@@ -1080,6 +1310,22 @@ impl RobotDreamsModel {
                 return Some(robot_entity(robot));
             }
 
+            if let Ok(frames) = resolve_robot_frames(robot) {
+                for frame in frames.values() {
+                    if matches_query(
+                        name,
+                        &string_candidates(&[
+                            &frame.id,
+                            &frame.name,
+                            &format!("{} frame", frame.id),
+                            &format!("{} frame", frame.name),
+                        ]),
+                    ) {
+                        return Some(frame_entity(robot, frame));
+                    }
+                }
+            }
+
             if matches_query(name, &string_candidates(&["tcp", "tool center point"]))
                 && let Some(tcp) = robot
                     .model_profile
@@ -1150,6 +1396,15 @@ impl RobotDreamsModel {
                 )
             })
             .map(robot_state)
+    }
+
+    pub fn frame_state(
+        &self,
+        robot_id_or_name: &str,
+        frame_name: &str,
+    ) -> Option<ResolvedFrameState> {
+        self.robot_state(robot_id_or_name)
+            .and_then(|robot| robot.frames.get(frame_name).cloned())
     }
 
     pub fn robot_base_yaw(&self, robot_id_or_name: &str) -> Option<f64> {
@@ -1233,11 +1488,14 @@ pub fn project_config_from_manifest(path: &Path) -> Option<ProjectConfig> {
 pub fn model_profile_from_manifest(path: &Path) -> Option<ModelProfile> {
     let json = read_json_file(path).ok()?;
     parse_model_profile(&json, path.to_path_buf())
+        .ok()
+        .flatten()
 }
 
 pub fn load_model_profile(path: impl AsRef<Path>) -> Result<ModelProfile, Box<dyn Error>> {
     let manifest = resolve_model_profile_manifest(path.as_ref())?;
-    model_profile_from_manifest(&manifest)
+    let json = read_json_file(&manifest)?;
+    parse_model_profile(&json, manifest.clone())?
         .ok_or_else(|| format!("{} is not a RobotDreams model profile", manifest.display()).into())
 }
 
@@ -1421,20 +1679,66 @@ pub fn resolve_json_urdf_path(path: &Path) -> Result<PathBuf, Box<dyn Error>> {
     .into())
 }
 
-fn parse_model_profile(value: &serde_json::Value, manifest_path: PathBuf) -> Option<ModelProfile> {
-    let format = json_string_path(value, &["format"])?;
+fn parse_model_frames(value: &serde_json::Value) -> Result<Vec<ModelFrameConfig>, String> {
+    let Some(frames) = value.get("frames") else {
+        return Ok(Vec::new());
+    };
+    let frames = frames.as_object().ok_or_else(|| {
+        "model profile 'frames' must be an object keyed by semantic frame id".to_string()
+    })?;
+    let mut parsed = Vec::new();
+    for (id, frame) in frames {
+        let entry = format!("model profile frame '{id}'");
+        if id.trim().is_empty() {
+            return Err("model profile frame ids must not be empty".to_string());
+        }
+        let name = json_string_path(frame, &["name"])
+            .ok_or_else(|| format!("{entry} must provide a string 'name'"))?;
+        let relative_to = json_string_path(frame, &["relativeTo"])
+            .ok_or_else(|| format!("{entry} must provide a string 'relativeTo'"))?;
+        let translation = json_vec3_path(frame, &["translation"]).ok_or_else(|| {
+            format!("{entry} must provide a three-number 'translation' in meters")
+        })?;
+        let rotation = json_vec3_path(frame, &["rotation"]).ok_or_else(|| {
+            format!("{entry} must provide a three-number RPY 'rotation' in radians")
+        })?;
+        if !translation.iter().all(|value| value.is_finite())
+            || !rotation.iter().all(|value| value.is_finite())
+        {
+            return Err(format!("{entry} has non-finite translation or rotation"));
+        }
+        parsed.push(ModelFrameConfig {
+            id: id.clone(),
+            name: name.to_string(),
+            relative_to: relative_to.to_string(),
+            translation_m: f32_vec3_to_f64(translation),
+            rotation_rpy_rad: f32_vec3_to_f64(rotation),
+        });
+    }
+    Ok(parsed)
+}
+
+fn parse_model_profile(
+    value: &serde_json::Value,
+    manifest_path: PathBuf,
+) -> Result<Option<ModelProfile>, Box<dyn Error>> {
+    let Some(format) = json_string_path(value, &["format"]) else {
+        return Ok(None);
+    };
     if format != ROBOT_DREAMS_MODEL_FORMAT {
-        return None;
+        return Ok(None);
     }
 
     let base_dir = path_base(&manifest_path);
     let name = json_string_path(value, &["name"])
         .unwrap_or("RobotDreams Model")
         .to_string();
-    let robot = parse_model_profile_robot_config(value, &name)?;
+    let Some(robot) = parse_model_profile_robot_config(value, &name) else {
+        return Ok(None);
+    };
     let joint_names = parse_project_joint_names(value);
 
-    Some(ModelProfile {
+    Ok(Some(ModelProfile {
         format: format.to_string(),
         name,
         manifest_path,
@@ -1442,8 +1746,9 @@ fn parse_model_profile(value: &serde_json::Value, manifest_path: PathBuf) -> Opt
         robot,
         joint_names,
         tcp: parse_tcp_config(value),
+        frames: parse_model_frames(value).map_err(|err| -> Box<dyn Error> { err.into() })?,
         frame_mapping: parse_frame_mapping_config(value),
-    })
+    }))
 }
 
 fn parse_model_profile_robot_config(
@@ -2490,6 +2795,7 @@ mod tests {
             robot,
             joint_names: HashMap::new(),
             tcp: None,
+            frames: Vec::new(),
             frame_mapping: None,
         }
     }
@@ -2521,6 +2827,134 @@ mod tests {
         assert_close(robot_location.position[0], 0.0);
         assert_close(robot_location.position[1], 0.154023);
         assert_close(robot_location.position[2], 0.0);
+    }
+
+    #[test]
+    fn model_profile_frames_use_keyed_semantic_ids_and_resolve_against_base() {
+        let model = RobotDreamsModel::open(puppyarm_project_path()).expect("load PuppyArm project");
+        let robot = model.robot_state("puppyarm").expect("PuppyArm state");
+        let base = robot.frames.get("base").expect("built-in base frame");
+        let arm_base = robot
+            .frames
+            .get("armBase")
+            .expect("configured arm base frame");
+
+        assert_eq!(base.relative_to, None);
+        assert_eq!(arm_base.id, "armBase");
+        assert_eq!(arm_base.name, "Arm Base");
+        assert_eq!(arm_base.relative_to.as_deref(), Some("base"));
+        assert_eq!(arm_base.relative_transform, RigidTransform::identity());
+        assert_eq!(arm_base.world_transform, base.world_transform);
+
+        let entity = model.named("armBase").expect("semantic frame entity");
+        assert_eq!(entity.kind, ModelEntityKind::Frame);
+        assert_eq!(entity.name, "Arm Base");
+        assert_eq!(
+            model.frame_state("PuppyArm", "armBase"),
+            Some(arm_base.clone())
+        );
+    }
+
+    #[test]
+    fn rigid_transforms_compose_invert_and_transform_points() {
+        let parent = RigidTransform::from_translation_rpy([1.0, 2.0, 3.0], [0.0, 0.0, 0.5]);
+        let child = RigidTransform::from_translation_rpy([0.5, 0.0, 0.0], [0.0, 0.0, -0.5]);
+        let world = parent.compose(child);
+        let point = [0.2, -0.4, 0.7];
+
+        let transformed = world.transform_point(point);
+        let recovered = world.inverse().transform_point(transformed);
+        for (actual, expected) in recovered.into_iter().zip(point) {
+            assert_close(actual, expected);
+        }
+        assert_close(world.rotation[0][0], 1.0);
+        assert_close(world.rotation[1][1], 1.0);
+        assert_close(world.rotation[2][2], 1.0);
+    }
+
+    #[test]
+    fn model_profile_rejects_invalid_frame_definitions() {
+        let manifest = puppyarm_model_profile_path();
+        let mut malformed = read_json_file(&manifest).expect("read PuppyArm model profile");
+        malformed["frames"] = serde_json::json!({"armBase": {"name": "Arm Base"}});
+        let error =
+            parse_model_profile(&malformed, manifest.clone()).expect_err("reject malformed frame");
+        assert!(error.to_string().contains("relativeTo"));
+        let malformed_path = std::env::temp_dir().join(format!(
+            "robotdreams-malformed-frames-{}.json",
+            std::process::id()
+        ));
+        std::fs::write(
+            &malformed_path,
+            serde_json::to_vec(&malformed).expect("serialize malformed profile"),
+        )
+        .expect("write malformed profile");
+        let error =
+            load_model_profile(&malformed_path).expect_err("model load rejects malformed frame");
+        assert!(error.to_string().contains("relativeTo"));
+        let _ = std::fs::remove_file(malformed_path);
+
+        let mut unknown_parent = read_json_file(&manifest).expect("read PuppyArm model profile");
+        unknown_parent["frames"] = serde_json::json!({
+            "armBase": {
+                "name": "Arm Base",
+                "relativeTo": "missing",
+                "translation": [0.0, 0.0, 0.0],
+                "rotation": [0.0, 0.0, 0.0]
+            }
+        });
+        let profile = parse_model_profile(&unknown_parent, manifest.clone())
+            .expect("parse profile")
+            .expect("model profile");
+        let error = loaded_robot_from_profile(profile).expect_err("reject unknown parent");
+        assert!(error.to_string().contains("unknown parent 'missing'"));
+
+        let mut cycle = read_json_file(&manifest).expect("read PuppyArm model profile");
+        cycle["frames"] = serde_json::json!({
+            "armBase": {
+                "name": "Arm Base",
+                "relativeTo": "tool",
+                "translation": [0.0, 0.0, 0.0],
+                "rotation": [0.0, 0.0, 0.0]
+            },
+            "tool": {
+                "name": "Tool",
+                "relativeTo": "armBase",
+                "translation": [0.0, 0.0, 0.0],
+                "rotation": [0.0, 0.0, 0.0]
+            }
+        });
+        let profile = parse_model_profile(&cycle, manifest)
+            .expect("parse profile")
+            .expect("model profile");
+        let error = loaded_robot_from_profile(profile).expect_err("reject frame cycle");
+        assert!(error.to_string().contains("cycle"));
+
+        let mut base_redefinition =
+            read_json_file(&puppyarm_model_profile_path()).expect("read PuppyArm model profile");
+        base_redefinition["frames"] = serde_json::json!({
+            "base": {
+                "name": "Base",
+                "relativeTo": "base",
+                "translation": [0.0, 0.0, 0.0],
+                "rotation": [0.0, 0.0, 0.0]
+            }
+        });
+        let profile = parse_model_profile(&base_redefinition, puppyarm_model_profile_path())
+            .expect("parse profile")
+            .expect("model profile");
+        let error = loaded_robot_from_profile(profile).expect_err("reject base redefinition");
+        assert!(error.to_string().contains("reserved semantic base"));
+
+        let mut nonfinite = parse_model_profile(
+            &read_json_file(&puppyarm_model_profile_path()).expect("read PuppyArm model profile"),
+            puppyarm_model_profile_path(),
+        )
+        .expect("parse profile")
+        .expect("model profile");
+        nonfinite.frames[0].translation_m[0] = f64::NAN;
+        let error = loaded_robot_from_profile(nonfinite).expect_err("reject non-finite frame");
+        assert!(error.to_string().contains("non-finite"));
     }
 
     #[test]
