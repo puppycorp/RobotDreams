@@ -26,6 +26,7 @@ pub struct ProjectConfig {
 #[derive(Clone, Debug, Default)]
 pub struct ProjectSceneConfig {
     pub objects: Vec<ProjectSceneObjectConfig>,
+    pub triggers: Vec<ProjectSceneTriggerConfig>,
     pub cameras: Vec<ProjectCameraConfig>,
     pub lights: Vec<ProjectLightConfig>,
     pub render_settings: Option<RenderSettings>,
@@ -55,6 +56,47 @@ pub struct ProjectSceneObjectConfig {
     pub rotation: [f32; 3],
     pub scale: Option<[f32; 3]>,
     pub include_in_fit: bool,
+    pub physics: Option<ProjectSceneObjectPhysicsConfig>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProjectSceneObjectPhysicsConfig {
+    pub body_kind: ProjectSceneBodyKind,
+    pub mass_kg: f32,
+    pub linear_damping: f32,
+    pub angular_damping: f32,
+    pub friction: f32,
+    pub restitution: f32,
+    pub collider: ProjectSceneColliderConfig,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProjectSceneBodyKind {
+    Static,
+    Dynamic,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProjectSceneColliderConfig {
+    pub geometry: ProjectSceneColliderGeometry,
+    pub offset: [f32; 3],
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum ProjectSceneColliderGeometry {
+    Box { size: [f32; 3] },
+    Sphere { radius: f32 },
+    Cylinder { radius: f32, height: f32 },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProjectSceneTriggerConfig {
+    pub id: String,
+    pub object_id: String,
+    pub position: [f32; 3],
+    pub size: [f32; 3],
+    pub settle_speed_mps: f32,
+    pub settle_time_sec: f32,
 }
 
 #[derive(Clone, Debug)]
@@ -1000,24 +1042,25 @@ fn robot_tcp_location(
     tcp: &TcpConfig,
 ) -> Option<SceneLocation> {
     link_poses.get(&tcp.link).map(|pose| {
-        let position = vec_add(
-            transform_vector(
-                pose.rotation,
+        let model_tcp = transform_then(
+            (pose.translation, pose.rotation),
+            (
                 [
                     tcp.offset[0] as f64,
                     tcp.offset[1] as f64,
                     tcp.offset[2] as f64,
                 ],
+                RigidTransform::identity().rotation,
             ),
-            pose.translation,
         );
-        scene_location(
-            position,
-            None,
-            robot.config.base_translation,
-            robot.config.base_rotation,
-            model_transformation(robot),
-        )
+        let world_tcp = transform_then(
+            transform_then(robot_base_transform(robot), model_transform(robot)),
+            model_tcp,
+        );
+        scene_location_from_transform(RigidTransform {
+            translation_m: world_tcp.0,
+            rotation: world_tcp.1,
+        })
     })
 }
 
@@ -2266,6 +2309,7 @@ fn parse_project_scene_object_config(
         .to_string();
     let geometry = parse_project_scene_object_geometry(value)?;
 
+    let physics = parse_project_scene_object_physics_config(value, &geometry);
     Some(ProjectSceneObjectConfig {
         id,
         name,
@@ -2286,6 +2330,93 @@ fn parse_project_scene_object_config(
         include_in_fit: json_bool_path(value, &["includeInFit"])
             .or_else(|| json_bool_path(value, &["fit"]))
             .unwrap_or(true),
+        physics,
+    })
+}
+
+fn parse_project_scene_collider_geometry(
+    value: &serde_json::Value,
+) -> Option<ProjectSceneColliderGeometry> {
+    match json_string_path(value, &["shape"])? {
+        "box" | "cube" | "cuboid" => Some(ProjectSceneColliderGeometry::Box {
+            size: json_vec3_path(value, &["size"]).unwrap_or([1.0, 1.0, 1.0]),
+        }),
+        "sphere" => Some(ProjectSceneColliderGeometry::Sphere {
+            radius: json_f32_path(value, &["radius"]).unwrap_or(0.5),
+        }),
+        "cylinder" => Some(ProjectSceneColliderGeometry::Cylinder {
+            radius: json_f32_path(value, &["radius"]).unwrap_or(0.5),
+            height: json_f32_path(value, &["height"]).unwrap_or(1.0),
+        }),
+        _ => None,
+    }
+}
+
+fn default_scene_collider_geometry(
+    geometry: &ProjectSceneObjectGeometry,
+) -> Option<ProjectSceneColliderGeometry> {
+    match geometry {
+        ProjectSceneObjectGeometry::Box { size } => {
+            Some(ProjectSceneColliderGeometry::Box { size: *size })
+        }
+        ProjectSceneObjectGeometry::Sphere { radius } => {
+            Some(ProjectSceneColliderGeometry::Sphere { radius: *radius })
+        }
+        ProjectSceneObjectGeometry::Cylinder {
+            radius_top,
+            radius_bottom,
+            height,
+        } => Some(ProjectSceneColliderGeometry::Cylinder {
+            radius: radius_top.max(*radius_bottom),
+            height: *height,
+        }),
+        ProjectSceneObjectGeometry::Mesh { .. } => None,
+    }
+}
+
+fn parse_project_scene_object_physics_config(
+    value: &serde_json::Value,
+    geometry: &ProjectSceneObjectGeometry,
+) -> Option<ProjectSceneObjectPhysicsConfig> {
+    let physics = value.get("physics")?;
+    let body_kind = match json_string_path(physics, &["body"]).unwrap_or("static") {
+        "dynamic" => ProjectSceneBodyKind::Dynamic,
+        "static" => ProjectSceneBodyKind::Static,
+        _ => return None,
+    };
+    let collider_value = physics.get("collider");
+    let collider_geometry = collider_value
+        .and_then(parse_project_scene_collider_geometry)
+        .or_else(|| default_scene_collider_geometry(geometry))?;
+    Some(ProjectSceneObjectPhysicsConfig {
+        body_kind,
+        mass_kg: json_f32_path(physics, &["massKg"]).unwrap_or(1.0),
+        linear_damping: json_f32_path(physics, &["linearDamping"]).unwrap_or(0.1),
+        angular_damping: json_f32_path(physics, &["angularDamping"]).unwrap_or(0.1),
+        friction: json_f32_path(physics, &["friction"]).unwrap_or(0.5),
+        restitution: json_f32_path(physics, &["restitution"]).unwrap_or(0.0),
+        collider: ProjectSceneColliderConfig {
+            geometry: collider_geometry,
+            offset: collider_value
+                .and_then(|collider| json_vec3_path(collider, &["offset"]))
+                .unwrap_or([0.0, 0.0, 0.0]),
+        },
+    })
+}
+
+fn parse_project_scene_trigger_config(
+    value: &serde_json::Value,
+) -> Option<ProjectSceneTriggerConfig> {
+    if json_string_path(value, &["shape"]).unwrap_or("box") != "box" {
+        return None;
+    }
+    Some(ProjectSceneTriggerConfig {
+        id: json_string_path(value, &["id"])?.to_string(),
+        object_id: json_string_path(value, &["object"])?.to_string(),
+        position: json_vec3_path(value, &["position"]).unwrap_or([0.0, 0.0, 0.0]),
+        size: json_vec3_path(value, &["size"]).unwrap_or([1.0, 1.0, 1.0]),
+        settle_speed_mps: json_f32_path(value, &["settleSpeedMps"]).unwrap_or(0.05),
+        settle_time_sec: json_f32_path(value, &["settleTimeSec"]).unwrap_or(0.25),
     })
 }
 
@@ -2619,6 +2750,17 @@ fn parse_project_scene_config(value: &serde_json::Value) -> ProjectSceneConfig {
                 .collect()
         })
         .unwrap_or_default();
+    let triggers = value
+        .get("scene")
+        .and_then(|scene| scene.get("triggers"))
+        .and_then(|triggers| triggers.as_array())
+        .map(|triggers| {
+            triggers
+                .iter()
+                .filter_map(parse_project_scene_trigger_config)
+                .collect()
+        })
+        .unwrap_or_default();
     let lights = value
         .get("scene")
         .and_then(|scene| scene.get("lights"))
@@ -2647,6 +2789,7 @@ fn parse_project_scene_config(value: &serde_json::Value) -> ProjectSceneConfig {
         .unwrap_or_default();
     ProjectSceneConfig {
         objects,
+        triggers,
         cameras,
         lights,
         render_settings,
@@ -2861,14 +3004,15 @@ mod tests {
 
     fn legacy_robot_state(robot: &LoadedRobotModel) -> RobotState {
         let location_for_link = |link_name: &str| {
-            robot.harness.link_origin_world(link_name).map(|position| {
-                scene_location(
-                    position,
-                    None,
-                    robot.config.base_translation,
-                    robot.config.base_rotation,
-                    model_transformation(robot),
-                )
+            robot.harness.link_pose_world(link_name).map(|pose| {
+                let world = transform_then(
+                    transform_then(robot_base_transform(robot), model_transform(robot)),
+                    (pose.translation, pose.rotation),
+                );
+                scene_location_from_transform(RigidTransform {
+                    translation_m: world.0,
+                    rotation: world.1,
+                })
             })
         };
         let joints = robot
@@ -2911,25 +3055,23 @@ mod tests {
             .map(|tcp| FrameState {
                 name: "tcp".to_string(),
                 link: tcp.link.clone(),
-                location: robot
-                    .harness
-                    .link_point_world(
-                        &tcp.link,
-                        [
-                            tcp.offset[0] as f64,
-                            tcp.offset[1] as f64,
-                            tcp.offset[2] as f64,
-                        ],
-                    )
-                    .map(|position| {
-                        scene_location(
-                            position,
-                            None,
-                            robot.config.base_translation,
-                            robot.config.base_rotation,
-                            model_transformation(robot),
-                        )
-                    }),
+                location: robot.harness.link_pose_world(&tcp.link).map(|pose| {
+                    let model_tcp = transform_then(
+                        (pose.translation, pose.rotation),
+                        (
+                            tcp.offset.map(f64::from),
+                            RigidTransform::identity().rotation,
+                        ),
+                    );
+                    let world_tcp = transform_then(
+                        transform_then(robot_base_transform(robot), model_transform(robot)),
+                        model_tcp,
+                    );
+                    scene_location_from_transform(RigidTransform {
+                        translation_m: world_tcp.0,
+                        rotation: world_tcp.1,
+                    })
+                }),
             });
 
         RobotState {
@@ -3595,5 +3737,48 @@ mod tests {
             distance(first_location, moved_location) > 1.0e-6,
             "expected TCP location to change after yaw joint update"
         );
+    }
+
+    #[test]
+    fn parses_scene_object_physics_and_bin_trigger_authoring() {
+        let value = serde_json::json!({
+            "scene": {
+                "objects": [{
+                    "id": "ball",
+                    "type": "sphere",
+                    "shape": "sphere",
+                    "radius": 0.025,
+                    "position": [0.1, 0.2, 0.3],
+                    "physics": {
+                        "body": "dynamic",
+                        "massKg": 0.04,
+                        "restitution": 0.1
+                    }
+                }],
+                "triggers": [{
+                    "id": "ball_in_bin",
+                    "object": "ball",
+                    "shape": "box",
+                    "position": [0.0, 0.0, 0.1],
+                    "size": [0.2, 0.2, 0.2],
+                    "settleSpeedMps": 0.04,
+                    "settleTimeSec": 0.3
+                }]
+            }
+        });
+
+        let scene = parse_project_scene_config(&value);
+        let physics = scene.objects[0].physics.as_ref().unwrap();
+        assert_eq!(physics.body_kind, ProjectSceneBodyKind::Dynamic);
+        assert_eq!(physics.mass_kg, 0.04);
+        assert_eq!(physics.restitution, 0.1);
+        assert!(matches!(
+            physics.collider.geometry,
+            ProjectSceneColliderGeometry::Sphere { radius } if radius == 0.025
+        ));
+        assert_eq!(scene.triggers.len(), 1);
+        assert_eq!(scene.triggers[0].id, "ball_in_bin");
+        assert_eq!(scene.triggers[0].object_id, "ball");
+        assert_eq!(scene.triggers[0].settle_time_sec, 0.3);
     }
 }

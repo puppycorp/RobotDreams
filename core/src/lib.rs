@@ -27,7 +27,10 @@ pub mod physics;
 pub mod project;
 pub mod scene_graph;
 pub mod scene_harness;
+mod scene_physics;
 pub mod urdf;
+
+pub use scene_physics::{SceneObjectAttachment, SceneObjectState, SceneTriggerState};
 
 pub use project::{
     FrameState, JointState, LinkState, ModelEntityKind, ResolvedFrameState, RigidTransform,
@@ -71,6 +74,7 @@ pub struct CoordinateDebugMarkerPositions {
 
 pub struct RobotDreams {
     physics: PhysicsWorld,
+    scene_physics: scene_physics::ScenePhysicsRuntime,
     model: Option<RobotDreamsModel>,
     models: Vec<UrdfModel>,
     hardware: HardwareRuntime,
@@ -105,6 +109,8 @@ pub struct RobotDreamsSnapshot {
     pub hardware: HardwareRuntime,
     pub servo_snapshots: Vec<BusServoSnapshots>,
     pub robots: Vec<RobotState>,
+    pub scene_objects: Vec<SceneObjectState>,
+    pub scene_triggers: Vec<SceneTriggerState>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -556,6 +562,7 @@ impl RobotDreams {
     pub fn new() -> Self {
         Self {
             physics: PhysicsWorld::new(),
+            scene_physics: scene_physics::ScenePhysicsRuntime::empty(),
             model: None,
             models: Vec::new(),
             hardware: HardwareRuntime::default(),
@@ -572,8 +579,14 @@ impl RobotDreams {
         let hardware = hardware_runtime_from_model(&model);
         let virtual_buses = virtual_buses_from_hardware(&hardware);
         let rover_drives = rover_drives_from_hardware(&hardware);
+        let scene_physics = model
+            .project()
+            .map(scene_physics::ScenePhysicsRuntime::from_project)
+            .transpose()?
+            .unwrap_or_else(scene_physics::ScenePhysicsRuntime::empty);
         let mut dreams = Self {
             model: Some(model),
+            scene_physics,
             hardware,
             virtual_buses,
             rover_drives,
@@ -597,11 +610,26 @@ impl RobotDreams {
     }
 
     pub fn named(&self, name: &str) -> Option<RobotDreamsEntity> {
-        self.model.as_ref()?.named(name)
+        let mut entity = self.model.as_ref()?.named(name)?;
+        if entity.kind == ModelEntityKind::SceneObject {
+            if let Some(state) = self.scene_physics.object_state(&entity.id) {
+                entity.location = Some(SceneLocation {
+                    position: state.position.map(f64::from),
+                    rotation: Some(state.rotation.map(f64::from)),
+                });
+            }
+        }
+        Some(entity)
     }
 
     pub fn location_of(&self, name: &str) -> Option<SceneLocation> {
-        self.model.as_ref()?.location_of(name)
+        if let Some(state) = self.scene_physics.object_state(name) {
+            return Some(SceneLocation {
+                position: state.position.map(f64::from),
+                rotation: Some(state.rotation.map(f64::from)),
+            });
+        }
+        self.named(name)?.location
     }
 
     pub fn robot_state(&self, robot_id_or_name: &str) -> Option<RobotState> {
@@ -618,15 +646,137 @@ impl RobotDreams {
             .frame_state(robot_id_or_name, frame_name)
     }
 
+    pub fn scene_object_state(&self, object_id: &str) -> Option<&SceneObjectState> {
+        self.scene_physics.object_state(object_id)
+    }
+
+    pub fn scene_object_states(&self) -> Vec<SceneObjectState> {
+        self.scene_physics.object_states()
+    }
+
+    pub fn scene_trigger_state(&self, trigger_id: &str) -> Option<&SceneTriggerState> {
+        self.scene_physics.trigger_state(trigger_id)
+    }
+
+    pub fn scene_trigger_states(&self) -> Vec<SceneTriggerState> {
+        self.scene_physics.trigger_states()
+    }
+
+    /// Attaches an object to the observed model TCP when it is within range.
+    ///
+    /// `offset_m` is expressed in the TCP frame, not world coordinates. The
+    /// rendered and snapshotted object pose is updated immediately on success.
+    pub fn try_attach_scene_object_to_tcp(
+        &mut self,
+        object_id: &str,
+        robot_id: &str,
+        max_distance_m: f32,
+        offset_m: [f32; 3],
+    ) -> Result<bool, Box<dyn Error>> {
+        if !max_distance_m.is_finite() || max_distance_m < 0.0 {
+            return Err("scene-object attachment distance must be finite and non-negative".into());
+        }
+        let tcp = SceneObjectAttachment {
+            robot_id: robot_id.to_string(),
+            frame_name: "tcp".to_string(),
+            offset_m: [0.0; 3],
+        };
+        let tcp_position = self
+            .observed_frame_attachment_position(&tcp)
+            .ok_or_else(|| format!("observed TCP does not exist on robot '{robot_id}'"))?;
+        let object_position = self
+            .scene_physics
+            .object_state(object_id)
+            .ok_or_else(|| format!("scene object '{object_id}' has no physics body"))?
+            .position;
+        let distance_m = object_position
+            .into_iter()
+            .zip(tcp_position)
+            .map(|(object, tcp)| (object - tcp).powi(2))
+            .sum::<f32>()
+            .sqrt();
+        if distance_m > max_distance_m {
+            return Ok(false);
+        }
+        self.attach_scene_object_to_frame(object_id, robot_id, "tcp", offset_m)?;
+        Ok(true)
+    }
+
+    pub fn attach_scene_object_to_frame(
+        &mut self,
+        object_id: &str,
+        robot_id: &str,
+        frame_name: &str,
+        offset_m: [f32; 3],
+    ) -> Result<(), Box<dyn Error>> {
+        let attachment = SceneObjectAttachment {
+            robot_id: robot_id.to_string(),
+            frame_name: frame_name.to_string(),
+            offset_m,
+        };
+        let position = self
+            .observed_frame_attachment_position(&attachment)
+            .ok_or_else(|| {
+                format!("observed frame '{frame_name}' does not exist on robot '{robot_id}'")
+            })?;
+        self.scene_physics.attach(object_id, attachment, position)
+    }
+
+    pub fn detach_scene_object(&mut self, object_id: &str) -> Result<(), Box<dyn Error>> {
+        self.scene_physics.detach(object_id)
+    }
+
+    fn observed_frame_attachment_position(
+        &self,
+        attachment: &SceneObjectAttachment,
+    ) -> Option<[f32; 3]> {
+        let transform = if attachment.frame_name.eq_ignore_ascii_case("tcp") {
+            let location = self.robot_state(&attachment.robot_id)?.tcp?.location?;
+            RigidTransform::from_translation_rpy(
+                location.position,
+                location.rotation.unwrap_or([0.0; 3]),
+            )
+        } else {
+            self.frame_state(&attachment.robot_id, &attachment.frame_name)?
+                .world_transform
+        };
+        Some(
+            transform
+                .transform_point(attachment.offset_m.map(f64::from))
+                .map(|component| component as f32),
+        )
+    }
+
+    fn sync_scene_object_attachments(&mut self) {
+        let positions = self
+            .scene_physics
+            .attachment_requests()
+            .into_iter()
+            .filter_map(|(object_id, attachment)| {
+                self.observed_frame_attachment_position(&attachment)
+                    .map(|position| (object_id, position))
+            })
+            .collect::<Vec<_>>();
+        for (object_id, position) in positions {
+            self.scene_physics
+                .set_attached_position(&object_id, position);
+        }
+    }
+
     pub fn set_joint_angle(
         &mut self,
         name: impl AsRef<str>,
         radians: f64,
     ) -> Result<(), Box<dyn Error>> {
-        self.model
+        let result = self
+            .model
             .as_mut()
             .ok_or_else(|| "No RobotDreams model is open".into())
-            .and_then(|model| model.set_joint_angle(name, radians))
+            .and_then(|model| model.set_joint_angle(name, radians));
+        if result.is_ok() {
+            self.sync_scene_object_attachments();
+        }
+        result
     }
 
     pub fn advance_seconds(&mut self, dt: f32) {
@@ -639,6 +789,8 @@ impl RobotDreams {
         }
         self.apply_virtual_bus_snapshots();
         self.integrate_rover_drives(f64::from(dt));
+        self.sync_scene_object_attachments();
+        self.scene_physics.step(dt, self.clock_sec);
         self.set_time_step(dt);
         self.physics.step();
     }
@@ -649,6 +801,7 @@ impl RobotDreams {
         }
         self.clock_sec += f64::from(dt);
         self.integrate_rover_drives(f64::from(dt));
+        self.sync_scene_object_attachments();
     }
 
     pub fn snapshot(&self) -> RobotDreamsSnapshot {
@@ -668,6 +821,8 @@ impl RobotDreams {
                 .as_ref()
                 .map(|model| model.robot_states())
                 .unwrap_or_default(),
+            scene_objects: self.scene_physics.object_states(),
+            scene_triggers: self.scene_physics.trigger_states(),
         }
     }
 
@@ -735,6 +890,7 @@ impl RobotDreams {
                         robot_id: None,
                         link_name: None,
                     });
+                    let live_state = self.scene_physics.object_state(&object.id);
                     let mut node = SceneNode::mesh(
                         entity,
                         object.name.clone(),
@@ -743,8 +899,12 @@ impl RobotDreams {
                             color_rgb: object.color_rgb,
                         },
                         Transform {
-                            translation: object.position,
-                            rotation: object.rotation,
+                            translation: live_state
+                                .map(|state| state.position)
+                                .unwrap_or(object.position),
+                            rotation: live_state
+                                .map(|state| state.rotation)
+                                .unwrap_or(object.rotation),
                             rotation_matrix: None,
                         },
                     );
@@ -3169,6 +3329,143 @@ mod robotdreams_tests {
             distance(start_tcp, moved_tcp) > 1.0e-3,
             "TCP should move when virtual servo updates the model"
         );
+    }
+
+    #[test]
+    fn physics_ball_pose_trigger_snapshot_and_pge_render_state_agree() {
+        let project_path = write_temp_project(
+            "live-ball-state",
+            serde_json::json!({
+                "format": "robotdreams.project.v1",
+                "name": "Live Ball State",
+                "scene": {
+                    "objects": [
+                        {
+                            "id": "bin_bottom",
+                            "shape": "box",
+                            "size": [0.18, 0.18, 0.02],
+                            "position": [0.0, 0.0, 0.0],
+                            "physics": {
+                                "body": "static",
+                                "collider": {
+                                    "shape": "box",
+                                    "size": [0.18, 0.18, 0.02],
+                                    "offset": [0.0, 0.0, 0.01]
+                                }
+                            }
+                        },
+                        {
+                            "id": "ball",
+                            "shape": "sphere",
+                            "radius": 0.025,
+                            "position": [0.0, 0.0, 0.18],
+                            "physics": {
+                                "body": "dynamic",
+                                "massKg": 0.05,
+                                "collider": { "shape": "sphere", "radius": 0.025 }
+                            }
+                        }
+                    ],
+                    "triggers": [{
+                        "id": "ball_in_bin",
+                        "object": "ball",
+                        "shape": "box",
+                        "position": [0.0, 0.0, 0.125],
+                        "size": [0.15, 0.15, 0.22],
+                        "settleSpeedMps": 0.05,
+                        "settleTimeSec": 0.25
+                    }]
+                }
+            }),
+        );
+        let mut dreams = RobotDreams::open(&project_path).expect("open physics scene");
+        for _ in 0..360 {
+            dreams.advance_seconds(1.0 / 120.0);
+        }
+
+        let snapshot = dreams.snapshot();
+        let ball = snapshot
+            .scene_objects
+            .iter()
+            .find(|object| object.id == "ball")
+            .unwrap();
+        let trigger = snapshot
+            .scene_triggers
+            .iter()
+            .find(|trigger| trigger.id == "ball_in_bin")
+            .unwrap();
+        assert!(trigger.triggered && trigger.settled && trigger.inside);
+        let graph_ball = dreams
+            .scene_graph()
+            .root
+            .children
+            .into_iter()
+            .find(|node| node.entity.0 == "object:ball")
+            .unwrap();
+        assert_eq!(graph_ball.transform.translation, ball.position);
+        let world = dreams.world_state();
+        let pge_ball = world
+            .nodes
+            .iter()
+            .find_map(|(_, node)| (node.entity.0 == "object:ball").then_some(node))
+            .unwrap();
+        assert_eq!(pge_ball.transform.translation, ball.position);
+
+        let _ = std::fs::remove_dir_all(project_path.parent().unwrap());
+    }
+
+    #[test]
+    fn public_tcp_attachment_checks_observed_distance_and_tracks_immediately() {
+        let mut dreams = RobotDreams::open(puppybot_project_path()).expect("open PuppyBot project");
+        assert!(
+            !dreams
+                .try_attach_scene_object_to_tcp("ball", "puppybot", 0.0, [0.0; 3])
+                .expect("reject distant attachment")
+        );
+        assert!(
+            dreams
+                .try_attach_scene_object_to_tcp("ball", "puppybot", 1.0, [0.0; 3])
+                .expect("attach ball to observed TCP")
+        );
+        let attached = dreams.scene_object_state("ball").unwrap();
+        assert_eq!(
+            attached
+                .attachment
+                .as_ref()
+                .map(|value| value.frame_name.as_str()),
+            Some("tcp")
+        );
+        let attached_tcp = dreams
+            .robot_state("puppybot")
+            .and_then(|robot| robot.tcp)
+            .and_then(|tcp| tcp.location)
+            .unwrap()
+            .position
+            .map(|value| value as f32);
+        assert_eq!(attached.position, attached_tcp);
+
+        dreams
+            .set_joint_angle("yaw", 0.2)
+            .expect("move observed yaw");
+        let moved_tcp = dreams
+            .robot_state("puppybot")
+            .and_then(|robot| robot.tcp)
+            .and_then(|tcp| tcp.location)
+            .unwrap()
+            .position
+            .map(|value| value as f32);
+        assert_eq!(
+            dreams.scene_object_state("ball").unwrap().position,
+            moved_tcp
+        );
+
+        dreams.detach_scene_object("ball").expect("release ball");
+        let release_z = dreams.scene_object_state("ball").unwrap().position[2];
+        dreams.advance_seconds(0.02);
+        let released = dreams.scene_object_state("ball").unwrap();
+        assert!(released.attachment.is_none());
+        assert!(released.position[2] < release_z);
+        assert!(released.velocity_mps[2] < 0.0);
     }
 }
 
