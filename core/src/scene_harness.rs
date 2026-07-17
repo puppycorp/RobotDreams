@@ -1,3 +1,5 @@
+#[cfg(test)]
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::path::Path;
@@ -8,6 +10,14 @@ use urdf_rs::{Joint, JointType, Pose, Robot};
 pub struct UrdfSceneHarness {
     robot: Robot,
     joint_values_rad: HashMap<String, f64>,
+    root_link_name: Option<String>,
+    joint_indices_by_parent: HashMap<String, Vec<usize>>,
+    #[cfg(test)]
+    pose_map_expansions: Cell<usize>,
+    #[cfg(test)]
+    root_searches: Cell<usize>,
+    #[cfg(test)]
+    joint_transform_evaluations: Cell<usize>,
 }
 
 impl UrdfSceneHarness {
@@ -17,9 +27,34 @@ impl UrdfSceneHarness {
     }
 
     pub fn new(robot: Robot) -> Self {
+        let children: HashSet<&str> = robot
+            .joints
+            .iter()
+            .map(|joint| joint.child.link.as_str())
+            .collect();
+        let root_link_name = robot
+            .links
+            .iter()
+            .find(|link| !children.contains(link.name.as_str()))
+            .map(|link| link.name.clone());
+        let mut joint_indices_by_parent = HashMap::<String, Vec<usize>>::new();
+        for (index, joint) in robot.joints.iter().enumerate() {
+            joint_indices_by_parent
+                .entry(joint.parent.link.clone())
+                .or_default()
+                .push(index);
+        }
         Self {
             robot,
             joint_values_rad: HashMap::new(),
+            root_link_name,
+            joint_indices_by_parent,
+            #[cfg(test)]
+            pose_map_expansions: Cell::new(0),
+            #[cfg(test)]
+            root_searches: Cell::new(0),
+            #[cfg(test)]
+            joint_transform_evaluations: Cell::new(0),
         }
     }
 
@@ -59,17 +94,22 @@ impl UrdfSceneHarness {
     }
 
     pub fn link_pose_world(&self, link_name: &str) -> Option<LinkPose> {
-        let root = self.root_link_name()?;
-        self.link_transform_from(&root, Transform::identity(), link_name)
+        #[cfg(test)]
+        self.root_searches.set(self.root_searches.get() + 1);
+        let root = self.root_link_name.as_deref()?;
+        self.link_transform_from(root, Transform::identity(), link_name)
             .map(LinkPose::from)
     }
 
     pub fn link_poses_world(&self) -> HashMap<String, LinkPose> {
-        let Some(root) = self.root_link_name() else {
+        #[cfg(test)]
+        self.pose_map_expansions
+            .set(self.pose_map_expansions.get() + 1);
+        let Some(root) = self.root_link_name.as_deref() else {
             return HashMap::new();
         };
         let mut poses = HashMap::new();
-        self.collect_link_transforms(&root, Transform::identity(), &mut poses);
+        self.collect_link_transforms(root, Transform::identity(), &mut poses);
         poses
             .into_iter()
             .map(|(link, transform)| (link, LinkPose::from(transform)))
@@ -77,24 +117,27 @@ impl UrdfSceneHarness {
     }
 
     pub fn link_point_world(&self, link_name: &str, point: [f64; 3]) -> Option<[f64; 3]> {
-        let root = self.root_link_name()?;
-        self.link_transform_from(&root, Transform::identity(), link_name)
+        #[cfg(test)]
+        self.root_searches.set(self.root_searches.get() + 1);
+        let root = self.root_link_name.as_deref()?;
+        self.link_transform_from(root, Transform::identity(), link_name)
             .map(|transform| transform.transform_point(point))
     }
 
-    fn root_link_name(&self) -> Option<String> {
-        let children: HashSet<&str> = self
-            .robot
-            .joints
-            .iter()
-            .map(|joint| joint.child.link.as_str())
-            .collect();
+    #[cfg(test)]
+    pub(crate) fn reset_traversal_counts(&self) {
+        self.pose_map_expansions.set(0);
+        self.root_searches.set(0);
+        self.joint_transform_evaluations.set(0);
+    }
 
-        self.robot
-            .links
-            .iter()
-            .find(|link| !children.contains(link.name.as_str()))
-            .map(|link| link.name.clone())
+    #[cfg(test)]
+    pub(crate) fn traversal_counts(&self) -> (usize, usize, usize) {
+        (
+            self.pose_map_expansions.get(),
+            self.root_searches.get(),
+            self.joint_transform_evaluations.get(),
+        )
     }
 
     fn link_transform_from(
@@ -107,12 +150,16 @@ impl UrdfSceneHarness {
             return Some(current_transform);
         }
 
-        for joint in self
-            .robot
-            .joints
-            .iter()
-            .filter(|joint| joint.parent.link == current_link)
+        for joint_index in self
+            .joint_indices_by_parent
+            .get(current_link)
+            .into_iter()
+            .flatten()
         {
+            let joint = &self.robot.joints[*joint_index];
+            #[cfg(test)]
+            self.joint_transform_evaluations
+                .set(self.joint_transform_evaluations.get() + 1);
             let child_transform = current_transform.then(joint_transform(
                 joint,
                 self.joint_values_rad
@@ -138,12 +185,16 @@ impl UrdfSceneHarness {
     ) {
         poses.insert(current_link.to_string(), current_transform);
 
-        for joint in self
-            .robot
-            .joints
-            .iter()
-            .filter(|joint| joint.parent.link == current_link)
+        for joint_index in self
+            .joint_indices_by_parent
+            .get(current_link)
+            .into_iter()
+            .flatten()
         {
+            let joint = &self.robot.joints[*joint_index];
+            #[cfg(test)]
+            self.joint_transform_evaluations
+                .set(self.joint_transform_evaluations.get() + 1);
             let child_transform = current_transform.then(joint_transform(
                 joint,
                 self.joint_values_rad

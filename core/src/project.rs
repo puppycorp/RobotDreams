@@ -965,8 +965,47 @@ fn robot_base_location(robot: &LoadedRobotModel) -> SceneLocation {
     )
 }
 
-fn robot_link_location(robot: &LoadedRobotModel, link_name: &str) -> Option<SceneLocation> {
-    robot.harness.link_origin_world(link_name).map(|position| {
+fn robot_link_location(
+    robot: &LoadedRobotModel,
+    link_poses: &HashMap<String, LinkPose>,
+    link_name: &str,
+) -> Option<SceneLocation> {
+    link_poses.get(link_name).map(|pose| {
+        scene_location(
+            pose.translation,
+            None,
+            robot.config.base_translation,
+            robot.config.base_rotation,
+            model_transformation(robot),
+        )
+    })
+}
+
+fn robot_joint_location(
+    robot: &LoadedRobotModel,
+    link_poses: &HashMap<String, LinkPose>,
+    joint: &urdf_rs::Joint,
+) -> Option<SceneLocation> {
+    robot_link_location(robot, link_poses, &joint.child.link)
+}
+
+fn robot_tcp_location(
+    robot: &LoadedRobotModel,
+    link_poses: &HashMap<String, LinkPose>,
+    tcp: &TcpConfig,
+) -> Option<SceneLocation> {
+    link_poses.get(&tcp.link).map(|pose| {
+        let position = vec_add(
+            transform_vector(
+                pose.rotation,
+                [
+                    tcp.offset[0] as f64,
+                    tcp.offset[1] as f64,
+                    tcp.offset[2] as f64,
+                ],
+            ),
+            pose.translation,
+        );
         scene_location(
             position,
             None,
@@ -977,53 +1016,38 @@ fn robot_link_location(robot: &LoadedRobotModel, link_name: &str) -> Option<Scen
     })
 }
 
-fn robot_joint_location(robot: &LoadedRobotModel, joint: &urdf_rs::Joint) -> Option<SceneLocation> {
-    robot_link_location(robot, &joint.child.link)
-}
-
-fn robot_tcp_location(robot: &LoadedRobotModel, tcp: &TcpConfig) -> Option<SceneLocation> {
-    robot
-        .harness
-        .link_point_world(
-            &tcp.link,
-            [
-                tcp.offset[0] as f64,
-                tcp.offset[1] as f64,
-                tcp.offset[2] as f64,
-            ],
-        )
-        .map(|position| {
-            scene_location(
-                position,
-                None,
-                robot.config.base_translation,
-                robot.config.base_rotation,
-                model_transformation(robot),
-            )
-        })
-}
-
 fn joint_state_key(urdf_name: &str, semantic_name: Option<&str>) -> String {
     semantic_name.unwrap_or(urdf_name).to_string()
 }
 
-fn joint_state(robot: &LoadedRobotModel, joint: &urdf_rs::Joint) -> JointState {
+fn joint_state(
+    robot: &LoadedRobotModel,
+    link_poses: &HashMap<String, LinkPose>,
+    joint: &urdf_rs::Joint,
+) -> JointState {
     JointState {
         urdf_name: joint.name.clone(),
         semantic_name: robot.config.joint_names.get(&joint.name).cloned(),
         position_rad: robot.harness.joint_angle(&joint.name),
-        location: robot_joint_location(robot, joint),
+        location: robot_joint_location(robot, link_poses, joint),
     }
 }
 
-fn link_state(robot: &LoadedRobotModel, link_name: &str) -> LinkState {
+fn link_state(
+    robot: &LoadedRobotModel,
+    link_poses: &HashMap<String, LinkPose>,
+    link_name: &str,
+) -> LinkState {
     LinkState {
         urdf_name: link_name.to_string(),
-        location: robot_link_location(robot, link_name),
+        location: robot_link_location(robot, link_poses, link_name),
     }
 }
 
-fn tcp_state(robot: &LoadedRobotModel) -> Option<FrameState> {
+fn tcp_state(
+    robot: &LoadedRobotModel,
+    link_poses: &HashMap<String, LinkPose>,
+) -> Option<FrameState> {
     let tcp = robot
         .model_profile
         .as_ref()
@@ -1031,7 +1055,7 @@ fn tcp_state(robot: &LoadedRobotModel) -> Option<FrameState> {
     Some(FrameState {
         name: "tcp".to_string(),
         link: tcp.link.clone(),
-        location: robot_tcp_location(robot, tcp),
+        location: robot_tcp_location(robot, link_poses, tcp),
     })
 }
 
@@ -1117,6 +1141,7 @@ fn robot_visual_transforms(robot: &LoadedRobotModel) -> Vec<RobotVisualTransform
 }
 
 fn robot_state(robot: &LoadedRobotModel) -> RobotState {
+    let link_poses = robot.harness.link_poses_world();
     let joints = robot
         .harness
         .robot()
@@ -1130,7 +1155,7 @@ fn robot_state(robot: &LoadedRobotModel) -> RobotState {
                 .map(String::as_str);
             (
                 joint_state_key(&joint.name, semantic_name),
-                joint_state(robot, joint),
+                joint_state(robot, &link_poses, joint),
             )
         })
         .collect();
@@ -1139,7 +1164,12 @@ fn robot_state(robot: &LoadedRobotModel) -> RobotState {
         .robot()
         .links
         .iter()
-        .map(|link| (link.name.clone(), link_state(robot, &link.name)))
+        .map(|link| {
+            (
+                link.name.clone(),
+                link_state(robot, &link_poses, &link.name),
+            )
+        })
         .collect();
 
     RobotState {
@@ -1149,7 +1179,7 @@ fn robot_state(robot: &LoadedRobotModel) -> RobotState {
         frames: resolve_robot_frames(robot).expect("loaded robot frames validated"),
         joints,
         links,
-        tcp: tcp_state(robot),
+        tcp: tcp_state(robot, &link_poses),
     }
 }
 
@@ -1403,8 +1433,13 @@ impl RobotDreamsModel {
         robot_id_or_name: &str,
         frame_name: &str,
     ) -> Option<ResolvedFrameState> {
-        self.robot_state(robot_id_or_name)
-            .and_then(|robot| robot.frames.get(frame_name).cloned())
+        let robot = self.robots.iter().find(|robot| {
+            matches_query(
+                robot_id_or_name,
+                &string_candidates(&[&robot.config.id, &robot.config.name]),
+            )
+        })?;
+        resolve_robot_frames(robot).ok()?.get(frame_name).cloned()
     }
 
     pub fn robot_base_yaw(&self, robot_id_or_name: &str) -> Option<f64> {
@@ -2740,6 +2775,169 @@ mod tests {
         project_root().join("examples/puppyarm/model/final/urdf/final.urdf")
     }
 
+    fn representative_large_model() -> RobotDreamsModel {
+        use std::fmt::Write as _;
+
+        const LINK_COUNT: usize = 221;
+        let mut urdf = String::from("<robot name=\"representative_large_robot\">");
+        for link_index in 0..LINK_COUNT {
+            write!(urdf, "<link name=\"link_{link_index}\"/>").expect("write representative link");
+        }
+        for joint_index in 0..(LINK_COUNT - 1) {
+            let child_index = joint_index + 1;
+            write!(
+                urdf,
+                concat!(
+                    "<joint name=\"joint_{}\" type=\"continuous\">",
+                    "<origin xyz=\"0.001 0.002 0.003\" rpy=\"0.001 -0.002 0.003\"/>",
+                    "<parent link=\"link_{}\"/>",
+                    "<child link=\"link_{}\"/>",
+                    "<axis xyz=\"0 0 1\"/>",
+                    "</joint>"
+                ),
+                joint_index, joint_index, child_index,
+            )
+            .expect("write representative joint");
+        }
+        urdf.push_str("</robot>");
+        let urdf = urdf_rs::read_from_string(&urdf).expect("parse representative URDF");
+        let joint_names = ["yaw", "shoulder", "elbow", "wrist"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, semantic_name)| (format!("joint_{index}"), semantic_name.to_string()))
+            .collect::<HashMap<_, _>>();
+        let config = ProjectRobotConfig {
+            id: "representative_large_robot".to_string(),
+            name: "Representative Large Robot".to_string(),
+            model: ProjectRobotModelConfig {
+                type_name: "urdf".to_string(),
+                path: "representative-large.urdf".to_string(),
+                model_transformation: Some(ModelTransformationConfig {
+                    translation: [0.01, -0.02, 0.03],
+                    rotation: [0.02, -0.01, 0.04],
+                }),
+            },
+            joint_names: joint_names.clone(),
+            base_translation: [0.1, -0.2, 0.3],
+            base_rotation: [0.1, -0.2, 0.3],
+        };
+        let profile = ModelProfile {
+            format: ROBOT_DREAMS_MODEL_FORMAT.to_string(),
+            name: "Representative Large Robot".to_string(),
+            manifest_path: PathBuf::from("representative-robotdreams.json"),
+            base_dir: PathBuf::from("."),
+            robot: config.clone(),
+            joint_names,
+            tcp: Some(TcpConfig {
+                link: format!("link_{}", LINK_COUNT - 1),
+                offset: [0.04, -0.02, 0.01],
+            }),
+            frames: vec![ModelFrameConfig {
+                id: "armBase".to_string(),
+                name: "Arm Base".to_string(),
+                relative_to: "base".to_string(),
+                translation_m: [0.02, 0.01, 0.05],
+                rotation_rpy_rad: [0.0, 0.0, 0.1],
+            }],
+            frame_mapping: None,
+        };
+        RobotDreamsModel {
+            manifest_path: PathBuf::from("representative-project.json"),
+            project: None,
+            model_profile: Some(profile.clone()),
+            robots: vec![LoadedRobotModel {
+                config,
+                model_profile: Some(profile),
+                urdf_path: PathBuf::from("representative-large.urdf"),
+                harness: UrdfSceneHarness::new(urdf),
+            }],
+        }
+    }
+
+    fn legacy_robot_state(robot: &LoadedRobotModel) -> RobotState {
+        let location_for_link = |link_name: &str| {
+            robot.harness.link_origin_world(link_name).map(|position| {
+                scene_location(
+                    position,
+                    None,
+                    robot.config.base_translation,
+                    robot.config.base_rotation,
+                    model_transformation(robot),
+                )
+            })
+        };
+        let joints = robot
+            .harness
+            .robot()
+            .joints
+            .iter()
+            .map(|joint| {
+                let semantic_name = robot.config.joint_names.get(&joint.name).cloned();
+                (
+                    joint_state_key(&joint.name, semantic_name.as_deref()),
+                    JointState {
+                        urdf_name: joint.name.clone(),
+                        semantic_name,
+                        position_rad: robot.harness.joint_angle(&joint.name),
+                        location: location_for_link(&joint.child.link),
+                    },
+                )
+            })
+            .collect();
+        let links = robot
+            .harness
+            .robot()
+            .links
+            .iter()
+            .map(|link| {
+                (
+                    link.name.clone(),
+                    LinkState {
+                        urdf_name: link.name.clone(),
+                        location: location_for_link(&link.name),
+                    },
+                )
+            })
+            .collect();
+        let tcp = robot
+            .model_profile
+            .as_ref()
+            .and_then(|profile| profile.tcp.as_ref())
+            .map(|tcp| FrameState {
+                name: "tcp".to_string(),
+                link: tcp.link.clone(),
+                location: robot
+                    .harness
+                    .link_point_world(
+                        &tcp.link,
+                        [
+                            tcp.offset[0] as f64,
+                            tcp.offset[1] as f64,
+                            tcp.offset[2] as f64,
+                        ],
+                    )
+                    .map(|position| {
+                        scene_location(
+                            position,
+                            None,
+                            robot.config.base_translation,
+                            robot.config.base_rotation,
+                            model_transformation(robot),
+                        )
+                    }),
+            });
+
+        RobotState {
+            id: robot.config.id.clone(),
+            name: robot.config.name.clone(),
+            base: robot_base_location(robot),
+            frames: resolve_robot_frames(robot).expect("loaded robot frames validated"),
+            joints,
+            links,
+            tcp,
+        }
+    }
+
     fn write_temp_project(name: &str, value: serde_json::Value) -> PathBuf {
         let dir =
             std::env::temp_dir().join(format!("robotdreams-core-{name}-{}", std::process::id()));
@@ -2827,6 +3025,69 @@ mod tests {
         assert_close(robot_location.position[0], 0.0);
         assert_close(robot_location.position[1], 0.154023);
         assert_close(robot_location.position[2], 0.0);
+    }
+
+    #[test]
+    fn large_robot_state_matches_legacy_root_search_results_with_one_linear_expansion() {
+        let mut model = representative_large_model();
+        for (joint, angle) in [
+            ("yaw", 0.31),
+            ("shoulder", -0.47),
+            ("elbow", 0.83),
+            ("wrist", -0.26),
+        ] {
+            model
+                .set_joint_angle(joint, angle)
+                .expect("set representative joint angle");
+        }
+        let robot = model
+            .robots
+            .iter()
+            .find(|robot| robot.config.id == "representative_large_robot")
+            .expect("representative large robot model");
+        let expected = legacy_robot_state(robot);
+
+        robot.harness.reset_traversal_counts();
+        let actual = robot_state(robot);
+
+        assert_eq!(actual, expected);
+        assert_eq!(actual.links.len(), 221);
+        assert_eq!(actual.joints.len(), 220);
+        assert_eq!(robot.harness.traversal_counts(), (1, 0, 220));
+    }
+
+    #[test]
+    fn frame_state_resolution_does_not_expand_urdf_link_poses() {
+        let model = representative_large_model();
+        let robot = model
+            .robots
+            .iter()
+            .find(|robot| robot.config.id == "representative_large_robot")
+            .expect("representative large robot model");
+        let legacy_state = model
+            .robot_state("representative_large_robot")
+            .expect("legacy-compatible robot state");
+        let expected_base = legacy_state.frames.get("base").cloned();
+        let expected_arm_base = legacy_state.frames.get("armBase").cloned();
+        robot.harness.reset_traversal_counts();
+
+        assert_eq!(
+            model
+                .frame_state("representative_large_robot", "base")
+                .as_ref(),
+            expected_base.as_ref()
+        );
+        assert_eq!(
+            model.frame_state("Representative Large Robot", "armBase"),
+            expected_arm_base
+        );
+        assert_eq!(model.frame_state("missing robot", "base"), None);
+        assert_eq!(
+            model.frame_state("representative_large_robot", "missing frame"),
+            None
+        );
+
+        assert_eq!(robot.harness.traversal_counts(), (0, 0, 0));
     }
 
     #[test]

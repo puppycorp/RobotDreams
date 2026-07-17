@@ -74,10 +74,29 @@ pub struct RobotDreams {
     model: Option<RobotDreamsModel>,
     models: Vec<UrdfModel>,
     hardware: HardwareRuntime,
+    virtual_servo_joint_mappings: BTreeMap<String, BTreeMap<u8, VirtualServoJointMapping>>,
     virtual_buses: Vec<VirtualBusRuntime>,
     rover_drives: Vec<RoverDriveRuntime>,
     clock_sec: f64,
     dt: f32,
+}
+
+/// Session-local conversion from a virtual servo's ticks to its driven joint coordinate.
+///
+/// The mapping overrides the project manifest calibration for the selected virtual servo only.
+/// It is not persisted to the project. When `wrapped` is true, both the observed tick and
+/// `reference_tick` are aligned to the nearest full-turn representative around
+/// `alignment_reference_tick` before applying the affine conversion.
+#[derive(Clone, Debug, PartialEq)]
+pub struct VirtualServoJointMapping {
+    pub bus_id: String,
+    pub servo_id: u8,
+    pub reference_tick: i32,
+    pub alignment_reference_tick: i32,
+    pub joint_position_at_reference_rad: f64,
+    pub radians_per_tick: f64,
+    pub ticks_per_turn: u16,
+    pub wrapped: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -391,6 +410,45 @@ fn servo_ticks_to_radians(ticks: i16, zero_offset: i16, direction: i8) -> f64 {
     direction * (ticks - zero_offset) * (std::f64::consts::TAU / SERVO_FULL_ROTATION_TICKS)
 }
 
+fn align_tick_to_reference(tick: i32, reference_tick: i32, ticks_per_turn: u16) -> i64 {
+    let tick = i64::from(tick);
+    let reference_tick = i64::from(reference_tick);
+    let ticks_per_turn = i64::from(ticks_per_turn);
+    let delta = tick - reference_tick;
+    let lower_turns = delta.div_euclid(ticks_per_turn);
+    let lower_delta = delta - lower_turns * ticks_per_turn;
+    let upper_delta = lower_delta - ticks_per_turn;
+
+    let aligned_delta = match lower_delta.abs().cmp(&upper_delta.abs()) {
+        std::cmp::Ordering::Less => lower_delta,
+        std::cmp::Ordering::Greater => upper_delta,
+        std::cmp::Ordering::Equal if delta == lower_delta => lower_delta,
+        std::cmp::Ordering::Equal => upper_delta,
+    };
+    reference_tick + aligned_delta
+}
+
+fn virtual_servo_joint_position(mapping: &VirtualServoJointMapping, tick: i32) -> f64 {
+    let (tick, reference_tick) = if mapping.wrapped {
+        (
+            align_tick_to_reference(
+                tick,
+                mapping.alignment_reference_tick,
+                mapping.ticks_per_turn,
+            ),
+            align_tick_to_reference(
+                mapping.reference_tick,
+                mapping.alignment_reference_tick,
+                mapping.ticks_per_turn,
+            ),
+        )
+    } else {
+        (i64::from(tick), i64::from(mapping.reference_tick))
+    };
+    let delta_ticks = tick - reference_tick;
+    mapping.joint_position_at_reference_rad + delta_ticks as f64 * mapping.radians_per_tick
+}
+
 fn apply_servo_snapshots_to_hardware(
     hardware: &mut HardwareRuntime,
     bus_id: &str,
@@ -417,12 +475,14 @@ fn apply_servo_snapshots_to_hardware(
 fn apply_servo_snapshots_to_model(
     model: &mut RobotDreamsModel,
     hardware: &HardwareRuntime,
+    virtual_servo_joint_mappings: &BTreeMap<String, BTreeMap<u8, VirtualServoJointMapping>>,
     bus_id: &str,
     snapshots: &[FeetechServoSnapshot],
 ) {
     let Some(bus) = hardware.buses.iter().find(|bus| bus.id == bus_id) else {
         return;
     };
+    let bus_mappings = virtual_servo_joint_mappings.get(bus_id);
     for device in &bus.devices {
         let HardwareDeviceRuntime::Servo(servo) = device else {
             continue;
@@ -433,11 +493,18 @@ fn apply_servo_snapshots_to_model(
         let Some(snapshot) = servo_snapshot(snapshots, servo) else {
             continue;
         };
-        let radians = servo_ticks_to_radians(
-            snapshot.present_position,
-            servo.zero_offset,
-            servo.direction,
-        );
+        let radians = bus_mappings
+            .and_then(|mappings| mappings.get(&snapshot.id))
+            .map(|mapping| {
+                virtual_servo_joint_position(mapping, i32::from(snapshot.present_position))
+            })
+            .unwrap_or_else(|| {
+                servo_ticks_to_radians(
+                    snapshot.present_position,
+                    servo.zero_offset,
+                    servo.direction,
+                )
+            });
         let _ = model.set_joint_angle(&servo.drives_joint, radians);
     }
 }
@@ -492,6 +559,7 @@ impl RobotDreams {
             model: None,
             models: Vec::new(),
             hardware: HardwareRuntime::default(),
+            virtual_servo_joint_mappings: BTreeMap::new(),
             virtual_buses: Vec::new(),
             rover_drives: Vec::new(),
             clock_sec: 0.0,
@@ -830,7 +898,13 @@ impl RobotDreams {
                     snapshot
                 })
                 .collect::<Vec<_>>();
-            apply_servo_snapshots_to_model(&mut model, &self.hardware, &bus.id, &snapshots);
+            apply_servo_snapshots_to_model(
+                &mut model,
+                &self.hardware,
+                &self.virtual_servo_joint_mappings,
+                &bus.id,
+                &snapshots,
+            );
         }
         Some(model)
     }
@@ -876,6 +950,93 @@ impl RobotDreams {
 
     pub fn hardware(&self) -> &HardwareRuntime {
         &self.hardware
+    }
+
+    /// Atomically replaces the session-local tick-to-joint mappings for virtual servos.
+    ///
+    /// Every mapping is validated before any existing override is changed. Passing an empty
+    /// iterator clears the session overrides and restores project-manifest calibration.
+    pub fn install_virtual_servo_joint_mappings(
+        &mut self,
+        mappings: impl IntoIterator<Item = VirtualServoJointMapping>,
+    ) -> Result<(), Box<dyn Error>> {
+        let mut validated = BTreeMap::<String, BTreeMap<u8, VirtualServoJointMapping>>::new();
+
+        for mapping in mappings {
+            if mapping.ticks_per_turn == 0 {
+                return Err(format!(
+                    "virtual servo mapping for bus '{}' servo {} has zero ticks_per_turn",
+                    mapping.bus_id, mapping.servo_id
+                )
+                .into());
+            }
+            if !mapping.joint_position_at_reference_rad.is_finite() {
+                return Err(format!(
+                    "virtual servo mapping for bus '{}' servo {} has non-finite reference position",
+                    mapping.bus_id, mapping.servo_id
+                )
+                .into());
+            }
+            if !mapping.radians_per_tick.is_finite() {
+                return Err(format!(
+                    "virtual servo mapping for bus '{}' servo {} has non-finite radians_per_tick",
+                    mapping.bus_id, mapping.servo_id
+                )
+                .into());
+            }
+            if !self
+                .virtual_buses
+                .iter()
+                .any(|bus| bus.id == mapping.bus_id)
+            {
+                return Err(format!(
+                    "virtual servo mapping references unknown virtual bus '{}'",
+                    mapping.bus_id
+                )
+                .into());
+            }
+
+            let hardware_bus = self
+                .hardware
+                .buses
+                .iter()
+                .find(|bus| bus.id == mapping.bus_id)
+                .expect("virtual bus must have a matching hardware bus");
+            let servo = hardware_bus.devices.iter().find_map(|device| match device {
+                HardwareDeviceRuntime::Servo(servo) if servo.id == u32::from(mapping.servo_id) => {
+                    Some(servo)
+                }
+                _ => None,
+            });
+            let Some(servo) = servo else {
+                return Err(format!(
+                    "virtual servo mapping references unknown servo {} on bus '{}'",
+                    mapping.servo_id, mapping.bus_id
+                )
+                .into());
+            };
+            if servo.drives_joint.is_empty() {
+                return Err(format!(
+                    "virtual servo mapping references bus '{}' servo {}, which does not drive a joint",
+                    mapping.bus_id, mapping.servo_id
+                )
+                .into());
+            }
+
+            let bus_mappings = validated.entry(mapping.bus_id.clone()).or_default();
+            if bus_mappings.contains_key(&mapping.servo_id) {
+                return Err(format!(
+                    "duplicate virtual servo mapping for bus '{}' servo {}",
+                    mapping.bus_id, mapping.servo_id
+                )
+                .into());
+            }
+            bus_mappings.insert(mapping.servo_id, mapping);
+        }
+
+        self.virtual_servo_joint_mappings = validated;
+        self.apply_virtual_bus_snapshots();
+        Ok(())
     }
 
     pub fn servo_snapshots(&self, bus_id: &str) -> Option<Vec<FeetechServoSnapshot>> {
@@ -1032,7 +1193,13 @@ impl RobotDreams {
         for (bus_id, snapshots) in snapshots_by_bus {
             apply_servo_snapshots_to_hardware(&mut self.hardware, &bus_id, &snapshots);
             if let Some(model) = &mut self.model {
-                apply_servo_snapshots_to_model(model, &self.hardware, &bus_id, &snapshots);
+                apply_servo_snapshots_to_model(
+                    model,
+                    &self.hardware,
+                    &self.virtual_servo_joint_mappings,
+                    &bus_id,
+                    &snapshots,
+                );
             }
         }
     }
@@ -2239,7 +2406,8 @@ mod robotdreams_tests {
 
     use super::{
         CoordinateDebugOverlayOptions, ModelEntityKind, RobotDreams, RobotDreamsPgeFrameOptions,
-        f64_vec3_to_f32, robotdreams_pge_frame,
+        VirtualServoJointMapping, f64_vec3_to_f32, robotdreams_pge_frame,
+        virtual_servo_joint_position,
     };
 
     fn project_root() -> PathBuf {
@@ -2290,6 +2458,24 @@ mod robotdreams_tests {
         node.children
             .iter()
             .find_map(|child| find_node_by_entity(child, entity_id))
+    }
+
+    fn yaw_mapping(
+        reference_tick: i32,
+        joint_position_at_reference_rad: f64,
+        radians_per_tick: f64,
+        wrapped: bool,
+    ) -> VirtualServoJointMapping {
+        VirtualServoJointMapping {
+            bus_id: "main_bus".to_string(),
+            servo_id: 1,
+            reference_tick,
+            alignment_reference_tick: reference_tick,
+            joint_position_at_reference_rad,
+            radians_per_tick,
+            ticks_per_turn: 4096,
+            wrapped,
+        }
     }
 
     #[test]
@@ -2601,6 +2787,146 @@ mod robotdreams_tests {
         assert!(
             find_node_by_entity(&scene.root, "debug:puppybot:tcp:delta").is_some(),
             "overlay should draw current-to-target delta when they differ"
+        );
+    }
+
+    #[test]
+    fn virtual_servo_joint_mapping_reapplies_an_exact_fractional_reference_position() {
+        let mut dreams = RobotDreams::open(puppyarm_project_path()).expect("open PuppyArm project");
+        let reference_position = 0.123_456_789_012_345;
+
+        dreams
+            .install_virtual_servo_joint_mappings([yaw_mapping(
+                2048,
+                reference_position,
+                0.001_234_567_89,
+                true,
+            )])
+            .expect("install exact mapping");
+
+        let yaw = dreams.robot_state("puppyarm").expect("robot state").joints["yaw"].position_rad;
+        assert_eq!(yaw, reference_position);
+    }
+
+    #[test]
+    fn wrapped_virtual_servo_mapping_matches_puppybot_midpoint_branch_at_boundary() {
+        let mut mapping = yaw_mapping(2685, 0.5, std::f64::consts::TAU / 4096.0, true);
+        mapping.alignment_reference_tick = 2047;
+
+        assert_eq!(virtual_servo_joint_position(&mapping, 2685), 0.5);
+        assert!(
+            (virtual_servo_joint_position(&mapping, 0)
+                - (0.5 + (0 - 2685) as f64 * mapping.radians_per_tick))
+                .abs()
+                < 1.0e-12
+        );
+        assert!(
+            (virtual_servo_joint_position(&mapping, 4095)
+                - (0.5 + (4095 - 2685) as f64 * mapping.radians_per_tick))
+                .abs()
+                < 1.0e-12
+        );
+
+        let boundary_pose_delta = virtual_servo_joint_position(&mapping, 4095)
+            - virtual_servo_joint_position(&mapping, 0);
+        assert!(
+            (boundary_pose_delta - std::f64::consts::TAU + mapping.radians_per_tick).abs()
+                < 1.0e-12
+        );
+        assert!(
+            (virtual_servo_joint_position(&mapping, -1)
+                - (0.5 + (-1 - 2685) as f64 * mapping.radians_per_tick))
+                .abs()
+                < 1.0e-12
+        );
+        assert_eq!(
+            virtual_servo_joint_position(&mapping, 8191),
+            virtual_servo_joint_position(&mapping, -1)
+        );
+    }
+
+    #[test]
+    fn virtual_servo_mapping_supports_asymmetric_negative_slope() {
+        let mapping = yaw_mapping(100, -0.25, -0.003, false);
+
+        assert!((virtual_servo_joint_position(&mapping, 137) + 0.361).abs() < 1.0e-12);
+        assert!((virtual_servo_joint_position(&mapping, 63) + 0.139).abs() < 1.0e-12);
+    }
+
+    #[test]
+    fn invalid_virtual_servo_mapping_batch_leaves_existing_mapping_unchanged() {
+        let mut dreams = RobotDreams::open(puppyarm_project_path()).expect("open PuppyArm project");
+        dreams
+            .install_virtual_servo_joint_mappings([yaw_mapping(2048, 0.25, 0.01, true)])
+            .expect("install initial mapping");
+
+        let mut unknown = yaw_mapping(2048, 2.0, 0.02, true);
+        unknown.servo_id = 99;
+        assert!(
+            dreams
+                .install_virtual_servo_joint_mappings(
+                    [yaw_mapping(2048, 1.0, 0.02, true), unknown,]
+                )
+                .is_err()
+        );
+        assert_eq!(
+            dreams.robot_state("puppyarm").expect("robot state").joints["yaw"].position_rad,
+            0.25
+        );
+
+        assert!(
+            dreams
+                .install_virtual_servo_joint_mappings([
+                    yaw_mapping(2048, 1.0, 0.02, true),
+                    yaw_mapping(2048, 2.0, 0.03, true),
+                ])
+                .is_err()
+        );
+        assert_eq!(
+            dreams.robot_state("puppyarm").expect("robot state").joints["yaw"].position_rad,
+            0.25
+        );
+    }
+
+    #[test]
+    fn target_model_state_uses_virtual_servo_joint_mapping() {
+        let mut dreams = RobotDreams::open(puppyarm_project_path()).expect("open PuppyArm project");
+        dreams
+            .install_virtual_servo_joint_mappings([yaw_mapping(2048, 0.125, -0.01, true)])
+            .expect("install target mapping");
+        assert!(dreams.set_virtual_servo_target("main_bus", 1, 2058));
+
+        let target_yaw = dreams
+            .target_model_state()
+            .expect("target model")
+            .robot_state("puppyarm")
+            .expect("target robot state")
+            .joints["yaw"]
+            .position_rad;
+        assert!((target_yaw - 0.025).abs() < 1.0e-12);
+    }
+
+    #[test]
+    fn empty_virtual_servo_mapping_batch_restores_manifest_fallback() {
+        let mut dreams = RobotDreams::open(puppyarm_project_path()).expect("open PuppyArm project");
+        dreams
+            .install_virtual_servo_joint_mappings([yaw_mapping(2048, 0.25, 0.01, true)])
+            .expect("install override mapping");
+        assert_eq!(
+            dreams.robot_state("puppyarm").expect("mapped state").joints["yaw"].position_rad,
+            0.25
+        );
+
+        dreams
+            .install_virtual_servo_joint_mappings([])
+            .expect("clear mappings");
+        assert_eq!(
+            dreams
+                .robot_state("puppyarm")
+                .expect("fallback state")
+                .joints["yaw"]
+                .position_rad,
+            0.0
         );
     }
 
