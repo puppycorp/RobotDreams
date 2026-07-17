@@ -2551,6 +2551,72 @@ mod robotdreams_tests {
     }
 
     #[test]
+    fn mounted_camera_world_pose_rotates_with_rover_base() {
+        let mut dreams = RobotDreams::open(puppybot_project_path()).expect("open PuppyBot project");
+        let before = dreams
+            .camera_spec("wrist_camera")
+            .expect("mounted wrist camera");
+        let before_rotation = before
+            .transform
+            .rotation_matrix
+            .expect("native wrist-camera basis");
+
+        assert!(
+            dreams
+                .model
+                .as_mut()
+                .expect("project model")
+                .move_robot_base_flat("puppybot", 0.25, -0.10, std::f64::consts::FRAC_PI_2)
+        );
+
+        let after = dreams
+            .camera_spec("wrist_camera")
+            .expect("moved mounted wrist camera");
+        let after_rotation = after
+            .transform
+            .rotation_matrix
+            .expect("moved native wrist-camera basis");
+        for column in 0..3 {
+            let before_axis = [
+                before_rotation[0][column],
+                before_rotation[1][column],
+                before_rotation[2][column],
+            ];
+            let after_axis = [
+                after_rotation[0][column],
+                after_rotation[1][column],
+                after_rotation[2][column],
+            ];
+            let expected = [-before_axis[1], before_axis[0], before_axis[2]];
+            for axis in 0..3 {
+                assert!(
+                    (after_axis[axis] - expected[axis]).abs() < 1.0e-5,
+                    "camera basis column {column}, axis {axis}: expected {}, got {}",
+                    expected[axis],
+                    after_axis[axis]
+                );
+            }
+        }
+        assert!(
+            distance(
+                before.transform.translation.map(f64::from),
+                after.transform.translation.map(f64::from)
+            ) > 0.1,
+            "mounted wrist camera translation should move with the rover base"
+        );
+        let robot = dreams.robot_state("puppybot").expect("rover state");
+        assert!(
+            robot
+                .links
+                .get("part_1_4")
+                .and_then(|link| link.location.as_ref())
+                .and_then(|location| location.rotation)
+                .is_some(),
+            "mounted link must expose its complete world rotation"
+        );
+    }
+
+    #[test]
     fn builds_scene_graph_from_project_state() {
         let dreams = RobotDreams::open(puppyarm_project_path()).expect("open PuppyArm project");
         let scene = dreams.scene_graph();

@@ -971,13 +971,18 @@ fn robot_link_location(
     link_name: &str,
 ) -> Option<SceneLocation> {
     link_poses.get(link_name).map(|pose| {
-        scene_location(
-            pose.translation,
-            None,
-            robot.config.base_translation,
-            robot.config.base_rotation,
-            model_transformation(robot),
-        )
+        // Link poses come from the URDF model frame.  A mounted device needs
+        // the complete world transform, not just the transformed position:
+        // dropping the model/base rotations here leaves cameras and sensors
+        // pointing in their original world orientation while the rover turns.
+        let world = transform_then(
+            transform_then(robot_base_transform(robot), model_transform(robot)),
+            (pose.translation, pose.rotation),
+        );
+        scene_location_from_transform(RigidTransform {
+            translation_m: world.0,
+            rotation: world.1,
+        })
     })
 }
 
