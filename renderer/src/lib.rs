@@ -7,7 +7,6 @@ use std::sync::{Arc, Mutex};
 use gltf::mesh::Mode;
 use image::ImageReader;
 use rayon::prelude::*;
-use robotdreams_core::RobotDreamsSnapshot;
 use robotdreams_core::scene_graph::{
     CameraDistortion, CameraProjection, CameraSensorEffects, CameraSpec, EntityId,
     EnvironmentSettings, Geometry, LightKind, ObservationMetadata, ObservationRequest,
@@ -15,6 +14,7 @@ use robotdreams_core::scene_graph::{
     SegmentationPolicy, ShutterMode, ShutterPolicy, ToneMapping, Transform,
     camera_intrinsics_for_resolution, transform_matrix,
 };
+use robotdreams_core::{RobotDreams, RobotDreamsSnapshot};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -36,6 +36,24 @@ pub struct FrameBuffer {
     pub bytes: Vec<u8>,
 }
 
+/// An RGB observation captured from one authored camera in the live simulation.
+///
+/// This intentionally excludes scene-object state, physics state, and trigger state. Runtime
+/// controllers can use the image and camera calibration, while an evaluator can keep the
+/// simulation ground truth separate. `rgb8` is tightly packed, row-major RGB pixels.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NamedCameraRgbFrame {
+    pub timestamp_sec: f64,
+    pub camera_id: String,
+    pub width: u32,
+    pub height: u32,
+    pub rgb8: Vec<u8>,
+    pub camera_pose: Transform,
+    pub camera_projection: CameraProjection,
+    pub camera_intrinsics: robotdreams_core::scene_graph::CameraIntrinsics,
+    pub camera_distortion: Option<CameraDistortion>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct RenderOutput {
     pub metadata: ObservationMetadata,
@@ -55,6 +73,52 @@ pub struct NativeRenderer {
     mesh_cache: MeshGeometryCache,
     environment_cache: EnvironmentTextureCache,
     environment_brdf_lut: Arc<EnvironmentBrdfLut>,
+}
+
+/// Renders an RGB frame from an authored camera in the current RobotDreams runtime state.
+///
+/// The camera must be named in the loaded project manifest, such as `overhead_camera`. The
+/// frame uses that camera's authored resolution and returns only RGB pixels and camera metadata;
+/// it does not expose scene-object poses, physics state, or trigger verdicts.
+pub fn render_named_camera_rgb(
+    renderer: &NativeRenderer,
+    dreams: &RobotDreams,
+    camera_id: impl AsRef<str>,
+) -> Result<NamedCameraRgbFrame, String> {
+    let camera_id = camera_id.as_ref();
+    let camera = dreams.camera_spec(camera_id).ok_or_else(|| {
+        format!("authored camera '{camera_id}' was not found in the live project")
+    })?;
+    let request = ObservationRequest {
+        camera_id: Some(camera.id.clone()),
+        views: vec![ObservationView::DebugRgb],
+        resolution: camera.resolution,
+        segmentation_policy: None,
+        shutter_policy: None,
+        render_settings: None,
+    };
+    let output = renderer.render(&dreams.scene_graph(), Some(dreams.snapshot()), &request)?;
+    let rgb = output
+        .frames
+        .into_iter()
+        .find(|frame| frame.kind == FrameKind::DebugRgb)
+        .ok_or_else(|| "named-camera RGB render did not produce an RGB frame".to_string())?;
+    let rgb8 = image::load_from_memory(&rgb.bytes)
+        .map_err(|err| format!("decode named-camera RGB render: {err}"))?
+        .to_rgb8()
+        .into_raw();
+
+    Ok(NamedCameraRgbFrame {
+        timestamp_sec: output.metadata.timestamp_sec,
+        camera_id: camera.id.clone(),
+        width: rgb.width,
+        height: rgb.height,
+        rgb8,
+        camera_pose: camera.transform,
+        camera_projection: camera.projection,
+        camera_intrinsics: camera_intrinsics_for_resolution(&camera, request.resolution),
+        camera_distortion: camera.distortion,
+    })
 }
 
 type MeshGeometryCache = Arc<Mutex<BTreeMap<MeshCacheKey, Arc<RenderGeometry>>>>;
@@ -10574,12 +10638,13 @@ mod tests {
 
     use gltf::mesh::Mode;
     use robotdreams_core::{
-        EnvironmentSettings, RenderSettings, RobotDreamsSnapshot,
+        EnvironmentSettings, RenderSettings, RobotDreams, RobotDreamsSnapshot,
         scene_graph::{
             CameraDistortion, CameraIntrinsics, CameraProjection, CameraSensorEffects, CameraSpec,
             EntityId, EntityMetadata, Geometry, LightKind, LightSpec, Material, ObservationRequest,
             ObservationView, ReflectionProbeSettings, SceneGraph, SceneNode, SceneNodeKind,
             SegmentationPolicy, ShutterMode, ShutterPolicy, ToneMapping, Transform,
+            camera_intrinsics_for_resolution,
         },
     };
 
@@ -10602,10 +10667,11 @@ mod tests {
         next_transmission_medium_stack, normalize, point_light_attenuation,
         reflection_probe_influence_weight, reflection_probe_sample_direction, refract,
         refracted_background_rgb, refracted_scene_rgb, refracted_transmission_lobe_rgb,
-        refraction_surface_normal, render_asset_lights, render_lights, render_object_bounds,
-        render_objects, render_settings_for_scene, rough_environment_radiance_rgb,
-        sample_color_texture_linear_rgb, sample_diffuse_environment_texture,
-        sample_environment_brdf_lut, sample_environment_texture, sample_morph_weights_animation,
+        refraction_surface_normal, render_asset_lights, render_lights, render_named_camera_rgb,
+        render_object_bounds, render_objects, render_settings_for_scene,
+        rough_environment_radiance_rgb, sample_color_texture_linear_rgb,
+        sample_diffuse_environment_texture, sample_environment_brdf_lut,
+        sample_environment_texture, sample_morph_weights_animation,
         sample_prefiltered_environment_texture, sample_texture, sample_vec3_animation, scale,
         scene_reflection_rgb, shade_hit, shade_hit_with_lights, shade_pbr_direct_rgb,
         shadow_visibility, shadow_visibility_rgb, shadow_visibility_rgb_collecting_all_hits,
@@ -10623,6 +10689,45 @@ mod tests {
                 expected
             );
         }
+    }
+
+    fn puppyarm_project_path() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../examples/puppyarm/project.json")
+    }
+
+    #[test]
+    fn named_camera_rgb_uses_live_authored_overhead_camera_without_ground_truth() {
+        let mut dreams = RobotDreams::open(puppyarm_project_path()).expect("open PuppyArm project");
+        dreams.advance_seconds(0.125);
+        let camera = dreams
+            .camera_spec("overhead_camera")
+            .expect("authored overhead camera");
+
+        let frame = render_named_camera_rgb(&NativeRenderer::new(), &dreams, "overhead_camera")
+            .expect("render overhead RGB");
+
+        assert_eq!(frame.camera_id, "overhead_camera");
+        assert_eq!([frame.width, frame.height], [640, 480]);
+        assert_eq!(frame.rgb8.len(), 640 * 480 * 3);
+        assert!((frame.timestamp_sec - 0.125).abs() <= 1.0e-9);
+        assert_eq!(frame.camera_pose, camera.transform);
+        assert_eq!(frame.camera_projection, camera.projection);
+        assert_eq!(
+            frame.camera_intrinsics,
+            camera_intrinsics_for_resolution(&camera, camera.resolution)
+        );
+    }
+
+    #[test]
+    fn named_camera_rgb_rejects_unknown_authored_camera() {
+        let dreams = RobotDreams::open(puppyarm_project_path()).expect("open PuppyArm project");
+        let error = render_named_camera_rgb(&NativeRenderer::new(), &dreams, "missing_camera")
+            .expect_err("unknown camera should be rejected");
+
+        assert_eq!(
+            error,
+            "authored camera 'missing_camera' was not found in the live project"
+        );
     }
 
     #[test]
