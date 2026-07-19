@@ -12,6 +12,9 @@ pub struct SceneObjectAttachment {
     pub robot_id: String,
     pub frame_name: String,
     pub offset_m: [f32; 3],
+    /// Orientation of the object in the held frame at grasp time.  Together
+    /// with `offset_m` this is the stable local grasp transform.
+    pub rotation_offset_rpy: [f32; 3],
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -283,6 +286,7 @@ impl ScenePhysicsRuntime {
         object_id: &str,
         attachment: SceneObjectAttachment,
         position: [f32; 3],
+        rotation: [f32; 3],
     ) -> Result<(), Box<dyn Error>> {
         let object = self
             .objects
@@ -297,9 +301,14 @@ impl ScenePhysicsRuntime {
             .ok_or_else(|| format!("scene object '{object_id}' physics body is missing"))?;
         body.set_body_type(RigidBodyType::KinematicPositionBased, true);
         body.set_translation(vec3(position), true);
+        body.set_rotation(
+            Rotation::from_euler_angles(rotation[0], rotation[1], rotation[2]),
+            true,
+        );
         body.set_linvel(Vector::zeros(), true);
         body.set_angvel(Vector::zeros(), true);
         object.state.position = position;
+        object.state.rotation = rotation;
         object.state.velocity_mps = [0.0; 3];
         object.state.angular_velocity_rps = [0.0; 3];
         object.state.attachment = Some(attachment);
@@ -338,7 +347,12 @@ impl ScenePhysicsRuntime {
             .collect()
     }
 
-    pub(crate) fn set_attached_position(&mut self, object_id: &str, position: [f32; 3]) {
+    pub(crate) fn set_attached_pose(
+        &mut self,
+        object_id: &str,
+        position: [f32; 3],
+        rotation: [f32; 3],
+    ) {
         let Some(object) = self.objects.get_mut(object_id) else {
             return;
         };
@@ -347,9 +361,13 @@ impl ScenePhysicsRuntime {
         };
         body.set_translation(vec3(position), true);
         body.set_next_kinematic_translation(vec3(position));
+        let orientation = Rotation::from_euler_angles(rotation[0], rotation[1], rotation[2]);
+        body.set_rotation(orientation, true);
+        body.set_next_kinematic_rotation(orientation);
         body.set_linvel(Vector::zeros(), true);
         body.set_angvel(Vector::zeros(), true);
         object.state.position = position;
+        object.state.rotation = rotation;
         object.state.velocity_mps = [0.0; 3];
         object.state.angular_velocity_rps = [0.0; 3];
     }
@@ -519,8 +537,10 @@ mod tests {
                     robot_id: "robot".to_string(),
                     frame_name: "tcp".to_string(),
                     offset_m: [0.0; 3],
+                    rotation_offset_rpy: [0.0; 3],
                 },
                 [0.0, 0.0, 0.18],
+                [0.0; 3],
             )
             .unwrap();
         runtime.detach("ball").unwrap();
@@ -551,14 +571,17 @@ mod tests {
                     robot_id: "robot".to_string(),
                     frame_name: "tcp".to_string(),
                     offset_m: [0.0; 3],
+                    rotation_offset_rpy: [0.0; 3],
                 },
                 [0.1, 0.0, 0.4],
+                [0.0; 3],
             )
             .unwrap();
-        runtime.set_attached_position("ball", [0.08, 0.02, 0.35]);
+        runtime.set_attached_pose("ball", [0.08, 0.02, 0.35], [0.0, 0.0, 0.5]);
         runtime.step(0.02, 0.02);
         let held = runtime.object_state("ball").unwrap();
         assert_eq!(held.position, [0.08, 0.02, 0.35]);
+        assert_eq!(held.rotation, [0.0, 0.0, 0.5]);
         assert!(held.attachment.is_some());
 
         runtime.detach("ball").unwrap();

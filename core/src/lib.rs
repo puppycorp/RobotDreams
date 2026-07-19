@@ -680,6 +680,7 @@ impl RobotDreams {
             robot_id: robot_id.to_string(),
             frame_name: "tcp".to_string(),
             offset_m: [0.0; 3],
+            rotation_offset_rpy: [0.0; 3],
         };
         let tcp_position = self
             .observed_frame_attachment_position(&tcp)
@@ -709,17 +710,42 @@ impl RobotDreams {
         frame_name: &str,
         offset_m: [f32; 3],
     ) -> Result<(), Box<dyn Error>> {
+        let frame_transform = self
+            .observed_frame_transform(robot_id, frame_name)
+            .ok_or_else(|| {
+                format!("observed frame '{frame_name}' does not exist on robot '{robot_id}'")
+            })?;
+        let object_rotation = self
+            .scene_physics
+            .object_state(object_id)
+            .ok_or_else(|| format!("scene object '{object_id}' has no physics body"))?
+            .rotation;
+        // Preserve the object's orientation relative to the grasp frame at
+        // attach time.  The positional offset remains an explicit caller
+        // choice (the simulation gripper uses TCP centre), while this local
+        // rotation makes the held object rotate rigidly with TCP thereafter.
+        let object_orientation =
+            RigidTransform::from_translation_rpy([0.0; 3], object_rotation.map(f64::from));
+        let rotation_offset_rpy = frame_transform
+            .inverse()
+            .compose(object_orientation)
+            .rotation_rpy()
+            .map(|value| value as f32);
         let attachment = SceneObjectAttachment {
             robot_id: robot_id.to_string(),
             frame_name: frame_name.to_string(),
             offset_m,
+            rotation_offset_rpy,
         };
-        let position = self
-            .observed_frame_attachment_position(&attachment)
-            .ok_or_else(|| {
-                format!("observed frame '{frame_name}' does not exist on robot '{robot_id}'")
-            })?;
-        self.scene_physics.attach(object_id, attachment, position)
+        let pose = self
+            .observed_frame_attachment_transform(&attachment)
+            .expect("grasp frame was validated immediately above");
+        self.scene_physics.attach(
+            object_id,
+            attachment,
+            pose.translation_m.map(|value| value as f32),
+            pose.rotation_rpy().map(|value| value as f32),
+        )
     }
 
     pub fn detach_scene_object(&mut self, object_id: &str) -> Result<(), Box<dyn Error>> {
@@ -730,36 +756,53 @@ impl RobotDreams {
         &self,
         attachment: &SceneObjectAttachment,
     ) -> Option<[f32; 3]> {
-        let transform = if attachment.frame_name.eq_ignore_ascii_case("tcp") {
-            let location = self.robot_state(&attachment.robot_id)?.tcp?.location?;
-            RigidTransform::from_translation_rpy(
+        self.observed_frame_attachment_transform(attachment)
+            .map(|transform| transform.translation_m.map(|component| component as f32))
+    }
+
+    fn observed_frame_transform(&self, robot_id: &str, frame_name: &str) -> Option<RigidTransform> {
+        if frame_name.eq_ignore_ascii_case("tcp") {
+            let location = self.robot_state(robot_id)?.tcp?.location?;
+            Some(RigidTransform::from_translation_rpy(
                 location.position,
                 location.rotation.unwrap_or([0.0; 3]),
-            )
+            ))
         } else {
-            self.frame_state(&attachment.robot_id, &attachment.frame_name)?
-                .world_transform
-        };
-        Some(
-            transform
-                .transform_point(attachment.offset_m.map(f64::from))
-                .map(|component| component as f32),
-        )
+            Some(self.frame_state(robot_id, frame_name)?.world_transform)
+        }
+    }
+
+    fn observed_frame_attachment_transform(
+        &self,
+        attachment: &SceneObjectAttachment,
+    ) -> Option<RigidTransform> {
+        let transform =
+            self.observed_frame_transform(&attachment.robot_id, &attachment.frame_name)?;
+        Some(transform.compose(RigidTransform::from_translation_rpy(
+            attachment.offset_m.map(f64::from),
+            attachment.rotation_offset_rpy.map(f64::from),
+        )))
     }
 
     fn sync_scene_object_attachments(&mut self) {
-        let positions = self
+        let poses = self
             .scene_physics
             .attachment_requests()
             .into_iter()
             .filter_map(|(object_id, attachment)| {
-                self.observed_frame_attachment_position(&attachment)
-                    .map(|position| (object_id, position))
+                self.observed_frame_attachment_transform(&attachment)
+                    .map(|pose| {
+                        (
+                            object_id,
+                            pose.translation_m.map(|value| value as f32),
+                            pose.rotation_rpy().map(|value| value as f32),
+                        )
+                    })
             })
             .collect::<Vec<_>>();
-        for (object_id, position) in positions {
+        for (object_id, position, rotation) in poses {
             self.scene_physics
-                .set_attached_position(&object_id, position);
+                .set_attached_pose(&object_id, position, rotation);
         }
     }
 
@@ -3443,6 +3486,7 @@ mod robotdreams_tests {
             .position
             .map(|value| value as f32);
         assert_eq!(attached.position, attached_tcp);
+        let attached_rotation = attached.rotation;
 
         dreams
             .set_joint_angle("yaw", 0.2)
@@ -3457,6 +3501,14 @@ mod robotdreams_tests {
         assert_eq!(
             dreams.scene_object_state("ball").unwrap().position,
             moved_tcp
+        );
+        let moved_rotation = dreams.scene_object_state("ball").unwrap().rotation;
+        assert!(
+            attached_rotation
+                .iter()
+                .zip(moved_rotation)
+                .any(|(before, after)| (before - after).abs() > 0.05),
+            "a held object must preserve its local grasp orientation and rotate with TCP: before={attached_rotation:?}, after={moved_rotation:?}",
         );
 
         dreams.detach_scene_object("ball").expect("release ball");

@@ -404,6 +404,13 @@ impl RigidTransform {
     pub fn transform_point(self, point_m: [f64; 3]) -> [f64; 3] {
         vec_add(transform_vector(self.rotation, point_m), self.translation_m)
     }
+
+    /// Euler representation of this transform's rotation in the project RPY
+    /// convention.  Attachment code uses this only at the physics boundary;
+    /// transform composition itself remains matrix-based.
+    pub fn rotation_rpy(self) -> [f64; 3] {
+        matrix_to_rpy(self.rotation)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
