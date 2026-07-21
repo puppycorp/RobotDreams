@@ -8,9 +8,9 @@ use crate::calibration::{
     MeasurementProvenance, apply_calibration_to_vehicle_profile, load_calibration,
 };
 use crate::project::{
-    ProjectConfig, ProjectSceneBodyKind, ProjectSceneColliderConfig, ProjectSceneColliderGeometry,
-    ProjectSceneTriggerConfig, ProjectVehicleColliderConfig, ProjectVehiclePhysicsConfig,
-    RobotLinkCollider,
+    ProjectConfig, ProjectSceneBodyKind, ProjectSceneColliderConfig,
+    ProjectSceneColliderGeometry, ProjectSceneObjectPhysicsConfig, ProjectSceneTriggerConfig,
+    ProjectVehicleColliderConfig, ProjectVehiclePhysicsConfig, RobotLinkCollider,
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -150,6 +150,12 @@ struct PhysicsRobotLinkCollider {
     target_pose: Isometry<Real>,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct LivePhysicsColliderDebugPart {
+    pub geometry: ProjectSceneColliderGeometry,
+    pub local_transform: pge::Transform,
+}
+
 /// A live Rapier collider expressed in the narrow form required by the PGE
 /// debug-overlay adapter.  This stays separate from rendering scene nodes so
 /// a debug view represents the actual solver shape, rather than a mesh bound
@@ -160,8 +166,7 @@ pub(crate) struct LivePhysicsColliderDebugEntry {
     pub category: &'static str,
     pub color: [f32; 4],
     pub transform: pge::Transform,
-    pub geometry: ProjectSceneColliderGeometry,
-    pub local_transform: pge::Transform,
+    pub parts: Vec<LivePhysicsColliderDebugPart>,
 }
 
 pub(crate) struct ScenePhysicsRuntime {
@@ -205,17 +210,6 @@ impl LivePhysicsWorld {
             ccd_solver: CCDSolver::new(),
             query_pipeline: QueryPipeline::new(),
         }
-    }
-
-    fn insert(&mut self, body: RigidBody, collider: Collider) -> RigidBodyHandle {
-        let handle = self.bodies.insert(body);
-        self.colliders
-            .insert_with_parent(collider, handle, &mut self.bodies);
-        self.bodies
-            .get_mut(handle)
-            .expect("inserted body exists")
-            .recompute_mass_properties_from_colliders(&self.colliders);
-        handle
     }
 
     fn insert_compound(&mut self, body: RigidBody, colliders: Vec<Collider>) -> RigidBodyHandle {
@@ -370,6 +364,62 @@ fn collider_builder(geometry: &ProjectSceneColliderGeometry) -> ColliderBuilder 
             ColliderBuilder::cylinder(height * 0.5, *radius)
         }
     }
+}
+
+fn scene_collider_builder(
+    part: &crate::project::ProjectSceneColliderChildConfig,
+) -> ColliderBuilder {
+    collider_builder(&part.geometry)
+        .translation(vec3(part.offset))
+        .rotation(Vector::new(part.rotation[0], part.rotation[1], part.rotation[2]))
+}
+
+fn collider_shape(geometry: &ProjectSceneColliderGeometry) -> SharedShape {
+    match geometry {
+        ProjectSceneColliderGeometry::Box { size } => {
+            SharedShape::cuboid(size[0] * 0.5, size[1] * 0.5, size[2] * 0.5)
+        }
+        ProjectSceneColliderGeometry::Sphere { radius } => SharedShape::ball(*radius),
+        ProjectSceneColliderGeometry::Cylinder { radius, height } => {
+            SharedShape::cylinder(height * 0.5, *radius)
+        }
+    }
+}
+
+fn scene_object_mass_properties(config: &ProjectSceneObjectPhysicsConfig) -> MassProperties {
+    let shapes = config
+        .collider
+        .parts()
+        .into_iter()
+        .map(|part| {
+            (
+                Isometry::from_parts(
+                    Translation::from(vec3(part.offset)),
+                    Rotation::from_euler_angles(part.rotation[0], part.rotation[1], part.rotation[2]),
+                ),
+                collider_shape(&part.geometry),
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut mass_properties = MassProperties::from_compound(1.0, &shapes);
+    let mass_kg = config.mass_kg.max(0.000_001);
+    mass_properties.set_mass(mass_kg, true);
+    if let Some(center_of_mass) = config.center_of_mass {
+        mass_properties = MassProperties::new(
+            Point::from(vec3(center_of_mass)),
+            mass_kg,
+            mass_properties.principal_inertia(),
+        );
+    }
+    mass_properties
+}
+
+fn scene_collider_bounding_radius(config: &ProjectSceneColliderConfig) -> f32 {
+    config
+        .parts()
+        .into_iter()
+        .map(|part| geometry_bounding_radius(&part.geometry) + vec3(part.offset).norm())
+        .fold(0.0, f32::max)
 }
 
 fn vehicle_collider_builder(config: &ProjectVehicleColliderConfig) -> ColliderBuilder {
@@ -615,7 +665,7 @@ impl ScenePhysicsRuntime {
             let Some(config) = &object.physics else {
                 continue;
             };
-            let rigid_body = match config.body_kind {
+            let mut rigid_body = match config.body_kind {
                 ProjectSceneBodyKind::Static => RigidBodyBuilder::fixed(),
                 ProjectSceneBodyKind::Dynamic => RigidBodyBuilder::dynamic(),
             }
@@ -628,15 +678,29 @@ impl ScenePhysicsRuntime {
                 ),
             ))
             .linear_damping(config.linear_damping)
-            .angular_damping(config.angular_damping)
-            .build();
-            let collider = collider_builder(&config.collider.geometry)
-                .translation(vec3(config.collider.offset))
-                .mass(config.mass_kg.max(0.000_001))
-                .friction(config.friction.max(0.0))
-                .restitution(config.restitution.clamp(0.0, 1.0))
-                .build();
-            let handle = world.insert(rigid_body, collider);
+            .angular_damping(config.angular_damping);
+            let uses_explicit_mass_properties = config.body_kind == ProjectSceneBodyKind::Dynamic
+                && (!config.collider.children.is_empty() || config.center_of_mass.is_some());
+            if uses_explicit_mass_properties {
+                rigid_body = rigid_body.additional_mass_properties(scene_object_mass_properties(config));
+            }
+            let rigid_body = rigid_body.build();
+            let colliders = config
+                .collider
+                .parts()
+                .into_iter()
+                .map(|part| {
+                    let builder = scene_collider_builder(&part)
+                        .friction(config.friction.max(0.0))
+                        .restitution(config.restitution.clamp(0.0, 1.0));
+                    if uses_explicit_mass_properties {
+                        builder.density(0.0).build()
+                    } else {
+                        builder.mass(config.mass_kg.max(0.000_001)).build()
+                    }
+                })
+                .collect::<Vec<_>>();
+            let handle = world.insert_compound(rigid_body, colliders);
             objects.insert(
                 object.id.clone(),
                 PhysicsObject {
@@ -818,8 +882,7 @@ impl ScenePhysicsRuntime {
         let Some(object) = self.objects.get(object_id) else {
             return false;
         };
-        let object_radius = geometry_bounding_radius(&object.collider.geometry)
-            + vec3(object.collider.offset).norm();
+        let object_radius = scene_collider_bounding_radius(&object.collider);
         let link_radius = geometry_bounding_radius(&collider.geometry);
         let distance = (vec3(collider.translation) - vec3(object.state.position)).norm();
         distance > object_radius + link_radius + SPAWN_CLEARANCE_M
@@ -877,8 +940,15 @@ impl ScenePhysicsRuntime {
                     [0.18, 0.76, 0.95, 1.0]
                 },
                 transform: pge_transform(object.state.position, object.state.rotation),
-                geometry: object.collider.geometry.clone(),
-                local_transform: pge_transform(object.collider.offset, [0.0; 3]),
+                parts: object
+                    .collider
+                    .parts()
+                    .into_iter()
+                    .map(|part| LivePhysicsColliderDebugPart {
+                        geometry: part.geometry,
+                        local_transform: pge_transform(part.offset, part.rotation),
+                    })
+                    .collect(),
             });
         }
 
@@ -889,8 +959,10 @@ impl ScenePhysicsRuntime {
                     category: "vehicleCollider",
                     color: [0.18, 0.95, 0.45, 1.0],
                     transform: pge_transform(vehicle.state.position, vehicle.state.rotation),
-                    geometry: collider.geometry.clone(),
-                    local_transform: pge_transform(collider.offset, collider.rotation),
+                    parts: vec![LivePhysicsColliderDebugPart {
+                        geometry: collider.geometry.clone(),
+                        local_transform: pge_transform(collider.offset, collider.rotation),
+                    }],
                 });
             }
         }
@@ -912,8 +984,10 @@ impl ScenePhysicsRuntime {
                     ],
                     [roll, pitch, yaw],
                 ),
-                geometry: collider.geometry.clone(),
-                local_transform: pge::Transform::default(),
+                parts: vec![LivePhysicsColliderDebugPart {
+                    geometry: collider.geometry.clone(),
+                    local_transform: pge::Transform::default(),
+                }],
             });
         }
 
@@ -1112,6 +1186,10 @@ impl ScenePhysicsRuntime {
         body.set_body_type(RigidBodyType::Dynamic, true);
         body.set_linvel(Vector::zeros(), true);
         body.set_angvel(Vector::zeros(), true);
+        // A body held as kinematic may have gone to sleep while its pose was
+        // being driven by the attachment.  Releasing it must always resume
+        // simulation on the next step, even when no contact wakes it first.
+        body.wake_up(true);
         object.state.attachment = None;
         Ok(())
     }
@@ -1332,9 +1410,10 @@ mod tests {
     use crate::project::{
         HardwareConfig, ProjectConfig, ProjectRobotConfig, ProjectRobotModelConfig,
         ProjectRobotPhysicsConfig, ProjectSceneBodyKind, ProjectSceneColliderConfig,
-        ProjectSceneColliderGeometry, ProjectSceneConfig, ProjectSceneObjectConfig,
-        ProjectSceneObjectGeometry, ProjectSceneObjectPhysicsConfig, ProjectSceneTriggerConfig,
-        ProjectVehicleMotorConfig, ProjectVehiclePhysicsConfig, RobotLinkCollider,
+        ProjectSceneColliderChildConfig, ProjectSceneColliderGeometry, ProjectSceneConfig,
+        ProjectSceneObjectConfig, ProjectSceneObjectGeometry, ProjectSceneObjectPhysicsConfig,
+        ProjectSceneTriggerConfig, ProjectVehicleMotorConfig, ProjectVehiclePhysicsConfig,
+        RobotLinkCollider,
     };
 
     use super::{
@@ -1364,6 +1443,7 @@ mod tests {
             physics: Some(ProjectSceneObjectPhysicsConfig {
                 body_kind,
                 mass_kg: 0.05,
+                center_of_mass: None,
                 linear_damping: 0.2,
                 angular_damping: 0.2,
                 friction: 0.7,
@@ -1371,6 +1451,8 @@ mod tests {
                 collider: ProjectSceneColliderConfig {
                     geometry: collider,
                     offset: [0.0; 3],
+                    rotation: [0.0; 3],
+                    children: Vec::new(),
                 },
             }),
         }
@@ -1425,6 +1507,138 @@ mod tests {
             .collider
             .offset = [0.0, 0.0, 0.01];
         project
+    }
+
+    fn compound_bottle_project(rotation: [f32; 3]) -> ProjectConfig {
+        let mut project = ball_bin_project();
+        project.scene.triggers.clear();
+        project.scene.objects[0].position = [0.0, 0.0, 0.0];
+        project.scene.objects[1] = physical_object(
+            "bottle",
+            [0.0, 0.0, 0.11],
+            ProjectSceneObjectGeometry::Cylinder {
+                radius_top: 0.042,
+                radius_bottom: 0.042,
+                height: 0.207,
+            },
+            ProjectSceneBodyKind::Dynamic,
+            ProjectSceneColliderGeometry::Cylinder {
+                radius: 0.042,
+                height: 0.028,
+            },
+        );
+        project.scene.objects[1].rotation = rotation;
+        let bottle = project.scene.objects[1]
+            .physics
+            .as_mut()
+            .expect("bottle physics");
+        bottle.mass_kg = 0.08;
+        bottle.center_of_mass = Some([0.0, -0.025, 0.0]);
+        bottle.linear_damping = 0.08;
+        bottle.angular_damping = 0.12;
+        bottle.friction = 0.55;
+        bottle.restitution = 0.03;
+        bottle.collider.children = vec![
+            ProjectSceneColliderChildConfig {
+                geometry: ProjectSceneColliderGeometry::Cylinder {
+                    radius: 0.042,
+                    height: 0.028,
+                },
+                offset: [0.0, -0.086, 0.0],
+                rotation: [0.0; 3],
+            },
+            ProjectSceneColliderChildConfig {
+                geometry: ProjectSceneColliderGeometry::Cylinder {
+                    radius: 0.040,
+                    height: 0.102,
+                },
+                offset: [0.0, -0.021, 0.0],
+                rotation: [0.0; 3],
+            },
+            ProjectSceneColliderChildConfig {
+                geometry: ProjectSceneColliderGeometry::Cylinder {
+                    radius: 0.034,
+                    height: 0.028,
+                },
+                offset: [0.0, 0.044, 0.0],
+                rotation: [0.0; 3],
+            },
+            ProjectSceneColliderChildConfig {
+                geometry: ProjectSceneColliderGeometry::Cylinder {
+                    radius: 0.023,
+                    height: 0.030,
+                },
+                offset: [0.0, 0.073, 0.0],
+                rotation: [0.0; 3],
+            },
+            ProjectSceneColliderChildConfig {
+                geometry: ProjectSceneColliderGeometry::Cylinder {
+                    radius: 0.025,
+                    height: 0.020,
+                },
+                offset: [0.0, 0.097, 0.0],
+                rotation: [0.0; 3],
+            },
+        ];
+        project
+    }
+
+    #[test]
+    fn compound_bottle_rests_upright_and_exports_all_physical_parts() {
+        let mut runtime =
+            ScenePhysicsRuntime::from_project(&compound_bottle_project([std::f32::consts::FRAC_PI_2, 0.0, 0.0]))
+                .expect("compound bottle project");
+        for step in 1..=600 {
+            runtime.step(1.0 / 120.0, f64::from(step) / 120.0);
+        }
+
+        let bottle = runtime.object_state("bottle").expect("bottle state");
+        assert!(bottle.position[2] > 0.115 && bottle.position[2] < 0.125, "{bottle:?}");
+        assert!(
+            bottle
+                .velocity_mps
+                .iter()
+                .chain(bottle.angular_velocity_rps.iter())
+                .all(|value| value.abs() < 0.05),
+            "upright bottle should reach a physical rest: {bottle:?}"
+        );
+
+        let debug = runtime.collider_debug_entries();
+        let bottle_debug = debug
+            .iter()
+            .find(|entry| entry.id == "scene-object:bottle")
+            .expect("bottle debug entry");
+        assert_eq!(bottle_debug.parts.len(), 5);
+        assert_eq!(bottle_debug.parts[0].local_transform.translation, [0.0, -0.086, 0.0]);
+        assert_eq!(bottle_debug.parts[4].local_transform.translation, [0.0, 0.097, 0.0]);
+    }
+
+    #[test]
+    fn tipped_compound_bottle_rolls_then_settles() {
+        let mut runtime = ScenePhysicsRuntime::from_project(&compound_bottle_project([
+            std::f32::consts::FRAC_PI_2 + 0.35,
+            0.0,
+            0.0,
+        ]))
+        .expect("compound bottle project");
+        let initial = runtime.object_state("bottle").expect("initial bottle").clone();
+        for step in 1..=1_800 {
+            runtime.step(1.0 / 120.0, f64::from(step) / 120.0);
+        }
+
+        let bottle = runtime.object_state("bottle").expect("bottle state");
+        let lateral_displacement = (bottle.position[0] - initial.position[0]).abs()
+            + (bottle.position[1] - initial.position[1]).abs();
+        assert!(lateral_displacement > 0.01, "tipped bottle should roll: {bottle:?}");
+        assert!(bottle.position[2] > 0.11 && bottle.position[2] < 0.13, "{bottle:?}");
+        assert!(
+            bottle
+                .velocity_mps
+                .iter()
+                .chain(bottle.angular_velocity_rps.iter())
+                .all(|value| value.abs() < 0.05),
+            "compound bottle should settle after its roll: {bottle:?}"
+        );
     }
 
     #[test]
@@ -1490,6 +1704,35 @@ mod tests {
         assert!(released.attachment.is_none());
         assert!(released.position[2] < 0.35);
         assert!(released.velocity_mps[2] < 0.0);
+    }
+
+    #[test]
+    fn compound_bottle_attachment_release_wakes_and_resumes_gravity() {
+        let mut runtime = ScenePhysicsRuntime::from_project(&compound_bottle_project([
+            std::f32::consts::FRAC_PI_2,
+            0.0,
+            0.0,
+        ]))
+        .expect("compound bottle project");
+        runtime
+            .attach(
+                "bottle",
+                SceneObjectAttachment {
+                    robot_id: "robot".to_string(),
+                    frame_name: "tcp".to_string(),
+                    offset_m: [0.0; 3],
+                    rotation_offset_rpy: [0.0; 3],
+                },
+                [0.0, 0.0, 0.4],
+                [std::f32::consts::FRAC_PI_2, 0.0, 0.0],
+            )
+            .expect("attach compound bottle");
+        runtime.detach("bottle").expect("release compound bottle");
+        let release_z = runtime.object_state("bottle").expect("release state").position[2];
+        runtime.step(0.02, 0.02);
+        let released = runtime.object_state("bottle").expect("released state");
+        assert!(released.position[2] < release_z, "{released:?}");
+        assert!(released.velocity_mps[2] < 0.0, "{released:?}");
     }
 
     #[test]
@@ -1773,7 +2016,7 @@ mod tests {
         assert_eq!(vehicle_debug.len(), 1);
         assert_eq!(vehicle_debug[0].id, "vehicle:puppybot:0");
         assert!(matches!(
-            vehicle_debug[0].geometry,
+            vehicle_debug[0].parts[0].geometry,
             ProjectSceneColliderGeometry::Box { .. }
         ));
         assert_eq!(runtime.applied_calibrations().len(), 1);

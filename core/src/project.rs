@@ -80,6 +80,9 @@ pub struct ProjectSceneVisualTransform {
 pub struct ProjectSceneObjectPhysicsConfig {
     pub body_kind: ProjectSceneBodyKind,
     pub mass_kg: f32,
+    /// Optional object-local center of mass for a dynamic compound body.
+    /// When omitted, Rapier derives it from the collider parts.
+    pub center_of_mass: Option<[f32; 3]>,
     pub linear_damping: f32,
     pub angular_damping: f32,
     pub friction: f32,
@@ -95,8 +98,37 @@ pub enum ProjectSceneBodyKind {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProjectSceneColliderConfig {
+    /// Legacy single-shape geometry. It remains populated for existing
+    /// project files and is used when `children` is empty.
     pub geometry: ProjectSceneColliderGeometry,
     pub offset: [f32; 3],
+    pub rotation: [f32; 3],
+    /// Object-local primitive colliders for an authored compound shape.
+    pub children: Vec<ProjectSceneColliderChildConfig>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProjectSceneColliderChildConfig {
+    pub geometry: ProjectSceneColliderGeometry,
+    pub offset: [f32; 3],
+    pub rotation: [f32; 3],
+}
+
+impl ProjectSceneColliderConfig {
+    /// Returns the physical primitive parts. Legacy single-shape colliders
+    /// become one zero-orientation child to keep existing project files
+    /// physically identical.
+    pub fn parts(&self) -> Vec<ProjectSceneColliderChildConfig> {
+        if self.children.is_empty() {
+            vec![ProjectSceneColliderChildConfig {
+                geometry: self.geometry.clone(),
+                offset: self.offset,
+                rotation: self.rotation,
+            }]
+        } else {
+            self.children.clone()
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -2909,22 +2941,63 @@ fn parse_project_scene_object_physics_config(
         _ => return None,
     };
     let collider_value = physics.get("collider");
-    let collider_geometry = collider_value
-        .and_then(parse_project_scene_collider_geometry)
-        .or_else(|| default_scene_collider_geometry(geometry))?;
+    let collider = parse_project_scene_collider_config(collider_value, geometry)?;
     Some(ProjectSceneObjectPhysicsConfig {
         body_kind,
         mass_kg: json_f32_path(physics, &["massKg"]).unwrap_or(1.0),
+        center_of_mass: json_vec3_path(physics, &["centerOfMass"]),
         linear_damping: json_f32_path(physics, &["linearDamping"]).unwrap_or(0.1),
         angular_damping: json_f32_path(physics, &["angularDamping"]).unwrap_or(0.1),
         friction: json_f32_path(physics, &["friction"]).unwrap_or(0.5),
         restitution: json_f32_path(physics, &["restitution"]).unwrap_or(0.0),
-        collider: ProjectSceneColliderConfig {
-            geometry: collider_geometry,
-            offset: collider_value
-                .and_then(|collider| json_vec3_path(collider, &["offset"]))
-                .unwrap_or([0.0, 0.0, 0.0]),
-        },
+        collider,
+    })
+}
+
+fn parse_project_scene_collider_config(
+    collider: Option<&serde_json::Value>,
+    object_geometry: &ProjectSceneObjectGeometry,
+) -> Option<ProjectSceneColliderConfig> {
+    let children = if let Some(collider) =
+        collider.filter(|collider| json_string_path(collider, &["shape"]) == Some("compound"))
+    {
+        collider
+            .get("children")?
+            .as_array()?
+            .iter()
+            .map(|child| {
+                Some(ProjectSceneColliderChildConfig {
+                    geometry: parse_project_scene_collider_geometry(child)?,
+                    offset: json_vec3_path(child, &["offset"]).unwrap_or([0.0; 3]),
+                    rotation: json_vec3_path(child, &["rotation"]).unwrap_or([0.0; 3]),
+                })
+            })
+            .collect::<Option<Vec<_>>>()?
+    } else {
+        Vec::new()
+    };
+    if collider.is_some_and(|value| json_string_path(value, &["shape"]) == Some("compound"))
+        && children.is_empty()
+    {
+        return None;
+    }
+    // A compound has no primitive top-level geometry. Use its first child as
+    // the backward-compatible legacy field while the runtime consumes all
+    // children below.
+    let geometry = children
+        .first()
+        .map(|child| child.geometry.clone())
+        .or_else(|| collider.and_then(parse_project_scene_collider_geometry))
+        .or_else(|| default_scene_collider_geometry(object_geometry))?;
+    Some(ProjectSceneColliderConfig {
+        geometry,
+        offset: collider
+            .and_then(|collider| json_vec3_path(collider, &["offset"]))
+            .unwrap_or([0.0; 3]),
+        rotation: collider
+            .and_then(|collider| json_vec3_path(collider, &["rotation"]))
+            .unwrap_or([0.0; 3]),
+        children,
     })
 }
 
@@ -4579,5 +4652,41 @@ mod tests {
         assert_eq!(scene.triggers[0].id, "ball_in_bin");
         assert_eq!(scene.triggers[0].object_id, "ball");
         assert_eq!(scene.triggers[0].settle_time_sec, 0.3);
+    }
+
+    #[test]
+    fn parses_compound_scene_collider_and_center_of_mass() {
+        let value = serde_json::json!({
+            "scene": {"objects": [{
+                "id": "bottle",
+                "shape": "cylinder",
+                "radius": 0.04,
+                "height": 0.2,
+                "physics": {
+                    "body": "dynamic",
+                    "massKg": 0.08,
+                    "centerOfMass": [0.0, -0.025, 0.0],
+                    "collider": {
+                        "shape": "compound",
+                        "children": [
+                            {"shape":"cylinder", "radius":0.042, "height":0.028, "offset":[0.0,-0.086,0.0]},
+                            {"shape":"cylinder", "radius":0.023, "height":0.030, "offset":[0.0,0.073,0.0], "rotation":[0.0,0.0,0.2]}
+                        ]
+                    }
+                }
+            }]}
+        });
+
+        let scene = parse_project_scene_config(&value);
+        let physics = scene.objects[0].physics.as_ref().expect("physics");
+        assert_eq!(physics.center_of_mass, Some([0.0, -0.025, 0.0]));
+        assert_eq!(physics.collider.children.len(), 2);
+        assert!(matches!(
+            physics.collider.children[0].geometry,
+            ProjectSceneColliderGeometry::Cylinder { radius, height }
+                if radius == 0.042 && height == 0.028
+        ));
+        assert_eq!(physics.collider.children[1].offset, [0.0, 0.073, 0.0]);
+        assert_eq!(physics.collider.children[1].rotation, [0.0, 0.0, 0.2]);
     }
 }

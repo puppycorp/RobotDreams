@@ -1988,10 +1988,14 @@ fn pge_wireframe_from_live_physics(
         entry.category,
         entry.transform,
         pge::ColliderWireframeShape::Compound {
-            children: vec![pge::ColliderWireframeChild {
-                transform: entry.local_transform,
-                shape: pge_wireframe_shape(&entry.geometry),
-            }],
+            children: entry
+                .parts
+                .into_iter()
+                .map(|part| pge::ColliderWireframeChild {
+                    transform: part.local_transform,
+                    shape: pge_wireframe_shape(&part.geometry),
+                })
+                .collect(),
         },
     );
     wireframe.color = entry.color;
