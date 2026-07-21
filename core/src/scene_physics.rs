@@ -920,6 +920,50 @@ impl ScenePhysicsRuntime {
         entries
     }
 
+    /// Current world transforms for live PGE collider diagnostics, keyed by
+    /// the stable ids emitted from [`Self::collider_debug_entries`].
+    ///
+    /// This deliberately does not clone collider geometry. A renderer that
+    /// has retained the debug wireframe shapes can refresh only these poses on
+    /// each simulation frame.
+    pub(crate) fn collider_debug_transforms(&self) -> BTreeMap<String, pge::Transform> {
+        let mut transforms = BTreeMap::new();
+
+        for (object_id, object) in &self.objects {
+            transforms.insert(
+                format!("scene-object:{object_id}"),
+                pge_transform(object.state.position, object.state.rotation),
+            );
+        }
+
+        for (robot_id, vehicle) in &self.vehicles {
+            let transform = pge_transform(vehicle.state.position, vehicle.state.rotation);
+            for index in 0..vehicle.colliders.len() {
+                transforms.insert(format!("vehicle:{robot_id}:{index}"), transform);
+            }
+        }
+
+        for (key, collider) in &self.robot_link_colliders {
+            let Some(body) = self.world.body(collider.body) else {
+                continue;
+            };
+            let (roll, pitch, yaw) = body.rotation().euler_angles();
+            transforms.insert(
+                format!("kinematic-link:{key}"),
+                pge_transform(
+                    [
+                        body.translation().x,
+                        body.translation().y,
+                        body.translation().z,
+                    ],
+                    [roll, pitch, yaw],
+                ),
+            );
+        }
+
+        transforms
+    }
+
     pub(crate) fn set_kinematic_collider_motion_config(
         &mut self,
         config: KinematicColliderMotionConfig,

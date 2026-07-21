@@ -544,6 +544,18 @@ pub struct RobotLinkCollider {
     pub rotation_matrix: [[f32; 3]; 3],
 }
 
+/// The world pose of a reviewed per-link collider, without its shape data.
+///
+/// Renderers use this to update a retained collider wireframe without
+/// reconstructing or cloning the reviewed profile geometry every frame.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RobotLinkColliderTransform {
+    pub robot_id: String,
+    pub link_name: String,
+    pub translation: [f32; 3],
+    pub rotation_matrix: [[f32; 3]; 3],
+}
+
 fn normalize_query(value: &str) -> String {
     value
         .chars()
@@ -1616,6 +1628,37 @@ fn robot_link_colliders(robot: &LoadedRobotModel) -> Vec<RobotLinkCollider> {
     resolved
 }
 
+fn robot_link_collider_transforms(robot: &LoadedRobotModel) -> Vec<RobotLinkColliderTransform> {
+    let base_transform = robot_base_transform(robot);
+    let model_transform = model_transform(robot);
+    let robot_transform = transform_then(base_transform, model_transform);
+    let link_poses = robot.harness.link_poses_world();
+    let mut resolved = Vec::new();
+
+    for profile in &robot.link_collision_profiles {
+        let Some(link_transform) =
+            robot_visual_link_transform(robot_transform, &link_poses, &profile.link_name)
+        else {
+            continue;
+        };
+        for collider in &profile.colliders {
+            let local = (
+                f32_vec3_to_f64(collider.offset),
+                rpy_rotation(f32_vec3_to_f64(collider.rotation)),
+            );
+            let world = transform_then(link_transform, local);
+            resolved.push(RobotLinkColliderTransform {
+                robot_id: robot.config.id.clone(),
+                link_name: profile.link_name.clone(),
+                translation: f64_vec3_to_f32(world.0),
+                rotation_matrix: f64_matrix_to_f32(world.1),
+            });
+        }
+    }
+
+    resolved
+}
+
 fn robot_state(robot: &LoadedRobotModel) -> RobotState {
     let link_poses = robot.harness.link_poses_world();
     let joints = robot
@@ -1950,6 +1993,18 @@ impl RobotDreamsModel {
     /// instantiates them as live Rapier colliders.
     pub fn robot_link_colliders(&self) -> Vec<RobotLinkCollider> {
         self.robots.iter().flat_map(robot_link_colliders).collect()
+    }
+
+    /// Current transforms of reviewed per-link collision-profile shapes.
+    ///
+    /// This is the lightweight counterpart to [`Self::robot_link_colliders`]
+    /// for renderers that already retain the reviewed shape geometry and only
+    /// need to refresh its world pose.
+    pub fn robot_link_collider_transforms(&self) -> Vec<RobotLinkColliderTransform> {
+        self.robots
+            .iter()
+            .flat_map(robot_link_collider_transforms)
+            .collect()
     }
 
     pub fn set_joint_angle(

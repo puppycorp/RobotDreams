@@ -38,7 +38,8 @@ pub use scene_physics::{
 
 pub use project::{
     FrameState, JointState, LinkState, ModelEntityKind, ResolvedFrameState, RigidTransform,
-    RobotDreamsEntity, RobotDreamsModel, RobotLinkCollider, RobotState, SceneLocation,
+    RobotDreamsEntity, RobotDreamsModel, RobotLinkCollider, RobotLinkColliderTransform,
+    RobotState, SceneLocation,
 };
 pub use scene_graph::{
     EnvironmentSettings, LightKind, LightSpec, ObservationMetadata, ObservationRequest,
@@ -1442,12 +1443,19 @@ impl RobotDreams {
                 .into_iter()
                 .map(pge_wireframe_from_live_physics)
                 .collect(),
+            pose_frame: Vec::new(),
         };
 
         let Some(model) = &self.model else {
             return overlay;
         };
-        for (index, collider) in model.robot_link_colliders().into_iter().enumerate() {
+        let mut shape_indices = BTreeMap::new();
+        for collider in model.robot_link_colliders() {
+            let index = next_robot_link_shape_index(
+                &mut shape_indices,
+                &collider.robot_id,
+                &collider.link_name,
+            );
             let live_id = format!(
                 "kinematic-link:{}:{}:{index}",
                 collider.robot_id, collider.link_name
@@ -1468,6 +1476,50 @@ impl RobotDreams {
             overlay.wireframes.push(wireframe);
         }
         overlay
+    }
+
+    /// Returns the current world transform of every PGE collider-debug
+    /// wireframe, keyed by the same stable ids as
+    /// [`Self::pge_collider_debug_overlay`].
+    ///
+    /// This is intended for frame-by-frame debug rendering. It refreshes
+    /// transforms only: it does not rebuild or clone any wireframe shape.
+    /// Live Rapier scene, vehicle, and kinematic-link entries are included,
+    /// along with each non-live reviewed link profile.
+    pub fn pge_collider_debug_transforms(&self) -> BTreeMap<String, pge::Transform> {
+        let mut transforms = self.scene_physics.collider_debug_transforms();
+        let live_link_ids = transforms
+            .keys()
+            .filter(|id| id.starts_with("kinematic-link:"))
+            .cloned()
+            .collect::<BTreeSet<_>>();
+
+        let Some(model) = &self.model else {
+            return transforms;
+        };
+        let mut shape_indices = BTreeMap::new();
+        for collider in model.robot_link_collider_transforms() {
+            let index = next_robot_link_shape_index(
+                &mut shape_indices,
+                &collider.robot_id,
+                &collider.link_name,
+            );
+            let live_id = format!(
+                "kinematic-link:{}:{}:{index}",
+                collider.robot_id, collider.link_name
+            );
+            if live_link_ids.contains(&live_id) {
+                continue;
+            }
+            transforms.insert(
+                format!(
+                    "reviewed-link:{}:{}:{index}",
+                    collider.robot_id, collider.link_name
+                ),
+                pge::Transform::matrix(collider.translation, collider.rotation_matrix),
+            );
+        }
+        transforms
     }
 
     fn append_coordinate_debug_overlay(
@@ -1944,6 +1996,18 @@ fn pge_wireframe_from_live_physics(
     );
     wireframe.color = entry.color;
     wireframe
+}
+
+fn next_robot_link_shape_index(
+    indices: &mut BTreeMap<(String, String), usize>,
+    robot_id: &str,
+    link_name: &str,
+) -> usize {
+    let key = (robot_id.to_string(), link_name.to_string());
+    let index = indices.entry(key).or_insert(0);
+    let result = *index;
+    *index += 1;
+    result
 }
 
 fn pge_wireframe_shape(geometry: &ProjectSceneColliderGeometry) -> pge::ColliderWireframeShape {
@@ -3330,6 +3394,7 @@ impl Default for RobotDreams {
 
 #[cfg(test)]
 mod robotdreams_tests {
+    use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
 
     use crate::scene_graph::{
@@ -3355,6 +3420,16 @@ mod robotdreams_tests {
 
     fn puppybot_project_path() -> PathBuf {
         project_root().join("../PuppyBot/robotdreams/project.json")
+    }
+
+    fn assert_pge_debug_transforms_match_overlay(dreams: &RobotDreams) {
+        let expected = dreams
+            .pge_collider_debug_overlay()
+            .wireframes
+            .into_iter()
+            .map(|wireframe| (wireframe.id, wireframe.transform))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(dreams.pge_collider_debug_transforms(), expected);
     }
 
     fn puppyarm_urdf_path() -> PathBuf {
@@ -4184,6 +4259,42 @@ mod robotdreams_tests {
         }));
 
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn pge_collider_debug_transforms_match_complete_overlay_without_shapes() {
+        let mut dreams = RobotDreams::open(puppybot_project_path()).expect("open PuppyBot project");
+
+        assert_pge_debug_transforms_match_overlay(&dreams);
+        let inactive = dreams.pge_collider_debug_transforms();
+        assert!(inactive.contains_key("scene-object:ball"));
+        assert!(inactive.contains_key("vehicle:puppybot:0"));
+        assert!(
+            inactive
+                .keys()
+                .any(|id| id.starts_with("reviewed-link:puppybot:part_1_4:"))
+        );
+
+        assert!(
+            dreams
+                .enable_robot_link_collision_profiles("puppybot", &["part_1_4"])
+                .expect("enable reviewed link")
+                > 0
+        );
+        dreams.advance_seconds(1.0 / 120.0);
+
+        assert_pge_debug_transforms_match_overlay(&dreams);
+        let live = dreams.pge_collider_debug_transforms();
+        assert!(
+            live.keys()
+                .any(|id| id.starts_with("kinematic-link:puppybot:part_1_4:"))
+        );
+        assert!(
+            !live
+                .keys()
+                .any(|id| id.starts_with("reviewed-link:puppybot:part_1_4:")),
+            "a live Rapier shape must replace its reviewed-profile transform"
+        );
     }
 
     #[test]
