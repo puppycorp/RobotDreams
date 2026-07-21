@@ -14,8 +14,8 @@ use robotdreams_core::scene_graph::{
     ToneMapping, prepare_observation_scene,
 };
 use robotdreams_core::{
-    CoordinateDebugOverlayOptions, ObservationRequest, ObservationView, RobotDreams,
-    RobotDreamsSnapshot, world_state_from_scene_graph,
+    CollisionDebugOverlayOptions, CoordinateDebugOverlayOptions, ObservationRequest,
+    ObservationView, RobotDreams, RobotDreamsSnapshot, world_state_from_scene_graph,
 };
 use robotdreams_recorder::{NativeRecorder, RecordingArtifact, RecordingRequest};
 use robotdreams_renderer::{FrameBuffer, FrameKind, NativeRenderer, RenderOutput};
@@ -275,6 +275,12 @@ struct RenderFrameArgs {
         help = "Render robot-base coordinate grid and current/target TCP markers"
     )]
     debug_coordinate_overlay: bool,
+
+    #[arg(
+        long,
+        help = "Render every PGE/scene collider and reviewed link profile as non-physical wireframes"
+    )]
+    debug_collision_overlay: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -922,6 +928,12 @@ struct SimulationRecordArgs {
     )]
     debug_coordinate_overlay: bool,
 
+    #[arg(
+        long,
+        help = "Render every PGE/scene collider and reviewed link profile as non-physical wireframes"
+    )]
+    debug_collision_overlay: bool,
+
     #[arg(long, default_value_t = 3500)]
     wait_ms: u64,
 
@@ -1539,6 +1551,7 @@ mod tests {
             "--gltf-material-variant",
             "dirty",
             "--debug-coordinate-overlay",
+            "--debug-collision-overlay",
         ])
         .expect("parse render-frame");
 
@@ -1605,6 +1618,7 @@ mod tests {
         assert_eq!(args.specular_reflection_bounces, Some(3));
         assert_eq!(args.gltf_material_variant.as_deref(), Some("dirty"));
         assert!(args.debug_coordinate_overlay);
+        assert!(args.debug_collision_overlay);
     }
 
     #[test]
@@ -3118,23 +3132,34 @@ fn pge_render_request(request: &ObservationRequest) -> PgeRenderRequest {
 fn render_scene_graph(
     dreams: &RobotDreams,
     debug_coordinate_overlay: bool,
+    debug_collision_overlay: bool,
 ) -> robotdreams_core::scene_graph::SceneGraph {
-    dreams.scene_graph_with_coordinate_debug_overlay(CoordinateDebugOverlayOptions {
-        enabled: debug_coordinate_overlay,
-        ..CoordinateDebugOverlayOptions::default()
-    })
+    dreams.scene_graph_with_debug_overlays(
+        CoordinateDebugOverlayOptions {
+            enabled: debug_coordinate_overlay,
+            ..CoordinateDebugOverlayOptions::default()
+        },
+        CollisionDebugOverlayOptions {
+            enabled: debug_collision_overlay,
+            ..CollisionDebugOverlayOptions::default()
+        },
+    )
 }
 
 fn gpu_debug_rgb_render(
     dreams: &RobotDreams,
     request: &ObservationRequest,
     debug_coordinate_overlay: bool,
+    debug_collision_overlay: bool,
 ) -> Result<RenderOutput> {
     let scene = prepare_observation_scene(
-        render_scene_graph(dreams, debug_coordinate_overlay),
+        render_scene_graph(dreams, debug_coordinate_overlay, false),
         request,
     );
-    let world = world_state_from_scene_graph(&scene);
+    let mut world = world_state_from_scene_graph(&scene);
+    if debug_collision_overlay {
+        world.collider_debug = dreams.pge_collider_debug_overlay();
+    }
     let pge_request = pge_render_request(request);
     let mut renderer = WgpuRenderer::new().map_err(|err| anyhow!("{err}"))?;
     let output = renderer
@@ -3187,9 +3212,10 @@ fn cpu_render(
     dreams: &RobotDreams,
     request: &ObservationRequest,
     debug_coordinate_overlay: bool,
+    debug_collision_overlay: bool,
 ) -> Result<RenderOutput> {
     let scene = prepare_observation_scene(
-        render_scene_graph(dreams, debug_coordinate_overlay),
+        render_scene_graph(dreams, debug_coordinate_overlay, debug_collision_overlay),
         request,
     );
     NativeRenderer::new()
@@ -3203,13 +3229,19 @@ fn render_with_backend(
     view: NativeView,
     backend: RendererBackend,
     debug_coordinate_overlay: bool,
+    debug_collision_overlay: bool,
 ) -> Result<RenderOutput> {
     let gpu_supported = matches!(view, NativeView::DebugRgb);
     if matches!(backend, RendererBackend::Gpu) && !gpu_supported {
         bail!("GPU renderer currently supports debug-rgb only; use --renderer cpu for {view:?}");
     }
     if gpu_supported && !matches!(backend, RendererBackend::Cpu) {
-        match gpu_debug_rgb_render(dreams, request, debug_coordinate_overlay) {
+        match gpu_debug_rgb_render(
+            dreams,
+            request,
+            debug_coordinate_overlay,
+            debug_collision_overlay,
+        ) {
             Ok(output) => return Ok(output),
             Err(err) if matches!(backend, RendererBackend::Gpu) => {
                 return Err(err).context("GPU renderer failed");
@@ -3219,7 +3251,12 @@ fn render_with_backend(
             }
         }
     }
-    cpu_render(dreams, request, debug_coordinate_overlay)
+    cpu_render(
+        dreams,
+        request,
+        debug_coordinate_overlay,
+        debug_collision_overlay,
+    )
 }
 
 fn observation_view(view: NativeView) -> ObservationView {
@@ -4160,6 +4197,7 @@ fn render_frame(args: RenderFrameArgs) -> Result<()> {
         args.view,
         args.renderer,
         args.debug_coordinate_overlay,
+        args.debug_collision_overlay,
     )?;
     let frame = frame_for_view(&output, args.view)?;
     write_frame_buffer(&args.out, frame)?;
@@ -4197,10 +4235,13 @@ fn record_simulation_gpu_debug_rgb(
         let snapshot = dreams.snapshot();
         snapshots.push(snapshot);
         let scene = prepare_observation_scene(
-            render_scene_graph(dreams, args.debug_coordinate_overlay),
+            render_scene_graph(dreams, args.debug_coordinate_overlay, false),
             &recording_request.observation,
         );
-        let world = world_state_from_scene_graph(&scene);
+        let mut world = world_state_from_scene_graph(&scene);
+        if args.debug_collision_overlay {
+            world.collider_debug = dreams.pge_collider_debug_overlay();
+        }
         let pge_request = pge_render_request(&recording_request.observation);
         let output = renderer
             .render(&world, &pge_request)

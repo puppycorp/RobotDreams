@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::path::Path;
 #[cfg(unix)]
@@ -10,7 +10,7 @@ use std::sync::{Mutex, OnceLock};
 use std::thread;
 
 use crate::physics::PhysicsWorld;
-use crate::project::{BusConfig, DeviceConfig, ProjectConfig};
+use crate::project::{BusConfig, DeviceConfig, ProjectConfig, ProjectSceneColliderGeometry};
 use crate::scene_graph::{
     CameraProjection, CameraSpec, EntityId, EntityMetadata, Geometry, GeometryBounds,
     LightSpec as SceneLightSpec, Material, ReflectionProbeSettings,
@@ -23,6 +23,7 @@ use pge_core as pge;
 use pge_renderer::{RenderRequest, RenderView, RgbaFrame};
 use pge_wgpu_renderer::WgpuRenderer;
 
+pub mod calibration;
 pub mod physics;
 pub mod project;
 pub mod scene_graph;
@@ -30,11 +31,14 @@ pub mod scene_harness;
 mod scene_physics;
 pub mod urdf;
 
-pub use scene_physics::{SceneObjectAttachment, SceneObjectState, SceneTriggerState};
+pub use scene_physics::{
+    AppliedCalibrationState, KinematicColliderMotionConfig, RobotLinkContact,
+    SceneObjectAttachment, SceneObjectState, SceneTriggerState, VehiclePhysicsState,
+};
 
 pub use project::{
     FrameState, JointState, LinkState, ModelEntityKind, ResolvedFrameState, RigidTransform,
-    RobotDreamsEntity, RobotDreamsModel, RobotState, SceneLocation,
+    RobotDreamsEntity, RobotDreamsModel, RobotLinkCollider, RobotState, SceneLocation,
 };
 pub use scene_graph::{
     EnvironmentSettings, LightKind, LightSpec, ObservationMetadata, ObservationRequest,
@@ -49,6 +53,28 @@ pub struct CoordinateDebugOverlayOptions {
     pub axis_length_m: f32,
     pub line_thickness_m: f32,
     pub marker_radius_m: f32,
+}
+
+/// Rendering-only view of reviewed per-link collision profiles. The overlay
+/// never reads raw collision candidates and is deliberately excluded from
+/// camera fitting and PGE physics export.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CollisionDebugOverlayOptions {
+    pub enabled: bool,
+    pub line_thickness_m: f32,
+    pub color_rgb: [u8; 3],
+    pub curve_segments: u8,
+}
+
+impl Default for CollisionDebugOverlayOptions {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            line_thickness_m: 0.003,
+            color_rgb: [255, 75, 196],
+            curve_segments: 16,
+        }
+    }
 }
 
 impl Default for CoordinateDebugOverlayOptions {
@@ -81,6 +107,7 @@ pub struct RobotDreams {
     virtual_servo_joint_mappings: BTreeMap<String, BTreeMap<u8, VirtualServoJointMapping>>,
     virtual_buses: Vec<VirtualBusRuntime>,
     rover_drives: Vec<RoverDriveRuntime>,
+    articulated_collision_links: BTreeMap<String, BTreeSet<String>>,
     clock_sec: f64,
     dt: f32,
 }
@@ -111,6 +138,8 @@ pub struct RobotDreamsSnapshot {
     pub robots: Vec<RobotState>,
     pub scene_objects: Vec<SceneObjectState>,
     pub scene_triggers: Vec<SceneTriggerState>,
+    pub vehicles: Vec<VehiclePhysicsState>,
+    pub applied_calibrations: Vec<AppliedCalibrationState>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -156,6 +185,11 @@ pub struct HardwareServoRuntime {
     pub direction: i8,
     pub target_position: i16,
     pub present_position: i16,
+    /// Telemetry from the virtual actuator. It is evidence for the kinematic
+    /// joint path, not a claim that arm-link contact forces are simulated.
+    pub present_speed_ticks_per_sec: i16,
+    pub present_load: i16,
+    pub present_current_raw: u16,
     pub torque_enabled: bool,
     pub temperature_c: i16,
     pub voltage_v: f32,
@@ -240,6 +274,9 @@ fn servo_runtime_from_config(config: &crate::project::ServoDeviceConfig) -> Hard
         direction: config.calibration.direction,
         target_position: config.calibration.zero_offset,
         present_position: config.calibration.zero_offset,
+        present_speed_ticks_per_sec: 0,
+        present_load: 0,
+        present_current_raw: 0,
         torque_enabled: true,
         temperature_c: 25,
         voltage_v: 7.4,
@@ -472,6 +509,9 @@ fn apply_servo_snapshots_to_hardware(
         };
         servo.target_position = snapshot.target_position;
         servo.present_position = snapshot.present_position;
+        servo.present_speed_ticks_per_sec = snapshot.present_speed;
+        servo.present_load = snapshot.present_load;
+        servo.present_current_raw = snapshot.current_raw;
         servo.torque_enabled = snapshot.torque_enabled;
         servo.temperature_c = i16::from(snapshot.temperature_c);
         servo.voltage_v = f32::from(snapshot.voltage_tenths) / 10.0;
@@ -558,6 +598,24 @@ fn dc_motor_speed_mps(hardware: &HardwareRuntime, robot_id: &str, wheel: &str) -
     None
 }
 
+fn dc_motor_command(hardware: &HardwareRuntime, robot_id: &str, wheel: &str) -> Option<f32> {
+    for bus in &hardware.buses {
+        for device in &bus.devices {
+            let HardwareDeviceRuntime::DcMotor(motor) = device else {
+                continue;
+            };
+            if motor.drives_robot != robot_id
+                || !motor.drives_wheel.to_ascii_lowercase().contains(wheel)
+            {
+                continue;
+            }
+            let direction = if motor.direction < 0 { -1.0 } else { 1.0 };
+            return Some((f32::from(motor.command_speed.clamp(-100, 100)) / 100.0) * direction);
+        }
+    }
+    None
+}
+
 impl RobotDreams {
     pub fn new() -> Self {
         Self {
@@ -569,6 +627,7 @@ impl RobotDreams {
             virtual_servo_joint_mappings: BTreeMap::new(),
             virtual_buses: Vec::new(),
             rover_drives: Vec::new(),
+            articulated_collision_links: BTreeMap::new(),
             clock_sec: 0.0,
             dt: 1.0 / 200.0,
         }
@@ -660,6 +719,12 @@ impl RobotDreams {
 
     pub fn scene_trigger_states(&self) -> Vec<SceneTriggerState> {
         self.scene_physics.trigger_states()
+    }
+
+    /// Returns the solved Rapier state for a physics-driven robot base.
+    /// `None` means the robot is using the legacy authored/kinematic base.
+    pub fn vehicle_physics_state(&self, robot_id: &str) -> Option<&VehiclePhysicsState> {
+        self.scene_physics.vehicle_state(robot_id)
     }
 
     /// Attaches an object to the observed model TCP when it is within range.
@@ -806,6 +871,23 @@ impl RobotDreams {
         }
     }
 
+    fn sync_robot_link_colliders(&mut self) {
+        let colliders = self
+            .model
+            .as_ref()
+            .map(RobotDreamsModel::robot_link_colliders)
+            .unwrap_or_default();
+        let colliders = colliders
+            .into_iter()
+            .filter(|collider| {
+                self.articulated_collision_links
+                    .get(&collider.robot_id)
+                    .is_some_and(|links| links.contains(&collider.link_name))
+            })
+            .collect();
+        self.scene_physics.sync_robot_link_colliders(colliders);
+    }
+
     pub fn set_joint_angle(
         &mut self,
         name: impl AsRef<str>,
@@ -818,8 +900,134 @@ impl RobotDreams {
             .and_then(|model| model.set_joint_angle(name, radians));
         if result.is_ok() {
             self.sync_scene_object_attachments();
+            self.sync_robot_link_colliders();
         }
         result
+    }
+
+    /// Lists active Rapier contacts between a dynamic scene object and the
+    /// robot's reviewed, kinematically tracked link shapes.  A returned item
+    /// proves solver contact; it does not imply an attachment or grasp.
+    pub fn scene_object_robot_link_contacts(&self, object_id: &str) -> Vec<RobotLinkContact> {
+        self.scene_physics.robot_link_contacts(object_id)
+    }
+
+    /// Sets the safety envelope used when a reviewed link profile follows an
+    /// observed/kinematic URDF pose.  This limits the velocity Rapier derives
+    /// from pose updates and subdivides long caller time steps, preventing a
+    /// command jump from launching a dynamic object through the scene.
+    pub fn set_kinematic_collider_motion_config(
+        &mut self,
+        config: KinematicColliderMotionConfig,
+    ) -> Result<(), Box<dyn Error>> {
+        self.scene_physics
+            .set_kinematic_collider_motion_config(config)
+    }
+
+    /// Enables live contact bodies for explicit reviewed collision-profile
+    /// links. These kinematic targets follow observed URDF poses every tick;
+    /// this is deliberately narrower than claiming a full dynamic multibody
+    /// model for every robot link.
+    ///
+    /// Each requested link must have a reviewed profile on the named robot.
+    /// The return value is the number of reviewed shapes made live.
+    pub fn enable_robot_link_collision_profiles(
+        &mut self,
+        robot_id: &str,
+        links: &[&str],
+    ) -> Result<usize, Box<dyn Error>> {
+        if links.is_empty() {
+            return Err("at least one reviewed robot link is required for live contact".into());
+        }
+        let requested = links
+            .iter()
+            .map(|link| (*link).to_string())
+            .collect::<BTreeSet<_>>();
+        let resolved = self
+            .model
+            .as_ref()
+            .map(RobotDreamsModel::robot_link_colliders)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|collider| collider.robot_id == robot_id)
+            .collect::<Vec<_>>();
+        let available = resolved
+            .iter()
+            .map(|collider| collider.link_name.clone())
+            .collect::<BTreeSet<_>>();
+        if let Some(missing) = requested.iter().find(|link| !available.contains(*link)) {
+            return Err(format!(
+                "robot '{robot_id}' has no reviewed collision profile for link '{missing}'"
+            )
+            .into());
+        }
+        let enabled = self
+            .articulated_collision_links
+            .entry(robot_id.to_string())
+            .or_default();
+        enabled.extend(requested);
+        let count = resolved
+            .iter()
+            .filter(|collider| enabled.contains(&collider.link_name))
+            .count();
+        self.sync_robot_link_colliders();
+        Ok(count)
+    }
+
+    /// Selects the nearest reviewed profile links to a dynamic scene object
+    /// and enables those profiles for live contact. Call this only after the
+    /// visual/servo arm has been moved near the target; selection is a setup
+    /// convenience, while the subsequent contact result still comes from
+    /// Rapier.
+    pub fn enable_nearest_robot_link_collision_profiles(
+        &mut self,
+        robot_id: &str,
+        object_id: &str,
+        maximum_links: usize,
+    ) -> Result<Vec<String>, Box<dyn Error>> {
+        if maximum_links == 0 {
+            return Err("at least one nearest robot link is required".into());
+        }
+        let object = self
+            .scene_object_state(object_id)
+            .ok_or_else(|| format!("scene object '{object_id}' has no physics body"))?;
+        let mut nearest_by_link = BTreeMap::<String, f32>::new();
+        for collider in self
+            .model
+            .as_ref()
+            .map(RobotDreamsModel::robot_link_colliders)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|collider| collider.robot_id == robot_id)
+        {
+            let distance_squared = collider
+                .translation
+                .into_iter()
+                .zip(object.position)
+                .map(|(link, object)| (link - object).powi(2))
+                .sum::<f32>();
+            nearest_by_link
+                .entry(collider.link_name)
+                .and_modify(|current| *current = current.min(distance_squared))
+                .or_insert(distance_squared);
+        }
+        let mut nearest = nearest_by_link.into_iter().collect::<Vec<_>>();
+        nearest.sort_by(|left, right| {
+            left.1
+                .total_cmp(&right.1)
+                .then_with(|| left.0.cmp(&right.0))
+        });
+        let links = nearest
+            .into_iter()
+            .take(maximum_links)
+            .map(|(link, _)| link)
+            .collect::<Vec<_>>();
+        if links.is_empty() {
+            return Err(format!("robot '{robot_id}' has no reviewed collision profiles").into());
+        }
+        let link_refs = links.iter().map(String::as_str).collect::<Vec<_>>();
+        self.enable_robot_link_collision_profiles(robot_id, &link_refs)?;
+        Ok(links)
     }
 
     pub fn advance_seconds(&mut self, dt: f32) {
@@ -832,8 +1040,10 @@ impl RobotDreams {
         }
         self.apply_virtual_bus_snapshots();
         self.integrate_rover_drives(f64::from(dt));
-        self.sync_scene_object_attachments();
+        self.sync_robot_link_colliders();
         self.scene_physics.step(dt, self.clock_sec);
+        self.sync_vehicle_bases();
+        self.sync_scene_object_attachments();
         self.set_time_step(dt);
         self.physics.step();
     }
@@ -844,6 +1054,9 @@ impl RobotDreams {
         }
         self.clock_sec += f64::from(dt);
         self.integrate_rover_drives(f64::from(dt));
+        self.sync_robot_link_colliders();
+        self.scene_physics.step(dt, self.clock_sec);
+        self.sync_vehicle_bases();
         self.sync_scene_object_attachments();
     }
 
@@ -866,6 +1079,8 @@ impl RobotDreams {
                 .unwrap_or_default(),
             scene_objects: self.scene_physics.object_states(),
             scene_triggers: self.scene_physics.trigger_states(),
+            vehicles: self.scene_physics.vehicle_states(),
+            applied_calibrations: self.scene_physics.applied_calibrations(),
         }
     }
 
@@ -911,6 +1126,29 @@ impl RobotDreams {
                 ));
             }
 
+            // The profiles are deliberately groups rather than render meshes:
+            // this exposes their link-bound world transforms in the scene
+            // graph without pretending the shapes already participate in the
+            // live articulated Rapier simulation.
+            for (index, collider) in model.robot_link_colliders().into_iter().enumerate() {
+                let name = format!("{} reviewed collision shape {index}", collider.link_name);
+                let entity = format!(
+                    "robot:{}:collision:{}:{index}",
+                    collider.robot_id, collider.link_name
+                );
+                graph.add_entity(EntityMetadata {
+                    id: EntityId(entity.clone()),
+                    name: name.clone(),
+                    kind: "robotCollisionProfile".to_string(),
+                    robot_id: Some(collider.robot_id),
+                    link_name: Some(collider.link_name),
+                });
+                let mut node = SceneNode::group(entity, name);
+                node.transform = Transform::matrix(collider.translation, collider.rotation_matrix);
+                node.include_in_fit = false;
+                graph.root.children.push(node);
+            }
+
             if let Some(project) = model.project() {
                 graph.render_settings = project
                     .scene
@@ -934,23 +1172,43 @@ impl RobotDreams {
                         link_name: None,
                     });
                     let live_state = self.scene_physics.object_state(&object.id);
-                    let mut node = SceneNode::mesh(
-                        entity,
-                        object.name.clone(),
-                        scene_object_geometry(project, object),
-                        Material {
-                            color_rgb: object.color_rgb,
-                        },
-                        Transform {
-                            translation: live_state
-                                .map(|state| state.position)
-                                .unwrap_or(object.position),
-                            rotation: live_state
-                                .map(|state| state.rotation)
-                                .unwrap_or(object.rotation),
-                            rotation_matrix: None,
-                        },
-                    );
+                    let physics_transform = Transform {
+                        translation: live_state
+                            .map(|state| state.position)
+                            .unwrap_or(object.position),
+                        rotation: live_state
+                            .map(|state| state.rotation)
+                            .unwrap_or(object.rotation),
+                        rotation_matrix: None,
+                    };
+                    let mut node = if let Some(visual) = object.visual_transform {
+                        let mut body = SceneNode::group(entity.clone(), object.name.clone());
+                        body.transform = physics_transform;
+                        body.children.push(SceneNode::mesh(
+                            format!("{entity}:visual"),
+                            format!("{} visual", object.name),
+                            scene_object_geometry(project, object),
+                            Material {
+                                color_rgb: object.color_rgb,
+                            },
+                            Transform {
+                                translation: visual.translation,
+                                rotation: visual.rotation,
+                                rotation_matrix: None,
+                            },
+                        ));
+                        body
+                    } else {
+                        SceneNode::mesh(
+                            entity,
+                            object.name.clone(),
+                            scene_object_geometry(project, object),
+                            Material {
+                                color_rgb: object.color_rgb,
+                            },
+                            physics_transform,
+                        )
+                    };
                     node.include_in_fit = object.include_in_fit;
                     graph.root.children.push(node);
                 }
@@ -1016,6 +1274,33 @@ impl RobotDreams {
         graph
     }
 
+    /// Returns the normal scene plus a rendering-only wireframe of the
+    /// reviewed collision profiles bound to their current URDF link poses.
+    pub fn scene_graph_with_collision_debug_overlay(
+        &self,
+        options: CollisionDebugOverlayOptions,
+    ) -> SceneGraph {
+        self.scene_graph_with_debug_overlays(CoordinateDebugOverlayOptions::default(), options)
+    }
+
+    /// Composes the independently opt-in coordinate and reviewed-collider
+    /// overlays. Keeping this at the scene boundary prevents debug geometry
+    /// from being mistaken for active articulated physics.
+    pub fn scene_graph_with_debug_overlays(
+        &self,
+        coordinate_options: CoordinateDebugOverlayOptions,
+        collision_options: CollisionDebugOverlayOptions,
+    ) -> SceneGraph {
+        let mut graph = self.scene_graph();
+        if coordinate_options.enabled {
+            self.append_coordinate_debug_overlay(&mut graph, coordinate_options);
+        }
+        if collision_options.enabled {
+            self.append_collision_debug_overlay(&mut graph, collision_options);
+        }
+        graph
+    }
+
     pub fn coordinate_debug_marker_positions(
         &self,
         options: CoordinateDebugOverlayOptions,
@@ -1055,6 +1340,41 @@ impl RobotDreams {
 
     pub fn world_state(&self) -> pge::WorldState {
         scene_graph_to_world_state(&self.scene_graph())
+    }
+
+    /// Exports every current Rapier scene collider and every reviewed
+    /// per-link profile as PGE's renderer-owned debug metadata.  The
+    /// diagnostics are intentionally not scene nodes, physics bodies, or
+    /// camera-fit inputs.  Reviewed profiles remain distinct from their raw
+    /// PGE candidate artifacts: only the approved profile shapes appear.
+    pub fn pge_collider_debug_overlay(&self) -> pge::ColliderDebugOverlay {
+        let mut overlay = pge::ColliderDebugOverlay {
+            enabled: true,
+            wireframes: self
+                .scene_physics
+                .collider_debug_entries()
+                .into_iter()
+                .map(pge_wireframe_from_live_physics)
+                .collect(),
+        };
+
+        let Some(model) = &self.model else {
+            return overlay;
+        };
+        for (index, collider) in model.robot_link_colliders().into_iter().enumerate() {
+            let mut wireframe = pge::ColliderWireframe::new(
+                format!(
+                    "reviewed-link:{}:{}:{index}",
+                    collider.robot_id, collider.link_name
+                ),
+                "reviewedLinkProfile",
+                pge::Transform::matrix(collider.translation, collider.rotation_matrix),
+                pge_wireframe_shape(&collider.geometry),
+            );
+            wireframe.color = [1.0, 0.25, 0.77, 1.0];
+            overlay.wireframes.push(wireframe);
+        }
+        overlay
     }
 
     fn append_coordinate_debug_overlay(
@@ -1423,6 +1743,29 @@ impl RobotDreams {
             else {
                 continue;
             };
+            if self.scene_physics.has_vehicle(&drive.robot_id) {
+                let Some(left_command) = dc_motor_command(&self.hardware, &drive.robot_id, "left")
+                else {
+                    continue;
+                };
+                let Some(right_command) =
+                    dc_motor_command(&self.hardware, &drive.robot_id, "right")
+                else {
+                    continue;
+                };
+                self.scene_physics.drive_vehicle(
+                    &drive.robot_id,
+                    scene_physics::VehicleDriveCommand {
+                        left_command,
+                        right_command,
+                        brake: false,
+                        steering_target_rad: (drive.steering_angle_deg - drive.steering_center_deg)
+                            .to_radians() as f32,
+                    },
+                    dt as f32,
+                );
+                continue;
+            }
             let linear_mps = 0.5 * (left_speed_mps + right_speed_mps);
             if linear_mps.abs() <= f64::EPSILON {
                 continue;
@@ -1454,10 +1797,77 @@ impl RobotDreams {
             model.move_robot_base_flat(&robot_id, dx, dy, dyaw);
         }
     }
+
+    fn sync_vehicle_bases(&mut self) {
+        let states = self.scene_physics.vehicle_states();
+        let Some(model) = &mut self.model else {
+            return;
+        };
+        for state in states {
+            model.set_robot_base_pose(&state.robot_id, state.position, state.rotation);
+        }
+    }
+
+    fn append_collision_debug_overlay(
+        &self,
+        graph: &mut SceneGraph,
+        options: CollisionDebugOverlayOptions,
+    ) {
+        let Some(model) = &self.model else {
+            return;
+        };
+        let thickness = options.line_thickness_m.max(0.0005);
+        let segments = options.curve_segments.clamp(8, 64);
+        for (index, collider) in model.robot_link_colliders().into_iter().enumerate() {
+            append_robot_collision_wireframe(
+                graph,
+                collider,
+                index,
+                thickness,
+                segments,
+                options.color_rgb,
+            );
+        }
+    }
 }
 
 pub fn world_state_from_scene_graph(graph: &SceneGraph) -> pge::WorldState {
     scene_graph_to_world_state(graph)
+}
+
+fn pge_wireframe_from_live_physics(
+    entry: scene_physics::LivePhysicsColliderDebugEntry,
+) -> pge::ColliderWireframe {
+    let mut wireframe = pge::ColliderWireframe::new(
+        entry.id,
+        entry.category,
+        entry.transform,
+        pge::ColliderWireframeShape::Compound {
+            children: vec![pge::ColliderWireframeChild {
+                transform: entry.local_transform,
+                shape: pge_wireframe_shape(&entry.geometry),
+            }],
+        },
+    );
+    wireframe.color = entry.color;
+    wireframe
+}
+
+fn pge_wireframe_shape(geometry: &ProjectSceneColliderGeometry) -> pge::ColliderWireframeShape {
+    match geometry {
+        ProjectSceneColliderGeometry::Box { size } => {
+            pge::ColliderWireframeShape::Box { size: *size }
+        }
+        ProjectSceneColliderGeometry::Sphere { radius } => {
+            pge::ColliderWireframeShape::Sphere { radius: *radius }
+        }
+        ProjectSceneColliderGeometry::Cylinder { radius, height } => {
+            pge::ColliderWireframeShape::Cylinder {
+                radius: *radius,
+                height: *height,
+            }
+        }
+    }
 }
 
 pub const ROBOTDREAMS_PGE_CAMERA_ID: &str = "robotdreams_pge_camera";
@@ -1505,6 +1915,9 @@ pub struct RobotDreamsPgeFrameOptions {
     pub camera_radius_m: f32,
     pub camera_elevation_deg: f32,
     pub debug_coordinate_overlay: bool,
+    /// Draws reviewed per-link profiles as magenta wireframes. This is
+    /// rendering evidence only; it does not enable articulated collisions.
+    pub debug_collision_overlay: bool,
     pub text_labels: Vec<RobotDreamsPgeTextLabel>,
 }
 
@@ -1516,6 +1929,7 @@ impl Default for RobotDreamsPgeFrameOptions {
             camera_radius_m: 1.2,
             camera_elevation_deg: 35.0,
             debug_coordinate_overlay: true,
+            debug_collision_overlay: false,
             text_labels: Vec::new(),
         }
     }
@@ -1538,13 +1952,21 @@ pub fn robotdreams_pge_frame(
         options.target[1] - options.camera_radius_m * 0.45,
         options.target[2] + options.camera_radius_m * elevation_rad.sin(),
     ];
-    let mut scene =
-        dreams.scene_graph_with_coordinate_debug_overlay(CoordinateDebugOverlayOptions {
+    // Collision wireframes are PGE-owned metadata now.  Do not materialize
+    // RobotDreams box-edge meshes here: that old path would duplicate the
+    // generic overlay and make renderer-only lines look like scene geometry.
+    let mut scene = dreams.scene_graph_with_debug_overlays(
+        CoordinateDebugOverlayOptions {
             enabled: options.debug_coordinate_overlay,
             ..CoordinateDebugOverlayOptions::default()
-        });
+        },
+        CollisionDebugOverlayOptions::default(),
+    );
     add_pge_camera(&mut scene, eye, options.target, options.resolution);
     let mut world = world_state_from_scene_graph(&scene);
+    if options.debug_collision_overlay {
+        world.collider_debug = dreams.pge_collider_debug_overlay();
+    }
     if options.debug_coordinate_overlay {
         for label in coordinate_debug_legend_labels(0) {
             world.text_labels.push(pge::TextLabel {
@@ -1954,6 +2376,217 @@ fn push_debug_node(graph: &mut SceneGraph, robot_id: &str, node: SceneNode) {
     graph.root.children.push(node);
 }
 
+fn append_robot_collision_wireframe(
+    graph: &mut SceneGraph,
+    collider: RobotLinkCollider,
+    collider_index: usize,
+    thickness: f32,
+    curve_segments: u8,
+    color_rgb: [u8; 3],
+) {
+    let entity = format!(
+        "debug:{}:collider:{}:{collider_index}",
+        collider.robot_id, collider.link_name
+    );
+    let mut group = SceneNode::group(
+        entity,
+        format!("{} reviewed collider wireframe", collider.link_name),
+    );
+    group.transform = Transform::matrix(collider.translation, collider.rotation_matrix);
+    group.include_in_fit = false;
+    group.include_in_physics = false;
+
+    let prefix = group.entity.0.clone();
+    group.children = match collider.geometry {
+        ProjectSceneColliderGeometry::Box { size } => {
+            box_wireframe_nodes(&prefix, size, thickness, color_rgb)
+        }
+        ProjectSceneColliderGeometry::Sphere { radius } => {
+            sphere_wireframe_nodes(&prefix, radius, thickness, color_rgb, curve_segments)
+        }
+        ProjectSceneColliderGeometry::Cylinder { radius, height } => cylinder_wireframe_nodes(
+            &prefix,
+            radius,
+            height,
+            thickness,
+            color_rgb,
+            curve_segments,
+        ),
+    };
+    register_collision_debug_node(graph, &group, &collider.robot_id, &collider.link_name);
+    graph.root.children.push(group);
+}
+
+fn register_collision_debug_node(
+    graph: &mut SceneGraph,
+    node: &SceneNode,
+    robot_id: &str,
+    link_name: &str,
+) {
+    graph.add_entity(EntityMetadata {
+        id: node.entity.clone(),
+        name: node.name.clone(),
+        kind: "collisionDebugOverlay".to_string(),
+        robot_id: Some(robot_id.to_string()),
+        link_name: Some(link_name.to_string()),
+    });
+    for child in &node.children {
+        register_collision_debug_node(graph, child, robot_id, link_name);
+    }
+}
+
+fn box_wireframe_nodes(
+    prefix: &str,
+    size: [f32; 3],
+    thickness: f32,
+    color_rgb: [u8; 3],
+) -> Vec<SceneNode> {
+    let half = [size[0] * 0.5, size[1] * 0.5, size[2] * 0.5];
+    let corners = [
+        [-half[0], -half[1], -half[2]],
+        [half[0], -half[1], -half[2]],
+        [half[0], half[1], -half[2]],
+        [-half[0], half[1], -half[2]],
+        [-half[0], -half[1], half[2]],
+        [half[0], -half[1], half[2]],
+        [half[0], half[1], half[2]],
+        [-half[0], half[1], half[2]],
+    ];
+    const EDGES: [(usize, usize); 12] = [
+        (0, 1),
+        (1, 2),
+        (2, 3),
+        (3, 0),
+        (4, 5),
+        (5, 6),
+        (6, 7),
+        (7, 4),
+        (0, 4),
+        (1, 5),
+        (2, 6),
+        (3, 7),
+    ];
+    EDGES
+        .into_iter()
+        .enumerate()
+        .map(|(edge, (start, end))| {
+            debug_line_node(
+                format!("{prefix}:edge:{edge}"),
+                "reviewed box wireframe edge",
+                corners[start],
+                corners[end],
+                thickness,
+                color_rgb,
+            )
+        })
+        .collect()
+}
+
+fn sphere_wireframe_nodes(
+    prefix: &str,
+    radius: f32,
+    thickness: f32,
+    color_rgb: [u8; 3],
+    segments: u8,
+) -> Vec<SceneNode> {
+    let mut nodes = Vec::new();
+    append_circle_wireframe(
+        &mut nodes,
+        &format!("{prefix}:xy"),
+        radius,
+        thickness,
+        color_rgb,
+        segments,
+        |cos, sin| [radius * cos, radius * sin, 0.0],
+    );
+    append_circle_wireframe(
+        &mut nodes,
+        &format!("{prefix}:xz"),
+        radius,
+        thickness,
+        color_rgb,
+        segments,
+        |cos, sin| [radius * cos, 0.0, radius * sin],
+    );
+    append_circle_wireframe(
+        &mut nodes,
+        &format!("{prefix}:yz"),
+        radius,
+        thickness,
+        color_rgb,
+        segments,
+        |cos, sin| [0.0, radius * cos, radius * sin],
+    );
+    nodes
+}
+
+fn cylinder_wireframe_nodes(
+    prefix: &str,
+    radius: f32,
+    height: f32,
+    thickness: f32,
+    color_rgb: [u8; 3],
+    segments: u8,
+) -> Vec<SceneNode> {
+    let mut nodes = Vec::new();
+    let half_height = height * 0.5;
+    append_circle_wireframe(
+        &mut nodes,
+        &format!("{prefix}:top"),
+        radius,
+        thickness,
+        color_rgb,
+        segments,
+        |cos, sin| [radius * cos, radius * sin, half_height],
+    );
+    append_circle_wireframe(
+        &mut nodes,
+        &format!("{prefix}:bottom"),
+        radius,
+        thickness,
+        color_rgb,
+        segments,
+        |cos, sin| [radius * cos, radius * sin, -half_height],
+    );
+    for edge in 0..4 {
+        let angle = edge as f32 * std::f32::consts::FRAC_PI_2;
+        let point = [radius * angle.cos(), radius * angle.sin()];
+        nodes.push(debug_line_node(
+            format!("{prefix}:side:{edge}"),
+            "reviewed cylinder wireframe side",
+            [point[0], point[1], -half_height],
+            [point[0], point[1], half_height],
+            thickness,
+            color_rgb,
+        ));
+    }
+    nodes
+}
+
+fn append_circle_wireframe(
+    nodes: &mut Vec<SceneNode>,
+    prefix: &str,
+    _radius: f32,
+    thickness: f32,
+    color_rgb: [u8; 3],
+    segments: u8,
+    point: impl Fn(f32, f32) -> [f32; 3],
+) {
+    let count = segments.max(8);
+    for segment in 0..count {
+        let start_angle = std::f32::consts::TAU * f32::from(segment) / f32::from(count);
+        let end_angle = std::f32::consts::TAU * f32::from((segment + 1) % count) / f32::from(count);
+        nodes.push(debug_line_node(
+            format!("{prefix}:edge:{segment}"),
+            "reviewed curved collider wireframe edge",
+            point(start_angle.cos(), start_angle.sin()),
+            point(end_angle.cos(), end_angle.sin()),
+            thickness,
+            color_rgb,
+        ));
+    }
+}
+
 fn register_debug_node(graph: &mut SceneGraph, node: &SceneNode, robot_id: &str) {
     graph.add_entity(EntityMetadata {
         id: node.entity.clone(),
@@ -1987,6 +2620,7 @@ fn debug_box_node(
         },
     );
     node.include_in_fit = false;
+    node.include_in_physics = false;
     node
 }
 
@@ -2098,7 +2732,9 @@ fn insert_scene_node(
                 material: Some(material),
             });
             pge_node.mesh = Some(mesh);
-            pge_node.collider = pge_collider(geometry);
+            if node.include_in_physics {
+                pge_node.collider = pge_collider(geometry);
+            }
         }
         SceneNodeKind::Camera(camera) => {
             let camera = world.cameras.insert(pge_camera(camera));
@@ -2608,9 +3244,9 @@ mod robotdreams_tests {
     };
 
     use super::{
-        CoordinateDebugOverlayOptions, ModelEntityKind, RobotDreams, RobotDreamsPgeFrameOptions,
-        VirtualServoJointMapping, f64_vec3_to_f32, robotdreams_pge_frame,
-        virtual_servo_joint_position,
+        CollisionDebugOverlayOptions, CoordinateDebugOverlayOptions, HardwareDeviceRuntime,
+        ModelEntityKind, RobotDreams, RobotDreamsPgeFrameOptions, VirtualServoJointMapping,
+        f64_vec3_to_f32, robotdreams_pge_frame, virtual_servo_joint_position,
     };
 
     fn project_root() -> PathBuf {
@@ -3239,6 +3875,166 @@ mod robotdreams_tests {
     }
 
     #[test]
+    fn scene_graph_exposes_reviewed_link_collision_profile_poses_without_live_meshes() {
+        let project_path = write_temp_project(
+            "link-collision-scene-evidence",
+            serde_json::json!({
+                "format": "robotdreams.project.v1",
+                "name": "Link Collision Scene Evidence",
+                "robots": [{
+                    "id": "puppyarm",
+                    "name": "PuppyArm",
+                    "model": {"type": "urdf", "path": puppyarm_urdf_path()},
+                    "physics": {"linkCollisionProfile": "link-collisions.json"}
+                }]
+            }),
+        );
+        let dir = project_path.parent().expect("temp project parent");
+        std::fs::write(
+            dir.join("gripper.candidates.json"),
+            serde_json::json!({
+                "bounds": {"center": [0.0, 0.0, 0.0], "size": [0.04, 0.02, 0.01]},
+                "primitives": [], "compounds": [], "convex_hull": {"points": []}
+            })
+            .to_string(),
+        )
+        .expect("write PGE candidates");
+        std::fs::write(
+            dir.join("gripper.reviewed.json"),
+            serde_json::json!({"colliders": [
+                {
+                    "shape": "box", "size": [0.04, 0.02, 0.01],
+                    "offset": [0.01, 0.0, 0.0], "rotation": [0.0, 0.0, 0.0]
+                },
+                {
+                    "shape": "sphere", "radius": 0.01,
+                    "offset": [0.02, 0.0, 0.0], "rotation": [0.0, 0.0, 0.0]
+                },
+                {
+                    "shape": "cylinder", "radius": 0.01, "height": 0.03,
+                    "offset": [0.03, 0.0, 0.0], "rotation": [0.0, 0.0, 0.0]
+                }
+            ]})
+            .to_string(),
+        )
+        .expect("write reviewed profile");
+        std::fs::write(
+            dir.join("link-collisions.json"),
+            serde_json::json!({
+                "format": "robotdreams.link-collision-profile.v1",
+                "robot": "puppyarm",
+                "links": [{
+                    "link": "part_1_4",
+                    "candidateArtifact": "gripper.candidates.json",
+                    "reviewedProfile": "gripper.reviewed.json"
+                }]
+            })
+            .to_string(),
+        )
+        .expect("write link profile");
+
+        let dreams = RobotDreams::open(&project_path).expect("open collision-profile project");
+        let scene = dreams.scene_graph();
+        let entity = scene
+            .entities
+            .get(&crate::scene_graph::EntityId(
+                "robot:puppyarm:collision:part_1_4:0".to_string(),
+            ))
+            .expect("collision profile entity");
+        assert_eq!(entity.kind, "robotCollisionProfile");
+        assert_eq!(entity.link_name.as_deref(), Some("part_1_4"));
+        let node = find_node_by_entity(&scene.root, "robot:puppyarm:collision:part_1_4:0")
+            .expect("collision profile node");
+        assert!(!node.include_in_fit);
+        assert!(matches!(node.kind, SceneNodeKind::Group));
+
+        let overlay =
+            dreams.scene_graph_with_collision_debug_overlay(CollisionDebugOverlayOptions {
+                enabled: true,
+                ..CollisionDebugOverlayOptions::default()
+            });
+        let resolved = dreams
+            .model()
+            .expect("loaded project model")
+            .robot_link_colliders();
+        assert_eq!(resolved.len(), 3);
+        for (index, collider) in resolved.iter().enumerate() {
+            let wireframe = find_node_by_entity(
+                &overlay.root,
+                &format!("debug:puppyarm:collider:part_1_4:{index}"),
+            )
+            .expect("reviewed collider wireframe group");
+            assert_eq!(wireframe.transform.translation, collider.translation);
+            assert_eq!(
+                wireframe.transform.rotation_matrix,
+                Some(collider.rotation_matrix)
+            );
+            assert!(!wireframe.include_in_fit);
+            assert!(!wireframe.include_in_physics);
+            assert!(wireframe.children.iter().all(|edge| {
+                !edge.include_in_fit
+                    && !edge.include_in_physics
+                    && matches!(
+                        edge.kind,
+                        SceneNodeKind::Mesh {
+                            geometry: Geometry::Box { .. },
+                            ..
+                        }
+                    )
+            }));
+        }
+        assert_eq!(
+            find_node_by_entity(&overlay.root, "debug:puppyarm:collider:part_1_4:0")
+                .expect("box wireframe")
+                .children
+                .len(),
+            12,
+            "a reviewed box should render its twelve physical edges"
+        );
+        assert_eq!(
+            find_node_by_entity(&overlay.root, "debug:puppyarm:collider:part_1_4:1")
+                .expect("sphere wireframe")
+                .children
+                .len(),
+            48,
+            "a reviewed sphere should render three sixteen-segment great circles"
+        );
+        assert_eq!(
+            find_node_by_entity(&overlay.root, "debug:puppyarm:collider:part_1_4:2")
+                .expect("cylinder wireframe")
+                .children
+                .len(),
+            36,
+            "a reviewed cylinder should render its two rims and four side lines"
+        );
+
+        let mut frame_options = RobotDreamsPgeFrameOptions::default();
+        frame_options.debug_collision_overlay = true;
+        let frame = robotdreams_pge_frame(&dreams, frame_options);
+        assert!(frame.world.nodes.iter().all(|(_, node)| {
+            !node.entity.0.starts_with("debug:puppyarm:collider:") || node.collider.is_none()
+        }));
+        let reviewed = frame
+            .world
+            .collider_wireframes()
+            .into_iter()
+            .filter(|wireframe| wireframe.category == "reviewedLinkProfile")
+            .collect::<Vec<_>>();
+        assert_eq!(reviewed.len(), 3);
+        assert!(reviewed.iter().all(|wireframe| {
+            wireframe.id.starts_with("reviewed-link:puppyarm:part_1_4:")
+                && wireframe.color == [1.0, 0.25, 0.77, 1.0]
+        }));
+        assert!(
+            reviewed
+                .iter()
+                .all(|wireframe| !wireframe.id.contains("candidate"))
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn scene_graph_includes_project_render_defaults_lights_and_reflection_probes() {
         let project_path = write_temp_project(
             "scene-probes",
@@ -3344,6 +4140,35 @@ mod robotdreams_tests {
     }
 
     #[test]
+    fn visual_transform_rotates_asset_without_rotating_physics_object() {
+        let path = write_temp_project(
+            "visual-transform",
+            serde_json::json!({
+                "format": "robotdreams.project.v1",
+                "scene": {"objects": [{
+                    "id":"bottle", "shape":"cylinder", "radius":0.03, "height":0.2,
+                    "position":[0.1,0.2,0.1], "rotation":[0.0,0.0,0.0],
+                    "visualTransform":{"rotation":[0.0,1.5707963,0.0]},
+                    "physics":{"body":"dynamic", "collider":{"shape":"cylinder","radius":0.03,"height":0.2}}
+                }]}
+            }),
+        );
+        let dreams = RobotDreams::open(&path).unwrap();
+        let state = dreams.scene_object_state("bottle").unwrap();
+        assert_eq!(state.rotation, [0.0; 3]);
+        let body = dreams
+            .scene_graph()
+            .root
+            .children
+            .into_iter()
+            .find(|node| node.entity.0 == "object:bottle")
+            .unwrap();
+        assert_eq!(body.transform.rotation, [0.0; 3]);
+        assert_eq!(body.children[0].transform.rotation, [0.0, 1.5707963, 0.0]);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
     fn virtual_servo_target_updates_robot_state_through_shared_simulation() {
         let mut dreams = RobotDreams::open(puppyarm_project_path()).expect("open PuppyArm project");
         let start_tcp = dreams
@@ -3371,6 +4196,126 @@ mod robotdreams_tests {
         assert!(
             distance(start_tcp, moved_tcp) > 1.0e-3,
             "TCP should move when virtual servo updates the model"
+        );
+    }
+
+    #[test]
+    fn virtual_servo_joint_uses_present_position_instead_of_teleporting_to_target() {
+        let mut dreams = RobotDreams::open(puppyarm_project_path()).expect("open PuppyArm project");
+        let start = dreams.snapshot().robots[0].joints["yaw"].position_rad;
+        assert!(dreams.set_virtual_servo_target("main_bus", 1, 2593));
+
+        // Setting a target updates the bus command only. The rendered joint
+        // follows the Feetech simulator's present position as it advances.
+        assert_eq!(
+            dreams.snapshot().robots[0].joints["yaw"].position_rad,
+            start
+        );
+        dreams.advance_seconds(0.2);
+        let early_snapshot = dreams.snapshot();
+        let early = early_snapshot.robots[0].joints["yaw"].position_rad;
+        let servo = early_snapshot.servo_snapshots[0]
+            .snapshots
+            .iter()
+            .find(|servo| servo.id == 1)
+            .expect("yaw servo telemetry");
+        assert!(servo.moving);
+        assert_ne!(servo.present_position, servo.target_position);
+        let HardwareDeviceRuntime::Servo(hardware_servo) =
+            &early_snapshot.hardware.buses[0].devices[0]
+        else {
+            panic!("expected yaw hardware-servo telemetry");
+        };
+        assert_eq!(hardware_servo.present_position, servo.present_position);
+        assert_eq!(
+            hardware_servo.present_speed_ticks_per_sec,
+            servo.present_speed
+        );
+        assert_eq!(hardware_servo.present_load, servo.present_load);
+        assert_eq!(hardware_servo.present_current_raw, servo.current_raw);
+        dreams.advance_seconds(3.0);
+        let settled = dreams.snapshot().robots[0].joints["yaw"].position_rad;
+        assert!(
+            early > start,
+            "finite-rate servo should begin moving: {early}"
+        );
+        assert!(
+            early < settled,
+            "joint must not teleport to target: {early} >= {settled}"
+        );
+    }
+
+    #[test]
+    fn dynamic_vehicle_drive_updates_solved_base_tcp_and_mounted_camera_together() {
+        let mut dreams = RobotDreams::open(puppybot_project_path()).expect("open PuppyBot project");
+        let before_vehicle = dreams
+            .vehicle_physics_state("puppybot")
+            .expect("PuppyBot dynamic vehicle")
+            .clone();
+        let before_tcp = dreams
+            .robot_state("puppybot")
+            .and_then(|robot| robot.tcp)
+            .and_then(|tcp| tcp.location)
+            .expect("PuppyBot TCP")
+            .position;
+        assert!(dreams.set_virtual_drive_output(
+            "drive_bus",
+            "puppybot",
+            1,
+            2,
+            -55,
+            -55,
+            90.0,
+            90.0,
+        ));
+        for _ in 0..180 {
+            dreams.advance_seconds(1.0 / 120.0);
+        }
+
+        let after_vehicle = dreams
+            .vehicle_physics_state("puppybot")
+            .expect("solved vehicle state")
+            .clone();
+        let after_robot = dreams
+            .robot_state("puppybot")
+            .expect("moved PuppyBot state");
+        let after_tcp = after_robot
+            .tcp
+            .and_then(|tcp| tcp.location)
+            .expect("moved TCP")
+            .position;
+        let after_camera = dreams
+            .camera_spec("overhead_camera")
+            .expect("moved overhead camera")
+            .transform
+            .translation;
+        let base_delta = [
+            f64::from(after_vehicle.position[0] - before_vehicle.position[0]),
+            f64::from(after_vehicle.position[1] - before_vehicle.position[1]),
+            f64::from(after_vehicle.position[2] - before_vehicle.position[2]),
+        ];
+        assert!(
+            base_delta[0] < -0.01,
+            "drive force did not move base: {base_delta:?}"
+        );
+        for axis in 0..3 {
+            assert!(
+                (after_robot.base.position[axis] - f64::from(after_vehicle.position[axis])).abs()
+                    < 2.0e-4,
+                "model base must equal solved Rapier pose"
+            );
+            assert!(
+                (f64::from(after_camera[axis])
+                    - (f64::from(after_vehicle.position[axis])
+                        + if axis == 2 { 0.65 } else { 0.0 }))
+                .abs()
+                    < 2.0e-3,
+                "mounted camera must inherit solved base movement"
+            );
+        }
+        assert!(
+            distance(before_tcp, after_tcp) > 0.01,
+            "TCP must be recomputed from the solved base pose"
         );
     }
 
@@ -3453,6 +4398,28 @@ mod robotdreams_tests {
             .find_map(|(_, node)| (node.entity.0 == "object:ball").then_some(node))
             .unwrap();
         assert_eq!(pge_ball.transform.translation, ball.position);
+        let physics_overlay = dreams.pge_collider_debug_overlay();
+        let ball_collider = physics_overlay
+            .wireframes
+            .iter()
+            .find(|wireframe| wireframe.id == "scene-object:ball")
+            .expect("live dynamic ball collider diagnostic");
+        assert_eq!(ball_collider.category, "sceneDynamicCollider");
+        assert_eq!(ball_collider.transform.translation, ball.position);
+        assert!(matches!(
+            ball_collider.shape,
+            pge_core::ColliderWireframeShape::Compound { ref children }
+                if children.len() == 1
+                    && matches!(children[0].shape, pge_core::ColliderWireframeShape::Sphere { radius } if radius == 0.025)
+        ));
+        assert!(
+            physics_overlay
+                .wireframes
+                .iter()
+                .any(|wireframe| wireframe.id == "scene-object:bin_bottom"
+                    && wireframe.category == "sceneStaticCollider"),
+            "static Rapier colliders must be exported too"
+        );
 
         let _ = std::fs::remove_dir_all(project_path.parent().unwrap());
     }

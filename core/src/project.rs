@@ -10,6 +10,11 @@ use crate::scene_harness::{LinkPose, UrdfSceneHarness};
 
 pub const ROBOT_DREAMS_MODEL_FORMAT: &str = "robotdreams.model.v1";
 pub const ROBOT_DREAMS_PROJECT_FORMAT: &str = "robotdreams.project.v1";
+/// Versioned manifest which binds reviewed PGE collider exports to exact URDF
+/// links. Raw candidate artifacts are retained only as generation provenance;
+/// the runtime consumes the separately reviewed profile.
+pub const ROBOT_DREAMS_LINK_COLLISION_PROFILE_FORMAT: &str =
+    "robotdreams.link-collision-profile.v1";
 
 #[derive(Clone, Debug)]
 pub struct ProjectConfig {
@@ -18,6 +23,10 @@ pub struct ProjectConfig {
     pub manifest_path: PathBuf,
     pub base_dir: PathBuf,
     pub model_profile_path: Option<String>,
+    /// Optional measured calibration artifact, resolved relative to the
+    /// project manifest. Its absence intentionally retains authored prototype
+    /// vehicle settings.
+    pub calibration_record_path: Option<String>,
     pub scene: ProjectSceneConfig,
     pub robots: Vec<ProjectRobotConfig>,
     pub hardware: HardwareConfig,
@@ -55,8 +64,16 @@ pub struct ProjectSceneObjectConfig {
     pub position: [f32; 3],
     pub rotation: [f32; 3],
     pub scale: Option<[f32; 3]>,
+    /// Asset-only local transform. It never changes the object physics body.
+    pub visual_transform: Option<ProjectSceneVisualTransform>,
     pub include_in_fit: bool,
     pub physics: Option<ProjectSceneObjectPhysicsConfig>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ProjectSceneVisualTransform {
+    pub translation: [f32; 3],
+    pub rotation: [f32; 3],
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -145,6 +162,79 @@ pub struct ProjectRobotConfig {
     pub joint_names: HashMap<String, String>,
     pub base_translation: [f32; 3],
     pub base_rotation: [f32; 3],
+    /// Optional live-Rapier vehicle body.  Omitting this deliberately retains
+    /// the legacy visual/kinematic robot base behaviour.
+    pub physics: Option<ProjectRobotPhysicsConfig>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProjectRobotPhysicsConfig {
+    pub vehicle: Option<ProjectVehiclePhysicsConfig>,
+    /// Relative path to a versioned, reviewed per-link collision manifest.
+    /// This is deliberately separate from vehicle collisionProfile: its
+    /// entries are expressed in their named URDF link-local frames.
+    pub link_collision_profile: Option<ProjectLinkCollisionProfileReference>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ProjectLinkCollisionProfileReference {
+    Path(String),
+    InvalidType,
+}
+
+/// Parameters for the physics-driven mobile base.  The motor command remains
+/// a normalized H-bridge command; the runtime turns it into bounded force at
+/// the rear wheel contact points and lets Rapier solve the chassis pose.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProjectVehiclePhysicsConfig {
+    pub mass_kg: f32,
+    pub center_of_mass_m: [f32; 3],
+    pub linear_damping: f32,
+    pub angular_damping: f32,
+    pub wheelbase_m: f32,
+    pub track_width_m: f32,
+    pub max_wheel_speed_mps: f32,
+    pub max_drive_force_n: f32,
+    pub lateral_grip_n_per_mps: f32,
+    pub steering_response_deg_per_sec: f32,
+    pub motor: ProjectVehicleMotorConfig,
+    /// Inline, reviewed primitive candidates. These are intentionally local
+    /// to the robot base and form a compound collider at runtime.
+    pub colliders: Vec<ProjectVehicleColliderConfig>,
+    /// Relative path to a generated candidate profile. Its narrow interchange
+    /// format is `{ "colliders": [<same shape records as above>] }`.
+    pub collision_profile: Option<String>,
+}
+
+/// A deliberately small DC-motor/wheel model.  It turns normalized H-bridge
+/// commands into torque with a linear back-EMF curve, rather than treating a
+/// command as an instantaneous chassis speed.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProjectVehicleMotorConfig {
+    pub wheel_radius_m: f32,
+    pub gear_ratio: f32,
+    pub stall_torque_nm: f32,
+    pub no_load_rpm: f32,
+    pub brake_torque_nm: f32,
+    pub rolling_resistance_n: f32,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProjectVehicleColliderConfig {
+    pub geometry: ProjectSceneColliderGeometry,
+    pub offset: [f32; 3],
+    pub rotation: [f32; 3],
+}
+
+/// A resolved reviewed profile for one URDF link. The shapes remain local to
+/// that link so a future articulated physics runtime can consume this exact
+/// object without reinterpreting mesh or base coordinates.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProjectLinkCollisionProfile {
+    pub link_name: String,
+    pub reviewed_profile_path: PathBuf,
+    pub candidate_artifact_path: Option<PathBuf>,
+    pub colliders: Vec<ProjectVehicleColliderConfig>,
 }
 
 #[derive(Clone, Debug)]
@@ -302,6 +392,7 @@ struct LoadedRobotModel {
     model_profile: Option<ModelProfile>,
     urdf_path: PathBuf,
     harness: UrdfSceneHarness,
+    link_collision_profiles: Vec<ProjectLinkCollisionProfile>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -435,6 +526,20 @@ pub struct RobotVisualMesh {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct RobotVisualTransform {
+    pub translation: [f32; 3],
+    pub rotation_matrix: [[f32; 3]; 3],
+}
+
+/// A reviewed collider transformed into its current world pose for inspection
+/// and scene-graph evidence. It is not yet a live Rapier collider: arm-link
+/// articulation remains a subsequent physics-runtime integration.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RobotLinkCollider {
+    pub robot_id: String,
+    pub link_name: String,
+    pub reviewed_profile_path: PathBuf,
+    pub candidate_artifact_path: Option<PathBuf>,
+    pub geometry: ProjectSceneColliderGeometry,
     pub translation: [f32; 3],
     pub rotation_matrix: [[f32; 3]; 3],
 }
@@ -638,6 +743,284 @@ fn model_transformation(robot: &LoadedRobotModel) -> ModelTransformationConfig {
     robot.config.model.model_transformation.unwrap_or_default()
 }
 
+fn finite_collider_numbers(
+    collider: &serde_json::Value,
+    shape: &str,
+    name: &str,
+    count: usize,
+) -> Result<Vec<f32>, String> {
+    let values = collider
+        .get(name)
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| format!("reviewed {shape} collider has no '{name}' array"))?;
+    if values.len() != count {
+        return Err(format!(
+            "reviewed {shape} collider '{name}' must have {count} entries"
+        ));
+    }
+    values
+        .iter()
+        .map(|value| {
+            value
+                .as_f64()
+                .filter(|value| value.is_finite())
+                .map(|value| value as f32)
+                .ok_or_else(|| format!("reviewed {shape} collider '{name}' must be finite"))
+        })
+        .collect()
+}
+
+fn load_reviewed_link_colliders(
+    profile_path: &Path,
+) -> Result<Vec<ProjectVehicleColliderConfig>, Box<dyn Error>> {
+    let source = std::fs::read_to_string(profile_path).map_err(|error| {
+        format!(
+            "reviewed link collision profile '{}' could not be read: {error}",
+            profile_path.display()
+        )
+    })?;
+    let value: serde_json::Value = serde_json::from_str(&source).map_err(|error| {
+        format!(
+            "reviewed link collision profile '{}' is not valid JSON: {error}",
+            profile_path.display()
+        )
+    })?;
+    let colliders = value
+        .get("colliders")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            format!(
+                "reviewed link collision profile '{}' must be a PGE ReviewedCollisionProfile with a non-empty 'colliders' array; raw CollisionCandidates are not runtime-approved",
+                profile_path.display()
+            )
+        })?;
+    if colliders.is_empty() {
+        return Err(format!(
+            "reviewed link collision profile '{}' must contain at least one collider",
+            profile_path.display()
+        )
+        .into());
+    }
+
+    colliders
+        .iter()
+        .map(|collider| {
+            let shape = collider
+                .get("shape")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "reviewed collider has no string 'shape'".to_string())?;
+            let geometry = match shape {
+                "box" => {
+                    let size = finite_collider_numbers(collider, shape, "size", 3)?;
+                    if size.iter().any(|value| *value <= 0.0) {
+                        return Err("reviewed box collider size must be positive".to_string());
+                    }
+                    ProjectSceneColliderGeometry::Box {
+                        size: [size[0], size[1], size[2]],
+                    }
+                }
+                "sphere" => ProjectSceneColliderGeometry::Sphere {
+                    radius: collider
+                        .get("radius")
+                        .and_then(serde_json::Value::as_f64)
+                        .filter(|radius| radius.is_finite() && *radius > 0.0)
+                        .ok_or_else(|| {
+                            "reviewed sphere collider needs positive finite 'radius'".to_string()
+                        })? as f32,
+                },
+                "cylinder" => ProjectSceneColliderGeometry::Cylinder {
+                    radius: collider
+                        .get("radius")
+                        .and_then(serde_json::Value::as_f64)
+                        .filter(|radius| radius.is_finite() && *radius > 0.0)
+                        .ok_or_else(|| {
+                            "reviewed cylinder collider needs positive finite 'radius'".to_string()
+                        })? as f32,
+                    height: collider
+                        .get("height")
+                        .and_then(serde_json::Value::as_f64)
+                        .filter(|height| height.is_finite() && *height > 0.0)
+                        .ok_or_else(|| {
+                            "reviewed cylinder collider needs positive finite 'height'".to_string()
+                        })? as f32,
+                },
+                _ => {
+                    return Err(format!(
+                        "unsupported reviewed link collider shape '{shape}'"
+                    ));
+                }
+            };
+            let offset = finite_collider_numbers(collider, shape, "offset", 3)?;
+            let rotation = finite_collider_numbers(collider, shape, "rotation", 3)?;
+            Ok(ProjectVehicleColliderConfig {
+                geometry,
+                offset: [offset[0], offset[1], offset[2]],
+                rotation: [rotation[0], rotation[1], rotation[2]],
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()
+        .map_err(Into::into)
+}
+
+fn validate_pge_candidate_artifact(path: &Path) -> Result<(), Box<dyn Error>> {
+    let source = std::fs::read_to_string(path).map_err(|error| {
+        format!(
+            "PGE candidate artifact '{}' could not be read: {error}",
+            path.display()
+        )
+    })?;
+    let value: serde_json::Value = serde_json::from_str(&source).map_err(|error| {
+        format!(
+            "PGE candidate artifact '{}' is not valid JSON: {error}",
+            path.display()
+        )
+    })?;
+    let looks_like_candidates = value
+        .get("bounds")
+        .is_some_and(serde_json::Value::is_object)
+        && value
+            .get("primitives")
+            .is_some_and(serde_json::Value::is_array)
+        && value
+            .get("compounds")
+            .is_some_and(serde_json::Value::is_array)
+        && value
+            .get("convex_hull")
+            .is_some_and(serde_json::Value::is_object);
+    if !looks_like_candidates {
+        return Err(format!(
+            "PGE candidate artifact '{}' must be CollisionCandidates JSON with bounds, primitives, compounds, and convex_hull",
+            path.display()
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn load_link_collision_profiles(
+    project_base_dir: &Path,
+    robot: &ProjectRobotConfig,
+    harness: &UrdfSceneHarness,
+) -> Result<Vec<ProjectLinkCollisionProfile>, Box<dyn Error>> {
+    let Some(profile_reference) = robot
+        .physics
+        .as_ref()
+        .and_then(|physics| physics.link_collision_profile.as_ref())
+    else {
+        return Ok(Vec::new());
+    };
+    let ProjectLinkCollisionProfileReference::Path(profile_reference) = profile_reference else {
+        return Err(format!(
+            "robot '{}' physics.linkCollisionProfile must be a string path",
+            robot.id
+        )
+        .into());
+    };
+    if profile_reference.trim().is_empty() {
+        return Err(format!(
+            "robot '{}' linkCollisionProfile must be a non-empty path",
+            robot.id
+        )
+        .into());
+    }
+    let manifest_path = project_base_dir.join(profile_reference);
+    let source = std::fs::read_to_string(&manifest_path).map_err(|error| {
+        format!(
+            "robot '{}' linkCollisionProfile '{}' could not be read: {error}",
+            robot.id,
+            manifest_path.display()
+        )
+    })?;
+    let value: serde_json::Value = serde_json::from_str(&source).map_err(|error| {
+        format!(
+            "robot '{}' linkCollisionProfile '{}' is not valid JSON: {error}",
+            robot.id,
+            manifest_path.display()
+        )
+    })?;
+    if json_string_path(&value, &["format"]) != Some(ROBOT_DREAMS_LINK_COLLISION_PROFILE_FORMAT) {
+        return Err(format!(
+            "robot '{}' linkCollisionProfile '{}' must declare format '{}'",
+            robot.id,
+            manifest_path.display(),
+            ROBOT_DREAMS_LINK_COLLISION_PROFILE_FORMAT
+        )
+        .into());
+    }
+    let profile_robot = json_string_path(&value, &["robot"])
+        .ok_or_else(|| "link collision profile must provide string 'robot'".to_string())?;
+    if profile_robot != robot.id {
+        return Err(format!(
+            "link collision profile '{}' targets robot '{}' but was assigned to '{}'; use the exact project robot id",
+            manifest_path.display(),
+            profile_robot,
+            robot.id
+        )
+        .into());
+    }
+    let links = value
+        .get("links")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "link collision profile must provide array 'links'".to_string())?;
+    if links.is_empty() {
+        return Err("link collision profile must contain at least one link entry".into());
+    }
+
+    let profile_base_dir = path_base(&manifest_path);
+    let mut resolved = BTreeMap::new();
+    for entry in links {
+        let link_name = json_string_path(entry, &["link"])
+            .filter(|name| !name.trim().is_empty())
+            .ok_or_else(|| {
+                "link collision profile entry needs non-empty string 'link'".to_string()
+            })?;
+        if !harness.has_link(link_name) {
+            return Err(format!(
+                "link collision profile '{}' references unknown URDF link '{}' on robot '{}'",
+                manifest_path.display(),
+                link_name,
+                robot.id
+            )
+            .into());
+        }
+        let reviewed_reference = json_string_path(entry, &["reviewedProfile"])
+            .filter(|path| !path.trim().is_empty())
+            .ok_or_else(|| {
+                format!(
+                    "link collision profile entry '{}' needs non-empty string 'reviewedProfile'",
+                    link_name
+                )
+            })?;
+        let candidate_reference = json_string_path(entry, &["candidateArtifact"])
+            .filter(|path| !path.trim().is_empty())
+            .ok_or_else(|| {
+                format!(
+                    "link collision profile entry '{}' needs non-empty string 'candidateArtifact' for PGE provenance",
+                    link_name
+                )
+            })?;
+        let reviewed_profile_path = profile_base_dir.join(reviewed_reference);
+        let candidate_artifact_path = profile_base_dir.join(candidate_reference);
+        let colliders = load_reviewed_link_colliders(&reviewed_profile_path)?;
+        validate_pge_candidate_artifact(&candidate_artifact_path)?;
+        let loaded = ProjectLinkCollisionProfile {
+            link_name: link_name.to_string(),
+            reviewed_profile_path,
+            candidate_artifact_path: Some(candidate_artifact_path),
+            colliders,
+        };
+        if resolved.insert(link_name.to_string(), loaded).is_some() {
+            return Err(format!(
+                "link collision profile '{}' defines URDF link '{}' more than once",
+                manifest_path.display(),
+                link_name
+            )
+            .into());
+        }
+    }
+    Ok(resolved.into_values().collect())
+}
+
 fn loaded_robot_from_config(
     project_base_dir: &Path,
     robot: ProjectRobotConfig,
@@ -653,11 +1036,13 @@ fn loaded_robot_from_config(
 
     let urdf_path = project_base_dir.join(&robot.model.path);
     let harness = UrdfSceneHarness::from_urdf_path(&urdf_path)?;
+    let link_collision_profiles = load_link_collision_profiles(project_base_dir, &robot, &harness)?;
     let loaded = LoadedRobotModel {
         config: robot,
         model_profile,
         urdf_path,
         harness,
+        link_collision_profiles,
     };
     resolve_robot_frames(&loaded).map_err(|err| -> Box<dyn Error> { err.into() })?;
     Ok(loaded)
@@ -1195,6 +1580,42 @@ fn robot_visual_transforms(robot: &LoadedRobotModel) -> Vec<RobotVisualTransform
     transforms
 }
 
+fn robot_link_colliders(robot: &LoadedRobotModel) -> Vec<RobotLinkCollider> {
+    let base_transform = robot_base_transform(robot);
+    let model_transform = model_transform(robot);
+    let robot_transform = transform_then(base_transform, model_transform);
+    let link_poses = robot.harness.link_poses_world();
+    let mut resolved = Vec::new();
+
+    for profile in &robot.link_collision_profiles {
+        let Some(link_transform) =
+            robot_visual_link_transform(robot_transform, &link_poses, &profile.link_name)
+        else {
+            // Loading validates this link against the same URDF. This guard
+            // prevents malformed in-memory state from fabricating a collider.
+            continue;
+        };
+        for collider in &profile.colliders {
+            let local = (
+                f32_vec3_to_f64(collider.offset),
+                rpy_rotation(f32_vec3_to_f64(collider.rotation)),
+            );
+            let world = transform_then(link_transform, local);
+            resolved.push(RobotLinkCollider {
+                robot_id: robot.config.id.clone(),
+                link_name: profile.link_name.clone(),
+                reviewed_profile_path: profile.reviewed_profile_path.clone(),
+                candidate_artifact_path: profile.candidate_artifact_path.clone(),
+                geometry: collider.geometry.clone(),
+                translation: f64_vec3_to_f32(world.0),
+                rotation_matrix: f64_matrix_to_f32(world.1),
+            });
+        }
+    }
+
+    resolved
+}
+
 fn robot_state(robot: &LoadedRobotModel) -> RobotState {
     let link_poses = robot.harness.link_poses_world();
     let joints = robot
@@ -1524,6 +1945,13 @@ impl RobotDreamsModel {
             .collect()
     }
 
+    /// Current poses of shapes from versioned, reviewed per-link PGE profiles.
+    /// They are load/scene evidence only until an articulated physics runtime
+    /// instantiates them as live Rapier colliders.
+    pub fn robot_link_colliders(&self) -> Vec<RobotLinkCollider> {
+        self.robots.iter().flat_map(robot_link_colliders).collect()
+    }
+
     pub fn set_joint_angle(
         &mut self,
         name: impl AsRef<str>,
@@ -1566,6 +1994,29 @@ impl RobotDreamsModel {
         robot.config.base_translation[0] += dx as f32;
         robot.config.base_translation[1] += dy as f32;
         robot.config.base_rotation[2] += dyaw as f32;
+        true
+    }
+
+    /// Reconciles the rendered/kinematic robot tree with an externally solved
+    /// base pose. Dynamic vehicle simulation owns this pose; all links, TCPs,
+    /// mounted cameras, and frame queries then inherit it through the normal
+    /// model transform path.
+    pub fn set_robot_base_pose(
+        &mut self,
+        robot_id_or_name: &str,
+        translation: [f32; 3],
+        rotation: [f32; 3],
+    ) -> bool {
+        let Some(robot) = self.robots.iter_mut().find(|robot| {
+            matches_query(
+                robot_id_or_name,
+                &string_candidates(&[&robot.config.id, &robot.config.name]),
+            )
+        }) else {
+            return false;
+        };
+        robot.config.base_translation = translation;
+        robot.config.base_rotation = rotation;
         true
     }
 }
@@ -1858,6 +2309,7 @@ fn parse_model_profile_robot_config(
             .or_else(|| json_vec3_path(robot, &["base", "position"]))
             .unwrap_or([0.0, 0.0, 0.0]),
         base_rotation: json_vec3_path(robot, &["base", "rotation"]).unwrap_or([0.0, 0.0, 0.0]),
+        physics: parse_project_robot_physics_config(robot),
     })
 }
 
@@ -1891,6 +2343,8 @@ fn parse_project_config(
         manifest_path,
         base_dir,
         model_profile_path: json_string_path(value, &["modelProfile"]).map(str::to_string),
+        calibration_record_path: json_string_path(value, &["calibrationRecord"])
+            .map(str::to_string),
         scene: parse_project_scene_config(value),
         robots,
         hardware: parse_hardware_config(value),
@@ -2334,6 +2788,14 @@ fn parse_project_scene_object_config(
             .unwrap_or([0.0, 0.0, 0.0]),
         scale: json_vec3_path(value, &["scale"])
             .or_else(|| json_vec3_path(value, &["transform", "scale"])),
+        visual_transform: value.get("visualTransform").map(|transform| {
+            ProjectSceneVisualTransform {
+                translation: json_vec3_path(transform, &["translation"])
+                    .or_else(|| json_vec3_path(transform, &["position"]))
+                    .unwrap_or([0.0; 3]),
+                rotation: json_vec3_path(transform, &["rotation"]).unwrap_or([0.0; 3]),
+            }
+        }),
         include_in_fit: json_bool_path(value, &["includeInFit"])
             .or_else(|| json_bool_path(value, &["fit"]))
             .unwrap_or(true),
@@ -2871,6 +3333,108 @@ fn parse_project_robot_config(value: &serde_json::Value) -> Option<ProjectRobotC
             .or_else(|| json_vec3_path(value, &["base", "position"]))
             .unwrap_or([0.0, 0.0, 0.0]),
         base_rotation: json_vec3_path(value, &["base", "rotation"]).unwrap_or([0.0, 0.0, 0.0]),
+        physics: parse_project_robot_physics_config(value),
+    })
+}
+
+fn parse_project_robot_physics_config(
+    value: &serde_json::Value,
+) -> Option<ProjectRobotPhysicsConfig> {
+    let physics = value.get("physics")?;
+    Some(ProjectRobotPhysicsConfig {
+        vehicle: parse_project_vehicle_physics_config(physics),
+        link_collision_profile: physics.get("linkCollisionProfile").map(|value| {
+            match value.as_str() {
+                Some(path) => ProjectLinkCollisionProfileReference::Path(path.to_string()),
+                None => ProjectLinkCollisionProfileReference::InvalidType,
+            }
+        }),
+    })
+}
+
+fn parse_project_vehicle_physics_config(
+    physics: &serde_json::Value,
+) -> Option<ProjectVehiclePhysicsConfig> {
+    let vehicle = physics.get("vehicle")?;
+    if json_string_path(vehicle, &["mode"]).is_some_and(|mode| mode != "dynamic") {
+        return None;
+    }
+    let colliders = vehicle
+        .get("colliders")
+        .and_then(|colliders| colliders.as_array())
+        .map(|colliders| {
+            colliders
+                .iter()
+                .filter_map(parse_project_vehicle_collider_config)
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(ProjectVehiclePhysicsConfig {
+        mass_kg: json_f32_path(vehicle, &["massKg"])
+            .unwrap_or(8.0)
+            .max(0.001),
+        center_of_mass_m: json_vec3_path(vehicle, &["centerOfMass"]).unwrap_or([0.0, 0.0, 0.0]),
+        linear_damping: json_f32_path(vehicle, &["linearDamping"])
+            .unwrap_or(0.25)
+            .max(0.0),
+        angular_damping: json_f32_path(vehicle, &["angularDamping"])
+            .unwrap_or(1.0)
+            .max(0.0),
+        wheelbase_m: json_f32_path(vehicle, &["wheelbaseM"])
+            .unwrap_or(0.22)
+            .max(0.001),
+        track_width_m: json_f32_path(vehicle, &["trackWidthM"])
+            .unwrap_or(0.18)
+            .max(0.001),
+        max_wheel_speed_mps: json_f32_path(vehicle, &["maxWheelSpeedMps"])
+            .unwrap_or(0.4)
+            .max(0.001),
+        max_drive_force_n: json_f32_path(vehicle, &["maxDriveForceN"])
+            .unwrap_or(18.0)
+            .max(0.0),
+        lateral_grip_n_per_mps: json_f32_path(vehicle, &["lateralGripNPerMps"])
+            .unwrap_or(45.0)
+            .max(0.0),
+        steering_response_deg_per_sec: json_f32_path(vehicle, &["steeringResponseDegPerSec"])
+            .unwrap_or(240.0)
+            .max(0.0),
+        motor: parse_project_vehicle_motor_config(vehicle),
+        colliders,
+        collision_profile: json_string_path(vehicle, &["collisionProfile"]).map(str::to_string),
+    })
+}
+
+fn parse_project_vehicle_motor_config(vehicle: &serde_json::Value) -> ProjectVehicleMotorConfig {
+    let motor = vehicle.get("motor").unwrap_or(vehicle);
+    ProjectVehicleMotorConfig {
+        wheel_radius_m: json_f32_path(motor, &["wheelRadiusM"])
+            .unwrap_or(0.04)
+            .max(0.001),
+        gear_ratio: json_f32_path(motor, &["gearRatio"])
+            .unwrap_or(1.0)
+            .max(0.001),
+        stall_torque_nm: json_f32_path(motor, &["stallTorqueNm"])
+            .unwrap_or(0.45)
+            .max(0.0),
+        no_load_rpm: json_f32_path(motor, &["noLoadRpm"])
+            .unwrap_or(120.0)
+            .max(0.001),
+        brake_torque_nm: json_f32_path(motor, &["brakeTorqueNm"])
+            .unwrap_or(0.25)
+            .max(0.0),
+        rolling_resistance_n: json_f32_path(motor, &["rollingResistanceN"])
+            .unwrap_or(0.4)
+            .max(0.0),
+    }
+}
+
+fn parse_project_vehicle_collider_config(
+    value: &serde_json::Value,
+) -> Option<ProjectVehicleColliderConfig> {
+    Some(ProjectVehicleColliderConfig {
+        geometry: parse_project_scene_collider_geometry(value)?,
+        offset: json_vec3_path(value, &["offset"]).unwrap_or([0.0; 3]),
+        rotation: json_vec3_path(value, &["rotation"]).unwrap_or([0.0; 3]),
     })
 }
 
@@ -2975,6 +3539,7 @@ mod tests {
             joint_names: joint_names.clone(),
             base_translation: [0.1, -0.2, 0.3],
             base_rotation: [0.1, -0.2, 0.3],
+            physics: None,
         };
         let profile = ModelProfile {
             format: ROBOT_DREAMS_MODEL_FORMAT.to_string(),
@@ -3005,6 +3570,7 @@ mod tests {
                 model_profile: Some(profile),
                 urdf_path: PathBuf::from("representative-large.urdf"),
                 harness: UrdfSceneHarness::new(urdf),
+                link_collision_profiles: Vec::new(),
             }],
         }
     }
@@ -3114,6 +3680,56 @@ mod tests {
         );
     }
 
+    fn write_link_collision_artifacts(project_path: &Path, link_name: &str) {
+        let dir = project_path.parent().expect("temp project parent");
+        std::fs::write(
+            dir.join("gripper.candidates.json"),
+            serde_json::json!({
+                "bounds": {"center": [0.0, 0.0, 0.0], "size": [0.04, 0.02, 0.01]},
+                "primitives": [],
+                "compounds": [],
+                "convex_hull": {"points": []}
+            })
+            .to_string(),
+        )
+        .expect("write PGE candidate artifact");
+        std::fs::write(
+            dir.join("gripper.reviewed.json"),
+            serde_json::json!({
+                "colliders": [
+                    {
+                        "shape": "box",
+                        "size": [0.04, 0.02, 0.01],
+                        "offset": [0.01, 0.0, 0.0],
+                        "rotation": [0.0, 0.0, 0.0]
+                    },
+                    {
+                        "shape": "sphere",
+                        "radius": 0.01,
+                        "offset": [-0.01, 0.0, 0.0],
+                        "rotation": [0.0, 0.0, 0.0]
+                    }
+                ]
+            })
+            .to_string(),
+        )
+        .expect("write reviewed PGE profile");
+        std::fs::write(
+            dir.join("link-collisions.json"),
+            serde_json::json!({
+                "format": ROBOT_DREAMS_LINK_COLLISION_PROFILE_FORMAT,
+                "robot": "puppyarm",
+                "links": [{
+                    "link": link_name,
+                    "candidateArtifact": "gripper.candidates.json",
+                    "reviewedProfile": "gripper.reviewed.json"
+                }]
+            })
+            .to_string(),
+        )
+        .expect("write link collision profile");
+    }
+
     fn distance(left: [f64; 3], right: [f64; 3]) -> f64 {
         let dx = left[0] - right[0];
         let dy = left[1] - right[1];
@@ -3135,6 +3751,7 @@ mod tests {
             joint_names: HashMap::new(),
             base_translation: [0.0, 0.0, 0.0],
             base_rotation: [0.0, 0.0, 0.0],
+            physics: None,
         }
     }
 
@@ -3397,6 +4014,126 @@ mod tests {
         let wrist = model.named("wrist joint").expect("profile wrist joint");
         assert_eq!(wrist.kind, ModelEntityKind::Joint);
         assert_eq!(wrist.urdf_name.as_deref(), Some("revolute_1_1"));
+
+        let _ = std::fs::remove_dir_all(project_path.parent().expect("temp project parent"));
+    }
+
+    #[test]
+    fn reviewed_per_link_profiles_bind_pge_artifacts_to_urdf_link_poses() {
+        let project_path = write_temp_project(
+            "reviewed-link-collisions",
+            serde_json::json!({
+                "format": ROBOT_DREAMS_PROJECT_FORMAT,
+                "name": "Reviewed Link Collisions",
+                "robots": [{
+                    "id": "puppyarm",
+                    "name": "PuppyArm",
+                    "model": {"type": "urdf", "path": puppyarm_urdf_path()},
+                    "physics": {"linkCollisionProfile": "link-collisions.json"}
+                }]
+            }),
+        );
+        write_link_collision_artifacts(&project_path, "part_1_4");
+
+        let model = RobotDreamsModel::open(&project_path).expect("load reviewed link profile");
+        let colliders = model.robot_link_colliders();
+        assert_eq!(colliders.len(), 2);
+        assert!(
+            colliders
+                .iter()
+                .all(|collider| collider.robot_id == "puppyarm")
+        );
+        assert!(
+            colliders
+                .iter()
+                .all(|collider| collider.link_name == "part_1_4")
+        );
+        assert!(
+            colliders
+                .iter()
+                .all(|collider| collider.candidate_artifact_path.is_some())
+        );
+        assert!(matches!(
+            colliders[0].geometry,
+            ProjectSceneColliderGeometry::Box {
+                size: [0.04, 0.02, 0.01]
+            }
+        ));
+        assert!(
+            colliders[0]
+                .translation
+                .iter()
+                .all(|value| value.is_finite())
+        );
+        assert!(
+            colliders[0]
+                .reviewed_profile_path
+                .ends_with("gripper.reviewed.json")
+        );
+
+        let _ = std::fs::remove_dir_all(project_path.parent().expect("temp project parent"));
+    }
+
+    #[test]
+    fn reviewed_per_link_profiles_reject_unknown_links_and_unreviewed_candidates() {
+        let project_path = write_temp_project(
+            "invalid-link-collisions",
+            serde_json::json!({
+                "format": ROBOT_DREAMS_PROJECT_FORMAT,
+                "name": "Invalid Link Collisions",
+                "robots": [{
+                    "id": "puppyarm",
+                    "name": "PuppyArm",
+                    "model": {"type": "urdf", "path": puppyarm_urdf_path()},
+                    "physics": {"linkCollisionProfile": "link-collisions.json"}
+                }]
+            }),
+        );
+        write_link_collision_artifacts(&project_path, "missing_gripper_link");
+        let error = RobotDreamsModel::open(&project_path).expect_err("reject unknown URDF link");
+        assert!(
+            error
+                .to_string()
+                .contains("unknown URDF link 'missing_gripper_link'")
+        );
+
+        write_link_collision_artifacts(&project_path, "part_1_4");
+        std::fs::write(
+            project_path
+                .parent()
+                .expect("temp project parent")
+                .join("gripper.reviewed.json"),
+            serde_json::json!({
+                "bounds": {"center": [0.0, 0.0, 0.0], "size": [0.04, 0.02, 0.01]},
+                "primitives": [],
+                "compounds": [],
+                "convex_hull": {"points": []}
+            })
+            .to_string(),
+        )
+        .expect("replace profile with unreviewed candidates");
+        let error = RobotDreamsModel::open(&project_path)
+            .expect_err("reject raw candidate artifact as reviewed profile");
+        assert!(
+            error
+                .to_string()
+                .contains("raw CollisionCandidates are not runtime-approved")
+        );
+
+        let mut malformed_project = read_json_file(&project_path).expect("read temp project");
+        malformed_project["robots"][0]["physics"]["linkCollisionProfile"] = serde_json::json!(true);
+        std::fs::write(
+            &project_path,
+            serde_json::to_string_pretty(&malformed_project).expect("serialize malformed project"),
+        )
+        .expect("write malformed project");
+        let error = RobotDreamsModel::open(&project_path)
+            .expect_err("reject non-string link collision reference");
+        assert!(
+            error
+                .to_string()
+                .contains("physics.linkCollisionProfile must be a string path")
+        );
 
         let _ = std::fs::remove_dir_all(project_path.parent().expect("temp project parent"));
     }

@@ -114,6 +114,10 @@ pub struct SceneNode {
     pub kind: SceneNodeKind,
     #[serde(default = "default_include_in_fit")]
     pub include_in_fit: bool,
+    /// Whether this render node should become a collider when exported to a
+    /// PGE world. Visual debug helpers must remain out of the physics scene.
+    #[serde(default = "default_include_in_physics")]
+    pub include_in_physics: bool,
     pub children: Vec<SceneNode>,
 }
 
@@ -125,6 +129,7 @@ impl SceneNode {
             transform: Transform::default(),
             kind: SceneNodeKind::Group,
             include_in_fit: true,
+            include_in_physics: true,
             children: Vec::new(),
         }
     }
@@ -142,6 +147,7 @@ impl SceneNode {
             transform,
             kind: SceneNodeKind::Mesh { geometry, material },
             include_in_fit: true,
+            include_in_physics: true,
             children: Vec::new(),
         }
     }
@@ -153,6 +159,7 @@ impl SceneNode {
             transform: camera.transform,
             kind: SceneNodeKind::Camera(camera),
             include_in_fit: true,
+            include_in_physics: true,
             children: Vec::new(),
         }
     }
@@ -164,12 +171,17 @@ impl SceneNode {
             transform: light.transform,
             kind: SceneNodeKind::Light(light),
             include_in_fit: true,
+            include_in_physics: true,
             children: Vec::new(),
         }
     }
 }
 
 fn default_include_in_fit() -> bool {
+    true
+}
+
+fn default_include_in_physics() -> bool {
     true
 }
 
