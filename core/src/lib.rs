@@ -1342,17 +1342,29 @@ impl RobotDreams {
         scene_graph_to_world_state(&self.scene_graph())
     }
 
-    /// Exports every current Rapier scene collider and every reviewed
-    /// per-link profile as PGE's renderer-owned debug metadata.  The
-    /// diagnostics are intentionally not scene nodes, physics bodies, or
-    /// camera-fit inputs.  Reviewed profiles remain distinct from their raw
-    /// PGE candidate artifacts: only the approved profile shapes appear.
+    /// Exports the current Rapier colliders as PGE's renderer-owned debug
+    /// metadata. The diagnostics are intentionally not scene nodes, physics
+    /// bodies, or camera-fit inputs.
+    ///
+    /// A reviewed link profile is included only while it is *not* represented
+    /// by an active kinematic Rapier body. Once live, the Rapier entry is the
+    /// sole authoritative wireframe: drawing both would make one physical
+    /// shape look like two competing collision envelopes.
     pub fn pge_collider_debug_overlay(&self) -> pge::ColliderDebugOverlay {
+        let live_entries = self.scene_physics.collider_debug_entries();
+        let live_link_ids = live_entries
+            .iter()
+            .filter(|entry| entry.category == "kinematicRobotLinkCollider")
+            .map(|entry| entry.id.clone())
+            .collect::<BTreeSet<_>>();
         let mut overlay = pge::ColliderDebugOverlay {
             enabled: true,
-            wireframes: self
-                .scene_physics
-                .collider_debug_entries()
+            // RobotDreams supplies Rapier's actual scene, vehicle, and live
+            // link shapes below. Rendering PGE's node-derived mesh bounds as
+            // well would create a second, often visually transformed,
+            // collider for the same object.
+            include_native_node_colliders: false,
+            wireframes: live_entries
                 .into_iter()
                 .map(pge_wireframe_from_live_physics)
                 .collect(),
@@ -1362,6 +1374,13 @@ impl RobotDreams {
             return overlay;
         };
         for (index, collider) in model.robot_link_colliders().into_iter().enumerate() {
+            let live_id = format!(
+                "kinematic-link:{}:{}:{index}",
+                collider.robot_id, collider.link_name
+            );
+            if live_link_ids.contains(&live_id) {
+                continue;
+            }
             let mut wireframe = pge::ColliderWireframe::new(
                 format!(
                     "reviewed-link:{}:{}:{index}",
@@ -3933,7 +3952,7 @@ mod robotdreams_tests {
         )
         .expect("write link profile");
 
-        let dreams = RobotDreams::open(&project_path).expect("open collision-profile project");
+        let mut dreams = RobotDreams::open(&project_path).expect("open collision-profile project");
         let scene = dreams.scene_graph();
         let entity = scene
             .entities
@@ -4011,6 +4030,11 @@ mod robotdreams_tests {
         let mut frame_options = RobotDreamsPgeFrameOptions::default();
         frame_options.debug_collision_overlay = true;
         let frame = robotdreams_pge_frame(&dreams, frame_options);
+        assert!(frame.world.collider_debug.enabled);
+        assert!(
+            !frame.world.collider_debug.include_native_node_colliders,
+            "a live RobotDreams physics overlay must suppress node-derived mesh bounds"
+        );
         assert!(frame.world.nodes.iter().all(|(_, node)| {
             !node.entity.0.starts_with("debug:puppyarm:collider:") || node.collider.is_none()
         }));
@@ -4030,6 +4054,49 @@ mod robotdreams_tests {
                 .iter()
                 .all(|wireframe| !wireframe.id.contains("candidate"))
         );
+
+        assert_eq!(
+            dreams
+                .enable_robot_link_collision_profiles("puppyarm", &["part_1_4"])
+                .expect("make reviewed profile live"),
+            3
+        );
+        let live_overlay = dreams.pge_collider_debug_overlay();
+        let live_links = live_overlay
+            .wireframes
+            .iter()
+            .filter(|wireframe| wireframe.category == "kinematicRobotLinkCollider")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            live_links.len(),
+            3,
+            "each reviewed shape must have exactly one live Rapier diagnostic"
+        );
+        assert!(live_links.iter().all(|wireframe| {
+            wireframe.id.starts_with("kinematic-link:puppyarm:part_1_4:")
+                && wireframe.color == [1.0, 0.28, 0.78, 1.0]
+        }));
+        assert!(
+            !live_overlay
+                .wireframes
+                .iter()
+                .any(|wireframe| wireframe.category == "reviewedLinkProfile"),
+            "an active Rapier link collider must replace, not duplicate, its reviewed profile"
+        );
+        let mut live_frame_options = RobotDreamsPgeFrameOptions::default();
+        live_frame_options.debug_collision_overlay = true;
+        let live_frame = robotdreams_pge_frame(&dreams, live_frame_options);
+        let rendered_live_links = live_frame
+            .world
+            .collider_wireframes()
+            .into_iter()
+            .filter(|wireframe| wireframe.category == "kinematicRobotLinkCollider")
+            .count();
+        assert_eq!(rendered_live_links, 3);
+        assert!(live_frame.world.collider_wireframes().iter().all(|wireframe| {
+            wireframe.category != "reviewedLinkProfile"
+                && !wireframe.id.starts_with("pge.scene-collider:")
+        }));
 
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -4420,6 +4487,23 @@ mod robotdreams_tests {
                     && wireframe.category == "sceneStaticCollider"),
             "static Rapier colliders must be exported too"
         );
+        let mut frame_options = RobotDreamsPgeFrameOptions::default();
+        frame_options.debug_collision_overlay = true;
+        let frame = robotdreams_pge_frame(&dreams, frame_options);
+        let rendered_ball_colliders = frame
+            .world
+            .collider_wireframes()
+            .into_iter()
+            .filter(|wireframe| wireframe.id == "scene-object:ball")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            rendered_ball_colliders.len(),
+            1,
+            "the dynamic object must expose its live Rapier collider exactly once"
+        );
+        assert!(frame.world.collider_wireframes().iter().all(|wireframe| {
+            !wireframe.id.starts_with("pge.scene-collider:")
+        }));
 
         let _ = std::fs::remove_dir_all(project_path.parent().unwrap());
     }
