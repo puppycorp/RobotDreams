@@ -436,6 +436,18 @@ fn speed(velocity: [f32; 3]) -> f32 {
         .sqrt()
 }
 
+fn geometry_bounding_radius(geometry: &ProjectSceneColliderGeometry) -> f32 {
+    match geometry {
+        ProjectSceneColliderGeometry::Box { size } => {
+            0.5 * (size[0] * size[0] + size[1] * size[1] + size[2] * size[2]).sqrt()
+        }
+        ProjectSceneColliderGeometry::Sphere { radius } => *radius,
+        ProjectSceneColliderGeometry::Cylinder { radius, height } => {
+            (radius * radius + 0.25 * height * height).sqrt()
+        }
+    }
+}
+
 /// Returns whether the physics-updated center of an object is in an AABB trigger.
 ///
 /// Triggers intentionally use center containment rather than requiring a whole
@@ -795,6 +807,22 @@ impl ScenePhysicsRuntime {
             .values()
             .map(|object| object.state.clone())
             .collect()
+    }
+
+    pub(crate) fn robot_link_collider_spawn_is_clear(
+        &self,
+        object_id: &str,
+        collider: &RobotLinkCollider,
+    ) -> bool {
+        const SPAWN_CLEARANCE_M: f32 = 0.002;
+        let Some(object) = self.objects.get(object_id) else {
+            return false;
+        };
+        let object_radius = geometry_bounding_radius(&object.collider.geometry)
+            + vec3(object.collider.offset).norm();
+        let link_radius = geometry_bounding_radius(&collider.geometry);
+        let distance = (vec3(collider.translation) - vec3(object.state.position)).norm();
+        distance > object_radius + link_radius + SPAWN_CLEARANCE_M
     }
 
     pub(crate) fn trigger_state(&self, id: &str) -> Option<&SceneTriggerState> {

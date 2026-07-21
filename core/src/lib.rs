@@ -108,6 +108,7 @@ pub struct RobotDreams {
     virtual_buses: Vec<VirtualBusRuntime>,
     rover_drives: Vec<RoverDriveRuntime>,
     articulated_collision_links: BTreeMap<String, BTreeSet<String>>,
+    articulated_collision_shapes: BTreeMap<String, BTreeSet<usize>>,
     clock_sec: f64,
     dt: f32,
 }
@@ -628,6 +629,7 @@ impl RobotDreams {
             virtual_buses: Vec::new(),
             rover_drives: Vec::new(),
             articulated_collision_links: BTreeMap::new(),
+            articulated_collision_shapes: BTreeMap::new(),
             clock_sec: 0.0,
             dt: 1.0 / 200.0,
         }
@@ -879,11 +881,17 @@ impl RobotDreams {
             .unwrap_or_default();
         let colliders = colliders
             .into_iter()
-            .filter(|collider| {
+            .enumerate()
+            .filter(|(shape_index, collider)| {
                 self.articulated_collision_links
                     .get(&collider.robot_id)
                     .is_some_and(|links| links.contains(&collider.link_name))
+                    || self
+                        .articulated_collision_shapes
+                        .get(&collider.robot_id)
+                        .is_some_and(|shapes| shapes.contains(shape_index))
             })
+            .map(|(_, collider)| collider)
             .collect();
         self.scene_physics.sync_robot_link_colliders(colliders);
     }
@@ -1028,6 +1036,72 @@ impl RobotDreams {
         let link_refs = links.iter().map(String::as_str).collect::<Vec<_>>();
         self.enable_robot_link_collision_profiles(robot_id, &link_refs)?;
         Ok(links)
+    }
+
+    /// Makes the nearest reviewed shapes live only when they are separated
+    /// from the object at creation time. This avoids creating a kinematic
+    /// Rapier body in penetration, which otherwise causes a false startup
+    /// impulse before the user moves the arm.
+    pub fn enable_nearest_robot_link_collision_shapes_for_links(
+        &mut self,
+        robot_id: &str,
+        object_id: &str,
+        maximum_shapes: usize,
+        allowed_links: &[&str],
+    ) -> Result<Vec<String>, Box<dyn Error>> {
+        if maximum_shapes == 0 || allowed_links.is_empty() {
+            return Err("at least one allowed reviewed robot shape is required".into());
+        }
+        let allowed = allowed_links.iter().copied().collect::<BTreeSet<_>>();
+        let object = self
+            .scene_object_state(object_id)
+            .ok_or_else(|| format!("scene object '{object_id}' has no physics body"))?;
+        let mut nearest = self
+            .model
+            .as_ref()
+            .map(RobotDreamsModel::robot_link_colliders)
+            .unwrap_or_default()
+            .into_iter()
+            .enumerate()
+            .filter(|(_, collider)| {
+                collider.robot_id == robot_id
+                    && allowed.contains(collider.link_name.as_str())
+                    && self
+                        .scene_physics
+                        .robot_link_collider_spawn_is_clear(object_id, collider)
+            })
+            .map(|(shape_index, collider)| {
+                let distance_squared = collider
+                    .translation
+                    .into_iter()
+                    .zip(object.position)
+                    .map(|(link, object)| (link - object).powi(2))
+                    .sum::<f32>();
+                (distance_squared, shape_index, collider.link_name)
+            })
+            .collect::<Vec<_>>();
+        nearest.sort_by(|left, right| {
+            left.0
+                .total_cmp(&right.0)
+                .then_with(|| left.1.cmp(&right.1))
+        });
+        let selected = nearest.into_iter().take(maximum_shapes).collect::<Vec<_>>();
+        if selected.is_empty() {
+            return Err(format!("robot '{robot_id}' has no clear reviewed arm shapes").into());
+        }
+        let enabled = self
+            .articulated_collision_shapes
+            .entry(robot_id.to_string())
+            .or_default();
+        let ids = selected
+            .into_iter()
+            .map(|(_, shape_index, link_name)| {
+                enabled.insert(shape_index);
+                format!("{shape_index}:{link_name}")
+            })
+            .collect::<Vec<_>>();
+        self.sync_robot_link_colliders();
+        Ok(ids)
     }
 
     pub fn advance_seconds(&mut self, dt: f32) {
@@ -3336,6 +3410,17 @@ mod robotdreams_tests {
         }
     }
 
+    fn feetech_write_frame(id: u8, address: u8, data: &[u8]) -> Vec<u8> {
+        let length = u8::try_from(data.len() + 3).expect("Feetech write length");
+        let mut frame = vec![0xff, 0xff, id, length, 0x03, address];
+        frame.extend_from_slice(data);
+        let checksum = !frame[2..]
+            .iter()
+            .fold(0u8, |sum, byte| sum.wrapping_add(*byte));
+        frame.push(checksum);
+        frame
+    }
+
     #[test]
     fn opens_project_and_reads_scene_state() {
         let dreams = RobotDreams::open(puppyarm_project_path()).expect("open PuppyArm project");
@@ -4263,6 +4348,52 @@ mod robotdreams_tests {
         assert!(
             distance(start_tcp, moved_tcp) > 1.0e-3,
             "TCP should move when virtual servo updates the model"
+        );
+    }
+
+    #[test]
+    fn virtual_servo_wheel_speed_packet_updates_puppybot_yaw() {
+        let mut dreams = RobotDreams::open(puppybot_project_path()).expect("open PuppyBot project");
+        assert!(dreams.set_virtual_servo_target("main_bus", 1, 1583));
+        dreams.advance_seconds(4.0);
+        let initial_yaw = dreams
+            .robot_state("puppybot")
+            .expect("PuppyBot state")
+            .joints["yaw"]
+            .position_rad;
+
+        // This is exactly PuppyBot's `StServo::set_mode(Wheel)` packet,
+        // followed by `write_wheel_speed(-1000, 0)`: write from register
+        // 0x29 through the target-speed word at 0x2e.
+        assert!(
+            dreams
+                .handle_virtual_bus_frame("main_bus", &feetech_write_frame(1, 0x21, &[1]))
+                .expect("wheel-mode response")
+                .is_some()
+        );
+        assert!(
+            dreams
+                .handle_virtual_bus_frame(
+                    "main_bus",
+                    &feetech_write_frame(1, 0x29, &[0, 0, 0, 0, 0, 0xe8, 0x83]),
+                )
+                .expect("wheel-speed response")
+                .is_some()
+        );
+        dreams.advance_seconds(0.2);
+
+        let snapshot = dreams.snapshot();
+        let servo = snapshot.servo_snapshots[0]
+            .snapshots
+            .iter()
+            .find(|servo| servo.id == 1)
+            .expect("yaw servo snapshot");
+        let moved_yaw = snapshot.robots[0].joints["yaw"].position_rad;
+        assert_eq!(servo.mode, 1);
+        assert!(servo.present_speed < 0, "wheel command must move negative");
+        assert!(
+            moved_yaw < initial_yaw - 1.0e-3,
+            "PuppyBot yaw must follow virtual wheel speed: start={initial_yaw}, end={moved_yaw}"
         );
     }
 
