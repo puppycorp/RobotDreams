@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::error::Error;
 
 use pge_core as pge;
+use pge_physics::rapier3d::na::Matrix3;
 use pge_physics::rapier3d::prelude::*;
 
 use crate::calibration::{
@@ -370,48 +371,92 @@ fn scene_collider_builder(
     part: &crate::project::ProjectSceneColliderChildConfig,
 ) -> ColliderBuilder {
     collider_builder(&part.geometry)
-        .translation(vec3(part.offset))
-        .rotation(Vector::new(part.rotation[0], part.rotation[1], part.rotation[2]))
+        .position(Isometry::from_parts(
+            Translation::from(vec3(part.offset)),
+            Rotation::from_euler_angles(part.rotation[0], part.rotation[1], part.rotation[2]),
+        ))
 }
 
-fn collider_shape(geometry: &ProjectSceneColliderGeometry) -> SharedShape {
+fn scene_collider_volume(geometry: &ProjectSceneColliderGeometry) -> f32 {
     match geometry {
-        ProjectSceneColliderGeometry::Box { size } => {
-            SharedShape::cuboid(size[0] * 0.5, size[1] * 0.5, size[2] * 0.5)
+        ProjectSceneColliderGeometry::Box { size } => size[0] * size[1] * size[2],
+        ProjectSceneColliderGeometry::Sphere { radius } => {
+            4.0 * std::f32::consts::PI * radius.powi(3) / 3.0
         }
-        ProjectSceneColliderGeometry::Sphere { radius } => SharedShape::ball(*radius),
         ProjectSceneColliderGeometry::Cylinder { radius, height } => {
-            SharedShape::cylinder(height * 0.5, *radius)
+            std::f32::consts::PI * radius.powi(2) * height
         }
     }
+}
+
+fn scene_collider_inertia(
+    geometry: &ProjectSceneColliderGeometry,
+    mass_kg: f32,
+) -> Matrix3<Real> {
+    let diagonal = match geometry {
+        ProjectSceneColliderGeometry::Box { size } => Vector::new(
+            mass_kg * (size[1].powi(2) + size[2].powi(2)) / 12.0,
+            mass_kg * (size[0].powi(2) + size[2].powi(2)) / 12.0,
+            mass_kg * (size[0].powi(2) + size[1].powi(2)) / 12.0,
+        ),
+        ProjectSceneColliderGeometry::Sphere { radius } => {
+            Vector::repeat(2.0 * mass_kg * radius.powi(2) / 5.0)
+        }
+        // Rapier cylinders, like PGE's collider wireframes, have their
+        // height on local Y. Preserve that convention in the inertia tensor.
+        ProjectSceneColliderGeometry::Cylinder { radius, height } => {
+            let transverse = mass_kg * (3.0 * radius.powi(2) + height.powi(2)) / 12.0;
+            Vector::new(transverse, mass_kg * radius.powi(2) / 2.0, transverse)
+        }
+    };
+    Matrix3::from_diagonal(&diagonal)
 }
 
 fn scene_object_mass_properties(config: &ProjectSceneObjectPhysicsConfig) -> MassProperties {
-    let shapes = config
-        .collider
-        .parts()
-        .into_iter()
+    let parts = config.collider.parts();
+    let total_volume = parts
+        .iter()
+        .map(|part| scene_collider_volume(&part.geometry))
+        .sum::<f32>()
+        .max(0.000_001);
+    let mass_kg = config.mass_kg.max(0.000_001);
+    let parts_with_mass = parts
+        .iter()
         .map(|part| {
-            (
-                Isometry::from_parts(
-                    Translation::from(vec3(part.offset)),
-                    Rotation::from_euler_angles(part.rotation[0], part.rotation[1], part.rotation[2]),
-                ),
-                collider_shape(&part.geometry),
-            )
+            let mass = mass_kg * scene_collider_volume(&part.geometry) / total_volume;
+            (part, mass)
         })
         .collect::<Vec<_>>();
-    let mut mass_properties = MassProperties::from_compound(1.0, &shapes);
-    let mass_kg = config.mass_kg.max(0.000_001);
-    mass_properties.set_mass(mass_kg, true);
-    if let Some(center_of_mass) = config.center_of_mass {
-        mass_properties = MassProperties::new(
-            Point::from(vec3(center_of_mass)),
-            mass_kg,
-            mass_properties.principal_inertia(),
-        );
-    }
-    mass_properties
+    let derived_center_of_mass = parts_with_mass.iter().fold(Vector::zeros(), |sum, (part, mass)| {
+        sum + vec3(part.offset) * *mass
+    }) / mass_kg;
+    let center_of_mass = config
+        .center_of_mass
+        .map(vec3)
+        .unwrap_or(derived_center_of_mass);
+
+    // Colliders have zero density because this is the sole source of the
+    // dynamic body's mass. Assemble the primitive tensor directly so the
+    // offset and rotation of every part remain in the object's coordinate
+    // frame, then apply the parallel-axis theorem at the authored COM.
+    let inertia = parts_with_mass.iter().fold(Matrix3::zeros(), |sum, (part, mass)| {
+        let rotation = Rotation::from_euler_angles(
+            part.rotation[0],
+            part.rotation[1],
+            part.rotation[2],
+        )
+        .to_rotation_matrix()
+        .into_inner();
+        let local_inertia = rotation
+            * scene_collider_inertia(&part.geometry, *mass)
+            * rotation.transpose();
+        let offset = vec3(part.offset) - center_of_mass;
+        sum + local_inertia
+            + *mass
+                * (Matrix3::identity() * offset.norm_squared() - offset * offset.transpose())
+    });
+
+    MassProperties::with_inertia_matrix(Point::from(center_of_mass), mass_kg, inertia)
 }
 
 fn scene_collider_bounding_radius(config: &ProjectSceneColliderConfig) -> f32 {
@@ -424,11 +469,13 @@ fn scene_collider_bounding_radius(config: &ProjectSceneColliderConfig) -> f32 {
 
 fn vehicle_collider_builder(config: &ProjectVehicleColliderConfig) -> ColliderBuilder {
     collider_builder(&config.geometry)
-        .translation(vec3(config.offset))
-        .rotation(Vector::new(
-            config.rotation[0],
-            config.rotation[1],
-            config.rotation[2],
+        .position(Isometry::from_parts(
+            Translation::from(vec3(config.offset)),
+            Rotation::from_euler_angles(
+                config.rotation[0],
+                config.rotation[1],
+                config.rotation[2],
+            ),
         ))
         // Vehicle mass and COM are explicitly authored on the rigid body.
         .density(0.0)
@@ -1406,6 +1453,8 @@ mod tests {
         CollisionGenerationConfig, ReviewedProfileExportConfig, TriangleMesh,
         generate_collision_candidates,
     };
+    use pge_physics::rapier3d::na::Matrix3;
+    use pge_physics::rapier3d::prelude::{Real, Vector};
 
     use crate::project::{
         HardwareConfig, ProjectConfig, ProjectRobotConfig, ProjectRobotModelConfig,
@@ -1638,6 +1687,44 @@ mod tests {
                 .chain(bottle.angular_velocity_rps.iter())
                 .all(|value| value.abs() < 0.05),
             "compound bottle should settle after its roll: {bottle:?}"
+        );
+    }
+
+    #[test]
+    fn compound_bottle_maps_long_axis_inertia_through_object_rpy() {
+        fn angular_response(impulse: Vector<Real>) -> ([f32; 3], Matrix3<Real>) {
+            // Rapier cylinders are long on local Y. The scene's X quarter-turn
+            // maps that bottle axis to world Z, exactly like the PuppyBot
+            // fixture standing upright on its support.
+            let mut runtime = ScenePhysicsRuntime::from_project(&compound_bottle_project([
+                std::f32::consts::FRAC_PI_2,
+                0.0,
+                0.0,
+            ]))
+            .expect("compound bottle project");
+            let handle = runtime.objects["bottle"].handle;
+            let body = runtime.world.body_mut(handle).expect("bottle body");
+            let inertia = body
+                .mass_properties()
+                .local_mprops
+                .reconstruct_inertia_matrix();
+            body.apply_torque_impulse(impulse, true);
+            ([body.angvel().x, body.angvel().y, body.angvel().z], inertia)
+        }
+
+        let (long_axis_spin, inertia) = angular_response(Vector::new(0.0, 0.0, 0.001));
+        let (transverse_roll, _) = angular_response(Vector::new(0.001, 0.0, 0.0));
+
+        // The bottle's compound geometry is elongated along object-local Y,
+        // so its Y inertia must be lower than a transverse axis. With the
+        // authored RPY, that lower-inertia long axis is world Z.
+        assert!(
+            inertia[(1, 1)] < inertia[(0, 0)] * 0.75,
+            "bottle local inertia must retain its Y long axis: {inertia:?}"
+        );
+        assert!(
+            long_axis_spin[2].abs() > transverse_roll[0].abs() * 1.25,
+            "object RPY must map bottle long-axis spin to world Z and transverse roll to world X: spin={long_axis_spin:?}, roll={transverse_roll:?}"
         );
     }
 
