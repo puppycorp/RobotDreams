@@ -14,7 +14,6 @@ base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 libc = "0.2"
 log = "0.4"
-rapier3d = { version = "0.23", default-features = false, features = ["dim3", "f32"] }
 feetech-servo = { path = "../crates/feetech-servo" }
 robotdreams-core = { path = "../core" }
 robotdreams-renderer = { path = "../renderer" }
@@ -26,7 +25,7 @@ simple_logger = "5"
 tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "time"] }
 urdf-rs = "0.7"
 wgui = { workspace = true }
-pge-core = { git = "https://github.com/puppycorp/pge.git", rev = "d0c0e7231b92af47c9dd2daa2cb53b2ceae61c6a" }
-pge-app = { git = "https://github.com/puppycorp/pge.git", rev = "d0c0e7231b92af47c9dd2daa2cb53b2ceae61c6a" }
-pge-renderer = { git = "https://github.com/puppycorp/pge.git", rev = "d0c0e7231b92af47c9dd2daa2cb53b2ceae61c6a" }
-pge-wgpu-renderer = { git = "https://github.com/puppycorp/pge.git", rev = "d0c0e7231b92af47c9dd2daa2cb53b2ceae61c6a" }
+pge-core = { git = "https://github.com/puppycorp/pge.git", rev = "b4c9863" }
+pge-app = { git = "https://github.com/puppycorp/pge.git", rev = "b4c9863" }
+pge-renderer = { git = "https://github.com/puppycorp/pge.git", rev = "b4c9863" }
+pge-wgpu-renderer = { git = "https://github.com/puppycorp/pge.git", rev = "b4c9863" }

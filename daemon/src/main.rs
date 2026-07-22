@@ -3,7 +3,6 @@
 
 mod app_controller;
 mod hardware_runtime;
-mod physics;
 mod projects_controller;
 mod robot_scene_component;
 mod scenario;

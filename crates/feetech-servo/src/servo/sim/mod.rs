@@ -373,6 +373,12 @@ impl FeetechServo {
     }
 }
 
+impl Default for FeetechServo {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct FeetechBusSim {
     protocol: FeetechScs,
@@ -503,13 +509,11 @@ impl FeetechBusSim {
                 }
                 return (Ok(None), event);
             }
-            Instruction::Action => {
-                if self.protocol.is_broadcast(decoded.id) {
-                    for servo in self.servos.values_mut() {
-                        servo.apply_pending();
-                    }
-                    return (Ok(None), event);
+            Instruction::Action if self.protocol.is_broadcast(decoded.id) => {
+                for servo in self.servos.values_mut() {
+                    servo.apply_pending();
                 }
+                return (Ok(None), event);
             }
             _ => {}
         }

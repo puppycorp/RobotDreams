@@ -206,17 +206,14 @@ pub struct CameraSpec {
     pub sensor_effects: Option<CameraSensorEffects>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum CameraProjection {
+    #[default]
     Perspective,
-    Orthographic { size_m: f32 },
-}
-
-impl Default for CameraProjection {
-    fn default() -> Self {
-        Self::Perspective
-    }
+    Orthographic {
+        size_m: f32,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]

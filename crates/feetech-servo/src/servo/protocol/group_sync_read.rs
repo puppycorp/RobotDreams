@@ -144,7 +144,7 @@ impl GroupSyncRead {
                 checksum = checksum.wrapping_add(rxpacket[rx_index]);
                 rx_index += 1;
             }
-            checksum = (!checksum) & 0xFF;
+            checksum = !checksum;
             if checksum != rxpacket[rx_index] {
                 return (None, COMM_RX_CORRUPT);
             }

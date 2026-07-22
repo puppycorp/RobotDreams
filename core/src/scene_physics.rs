@@ -2,127 +2,132 @@ use std::collections::BTreeMap;
 use std::error::Error;
 
 use pge_core as pge;
-use pge_physics::rapier3d::na::Matrix3;
-use pge_physics::rapier3d::prelude::*;
+#[cfg(test)]
+use pge_physics::ColliderShape as PgeColliderShape;
+use rapier3d::na::Matrix3;
+use rapier3d::prelude::*;
 
-use crate::calibration::{
-    MeasurementProvenance, apply_calibration_to_vehicle_profile, load_calibration,
-};
 use crate::project::{
-    ProjectConfig, ProjectSceneBodyKind, ProjectSceneColliderConfig,
-    ProjectSceneColliderGeometry, ProjectSceneObjectPhysicsConfig, ProjectSceneTriggerConfig,
-    ProjectVehicleColliderConfig, ProjectVehiclePhysicsConfig, RobotLinkCollider,
+    ProjectConfig, ProjectSceneBodyKind, ProjectSceneColliderConfig, ProjectSceneColliderGeometry,
+    ProjectSceneObjectPhysicsConfig, ProjectSceneTriggerConfig, ProjectVehicleColliderConfig,
+    ProjectVehiclePhysicsConfig, RobotLinkCollider,
 };
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct SceneObjectAttachment {
-    pub robot_id: String,
-    pub frame_name: String,
-    pub offset_m: [f32; 3],
-    /// Orientation of the object in the held frame at grasp time.  Together
-    /// with `offset_m` this is the stable local grasp transform.
-    pub rotation_offset_rpy: [f32; 3],
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct SceneObjectState {
-    pub id: String,
-    pub position: [f32; 3],
-    pub rotation: [f32; 3],
-    pub velocity_mps: [f32; 3],
-    pub angular_velocity_rps: [f32; 3],
-    pub dynamic: bool,
-    pub attachment: Option<SceneObjectAttachment>,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct SceneTriggerState {
-    pub id: String,
-    pub object_id: String,
-    pub inside: bool,
-    pub entered: bool,
-    pub entered_at_sec: Option<f64>,
-    pub entry_count: u64,
-    pub settled: bool,
-    pub triggered: bool,
-    pub triggered_at_sec: Option<f64>,
-    pub settled_time_sec: f32,
-}
-
-/// Solved state of a robot base using the dynamic vehicle path.
-#[derive(Clone, Debug, PartialEq)]
-pub struct VehiclePhysicsState {
-    pub robot_id: String,
-    pub position: [f32; 3],
-    pub rotation: [f32; 3],
-    pub velocity_mps: [f32; 3],
-    pub angular_velocity_rps: [f32; 3],
-    pub actuator: VehicleActuatorState,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct AppliedCalibrationState {
-    pub robot_id: String,
-    pub hardware_revision: String,
-    pub provenance: MeasurementProvenance,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct VehicleActuatorState {
-    pub left_command: f32,
-    pub right_command: f32,
-    pub left_drive_force_n: f32,
-    pub right_drive_force_n: f32,
-    pub braking: bool,
-}
-
-/// A physical contact between a dynamic scene object and a reviewed robot-link
-/// profile.  This is evidence from Rapier's narrow phase, not a proximity
-/// test and not an attachment request.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RobotLinkContact {
-    pub robot_id: String,
-    pub link_name: String,
-    pub object_id: String,
-}
-
-/// Safety limits for kinematically tracked reviewed-link colliders.
-///
-/// These bodies are a narrow bridge between an observed URDF pose and Rapier;
-/// they are not a substitute for an articulated dynamic arm.  Position-based
-/// kinematic bodies derive their contact velocity from successive poses, so an
-/// uncapped pose jump would otherwise inject an unbounded impulse into a
-/// dynamic scene object.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct KinematicColliderMotionConfig {
-    pub maximum_linear_speed_mps: f32,
-    pub maximum_angular_speed_rps: f32,
-    pub maximum_substep_seconds: f32,
-}
-
-impl Default for KinematicColliderMotionConfig {
-    fn default() -> Self {
-        Self {
-            maximum_linear_speed_mps: 0.20,
-            maximum_angular_speed_rps: 2.0,
-            maximum_substep_seconds: 1.0 / 120.0,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct VehicleDriveCommand {
-    pub left_command: f32,
-    pub right_command: f32,
-    pub brake: bool,
-    pub steering_target_rad: f32,
-}
+pub use crate::scene_physics_contract::{
+    AppliedCalibrationState, KinematicColliderMotionConfig, RobotLinkContact,
+    SceneObjectAttachment, SceneObjectState, SceneTriggerState, VehicleActuatorState,
+    VehiclePhysicsState,
+};
+pub(crate) use crate::scene_physics_contract::{
+    VehicleDriveCommand, VehiclePhysicsForceCommand, VehiclePhysicsForcePlan,
+    VehiclePhysicsKinematics, calibrated_vehicle_profile, load_project_calibration,
+};
 
 #[derive(Clone, Debug)]
 struct PhysicsObject {
     handle: RigidBodyHandle,
     state: SceneObjectState,
     collider: ProjectSceneColliderConfig,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct AuthoritativeObjectMassProperties {
+    pub mass_kg: f32,
+    pub center_of_mass_m: [f32; 3],
+    pub inertia_tensor_kg_m2: [[f32; 3]; 3],
+    pub effective_translation_mass_kg: [f32; 3],
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct AuthoritativePhysicsTracePart {
+    pub id: String,
+    pub position: [f32; 3],
+    pub rotation_xyzw: [f32; 4],
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct AuthoritativePhysicsTraceFrame {
+    pub position: [f32; 3],
+    pub rotation_xyzw: [f32; 4],
+    pub linear_velocity_mps: [f32; 3],
+    pub angular_velocity_rps: [f32; 3],
+    pub parts: Vec<AuthoritativePhysicsTracePart>,
+    pub contacts: Vec<(String, String)>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct AuthoritativeContactObservation {
+    pub collider1: String,
+    pub collider2: String,
+    pub normal_world: [f32; 3],
+    pub impulse_ns: [f32; 3],
+    pub point_world: [f32; 3],
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct AuthoritativeContactManifoldObservation {
+    pub normal_world: [f32; 3],
+    pub geometric_distances_m: Vec<f32>,
+    pub solved_impulses_ns: Vec<f32>,
+    pub solver_contact_distances_m: Vec<f32>,
+    pub solver_frictions: Vec<f32>,
+    pub solver_restitutions: Vec<f32>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct AuthoritativeLinkObjectContactPairObservation {
+    pub collider1: String,
+    pub collider2: String,
+    pub collider1_pose: ([f32; 3], [f32; 4]),
+    pub collider2_pose: ([f32; 3], [f32; 4]),
+    pub has_any_active_contact: bool,
+    pub total_impulse_ns: [f32; 3],
+    pub manifolds: Vec<AuthoritativeContactManifoldObservation>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct VehicleTraceSample {
+    pub steering_angle_rad: f32,
+    pub longitudinal_speed_mps: f32,
+    pub lateral_speed_mps: f32,
+    pub steering_feedforward_force_n: f32,
+    pub lateral_damping_force_n: f32,
+    pub lateral_force_n: f32,
+    pub yaw_rad: f32,
+    pub yaw_rate_rps: f32,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct AuthoritativeBodyRuntimeDescriptor {
+    pub dynamic: bool,
+    pub kinematic_position: bool,
+    pub linear_damping: f32,
+    pub angular_damping: f32,
+    pub gravity_scale: f32,
+    pub rotation_locked: [bool; 3],
+    pub ccd_enabled: bool,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct AuthoritativeColliderRuntimeDescriptor {
+    pub insertion_index: usize,
+    pub shape: PgeColliderShape,
+    pub local_translation: [f32; 3],
+    pub local_rotation_xyzw: [f32; 4],
+    pub friction: f32,
+    pub restitution: f32,
+    pub density_kg_m3: f32,
+    pub collision_memberships: u32,
+    pub collision_filter: u32,
+    pub sensor: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -151,24 +156,9 @@ struct PhysicsRobotLinkCollider {
     target_pose: Isometry<Real>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct LivePhysicsColliderDebugPart {
-    pub geometry: ProjectSceneColliderGeometry,
-    pub local_transform: pge::Transform,
-}
-
-/// A live Rapier collider expressed in the narrow form required by the PGE
-/// debug-overlay adapter.  This stays separate from rendering scene nodes so
-/// a debug view represents the actual solver shape, rather than a mesh bound
-/// or a visual-only asset transform.
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct LivePhysicsColliderDebugEntry {
-    pub id: String,
-    pub category: &'static str,
-    pub color: [f32; 4],
-    pub transform: pge::Transform,
-    pub parts: Vec<LivePhysicsColliderDebugPart>,
-}
+pub(crate) use crate::scene_physics_contract::{
+    LivePhysicsColliderDebugEntry, LivePhysicsColliderDebugPart,
+};
 
 pub(crate) struct ScenePhysicsRuntime {
     world: LivePhysicsWorld,
@@ -370,11 +360,10 @@ fn collider_builder(geometry: &ProjectSceneColliderGeometry) -> ColliderBuilder 
 fn scene_collider_builder(
     part: &crate::project::ProjectSceneColliderChildConfig,
 ) -> ColliderBuilder {
-    collider_builder(&part.geometry)
-        .position(Isometry::from_parts(
-            Translation::from(vec3(part.offset)),
-            Rotation::from_euler_angles(part.rotation[0], part.rotation[1], part.rotation[2]),
-        ))
+    collider_builder(&part.geometry).position(Isometry::from_parts(
+        Translation::from(vec3(part.offset)),
+        Rotation::from_euler_angles(part.rotation[0], part.rotation[1], part.rotation[2]),
+    ))
 }
 
 fn scene_collider_volume(geometry: &ProjectSceneColliderGeometry) -> f32 {
@@ -389,10 +378,7 @@ fn scene_collider_volume(geometry: &ProjectSceneColliderGeometry) -> f32 {
     }
 }
 
-fn scene_collider_inertia(
-    geometry: &ProjectSceneColliderGeometry,
-    mass_kg: f32,
-) -> Matrix3<Real> {
+fn scene_collider_inertia(geometry: &ProjectSceneColliderGeometry, mass_kg: f32) -> Matrix3<Real> {
     let diagonal = match geometry {
         ProjectSceneColliderGeometry::Box { size } => Vector::new(
             mass_kg * (size[1].powi(2) + size[2].powi(2)) / 12.0,
@@ -427,9 +413,12 @@ fn scene_object_mass_properties(config: &ProjectSceneObjectPhysicsConfig) -> Mas
             (part, mass)
         })
         .collect::<Vec<_>>();
-    let derived_center_of_mass = parts_with_mass.iter().fold(Vector::zeros(), |sum, (part, mass)| {
-        sum + vec3(part.offset) * *mass
-    }) / mass_kg;
+    let derived_center_of_mass = parts_with_mass
+        .iter()
+        .fold(Vector::zeros(), |sum, (part, mass)| {
+            sum + vec3(part.offset) * *mass
+        })
+        / mass_kg;
     let center_of_mass = config
         .center_of_mass
         .map(vec3)
@@ -439,22 +428,20 @@ fn scene_object_mass_properties(config: &ProjectSceneObjectPhysicsConfig) -> Mas
     // dynamic body's mass. Assemble the primitive tensor directly so the
     // offset and rotation of every part remain in the object's coordinate
     // frame, then apply the parallel-axis theorem at the authored COM.
-    let inertia = parts_with_mass.iter().fold(Matrix3::zeros(), |sum, (part, mass)| {
-        let rotation = Rotation::from_euler_angles(
-            part.rotation[0],
-            part.rotation[1],
-            part.rotation[2],
-        )
-        .to_rotation_matrix()
-        .into_inner();
-        let local_inertia = rotation
-            * scene_collider_inertia(&part.geometry, *mass)
-            * rotation.transpose();
-        let offset = vec3(part.offset) - center_of_mass;
-        sum + local_inertia
-            + *mass
-                * (Matrix3::identity() * offset.norm_squared() - offset * offset.transpose())
-    });
+    let inertia = parts_with_mass
+        .iter()
+        .fold(Matrix3::zeros(), |sum, (part, mass)| {
+            let rotation =
+                Rotation::from_euler_angles(part.rotation[0], part.rotation[1], part.rotation[2])
+                    .to_rotation_matrix()
+                    .into_inner();
+            let local_inertia =
+                rotation * scene_collider_inertia(&part.geometry, *mass) * rotation.transpose();
+            let offset = vec3(part.offset) - center_of_mass;
+            sum + local_inertia
+                + *mass
+                    * (Matrix3::identity() * offset.norm_squared() - offset * offset.transpose())
+        });
 
     MassProperties::with_inertia_matrix(Point::from(center_of_mass), mass_kg, inertia)
 }
@@ -471,11 +458,7 @@ fn vehicle_collider_builder(config: &ProjectVehicleColliderConfig) -> ColliderBu
     collider_builder(&config.geometry)
         .position(Isometry::from_parts(
             Translation::from(vec3(config.offset)),
-            Rotation::from_euler_angles(
-                config.rotation[0],
-                config.rotation[1],
-                config.rotation[2],
-            ),
+            Rotation::from_euler_angles(config.rotation[0], config.rotation[1], config.rotation[2]),
         ))
         // Vehicle mass and COM are explicitly authored on the rigid body.
         .density(0.0)
@@ -501,7 +484,10 @@ fn vehicle_state(
     }
 }
 
-fn vehicle_inertia(mass_kg: f32, colliders: &[ProjectVehicleColliderConfig]) -> Vector<Real> {
+pub(crate) fn vehicle_inertia_diagonal(
+    mass_kg: f32,
+    colliders: &[ProjectVehicleColliderConfig],
+) -> [f32; 3] {
     let mut half_extents = Vector::new(0.01, 0.01, 0.01);
     for collider in colliders {
         let extent = match collider.geometry {
@@ -517,12 +503,205 @@ fn vehicle_inertia(mass_kg: f32, colliders: &[ProjectVehicleColliderConfig]) -> 
         half_extents = half_extents.sup(&(offset + extent));
     }
     let size = half_extents * 2.0;
-    Vector::new(
+    let inertia = [
         mass_kg * (size.y * size.y + size.z * size.z) / 12.0,
         mass_kg * (size.x * size.x + size.z * size.z) / 12.0,
         mass_kg * (size.x * size.x + size.y * size.y) / 12.0,
+    ];
+    inertia.map(|value| value.max(1.0e-6))
+}
+
+#[allow(dead_code)]
+fn legacy_plan_vehicle_forces(
+    config: &ProjectVehiclePhysicsConfig,
+    current_steering_angle_rad: f32,
+    command: VehicleDriveCommand,
+    kinematics: VehiclePhysicsKinematics,
+) -> VehiclePhysicsForcePlan {
+    let VehiclePhysicsKinematics {
+        position,
+        yaw,
+        velocity_mps,
+        yaw_rate_rps,
+        dt,
+    } = kinematics;
+    let response = config.steering_response_deg_per_sec.to_radians() * dt;
+    let steering_error = command.steering_target_rad - current_steering_angle_rad;
+    let steering_angle_rad = current_steering_angle_rad + steering_error.clamp(-response, response);
+    let forward = [yaw.cos(), yaw.sin(), 0.0];
+    let lateral = [-yaw.sin(), yaw.cos(), 0.0];
+    let dot = |left: [f32; 3], right: [f32; 3]| {
+        left[0] * right[0] + left[1] * right[1] + left[2] * right[2]
+    };
+    let current_forward_speed = dot(velocity_mps, forward);
+    let current_lateral_speed = dot(velocity_mps, lateral);
+    let left_command = command.left_command.clamp(-1.0, 1.0);
+    let right_command = command.right_command.clamp(-1.0, 1.0);
+    let motor = &config.motor;
+    let wheel_angular_speed = current_forward_speed / motor.wheel_radius_m;
+    let motor_angular_speed = wheel_angular_speed * motor.gear_ratio;
+    let no_load_rad_s = motor.no_load_rpm * std::f32::consts::TAU / 60.0;
+    let wheel_force = |command: f32| {
+        if command.abs() <= 1.0e-4 {
+            return 0.0;
+        }
+        let torque = motor.stall_torque_nm
+            * (command - motor_angular_speed / no_load_rad_s).clamp(-1.0, 1.0);
+        (torque * motor.gear_ratio / motor.wheel_radius_m)
+            .clamp(-config.max_drive_force_n, config.max_drive_force_n)
+    };
+    let left_force = wheel_force(left_command);
+    let right_force = wheel_force(right_command);
+    let add_scaled = |origin: [f32; 3],
+                      first: [f32; 3],
+                      first_scale: f32,
+                      second: [f32; 3],
+                      second_scale: f32| {
+        std::array::from_fn(|axis| {
+            origin[axis] + first[axis] * first_scale + second[axis] * second_scale
+        })
+    };
+    let rear_offset = -config.wheelbase_m * 0.5;
+    let half_track = config.track_width_m * 0.5;
+    let rear_left = add_scaled(position, forward, rear_offset, lateral, half_track);
+    let rear_right = add_scaled(position, forward, rear_offset, lateral, -half_track);
+    let mut forces = vec![
+        VehiclePhysicsForceCommand::AtPoint {
+            force_n: forward.map(|component| component * left_force),
+            point_world_m: rear_left,
+        },
+        VehiclePhysicsForceCommand::AtPoint {
+            force_n: forward.map(|component| component * right_force),
+            point_world_m: rear_right,
+        },
+    ];
+
+    let axle_offset = config.wheelbase_m * 0.5;
+    let bicycle_steering_angle_rad = -steering_angle_rad;
+    let front_slip_mps = current_lateral_speed + axle_offset * yaw_rate_rps
+        - current_forward_speed * bicycle_steering_angle_rad.tan();
+    let rear_slip_mps = current_lateral_speed - axle_offset * yaw_rate_rps;
+    let axle_stiffness = config.lateral_grip_n_per_mps * 0.5;
+    let front_force_n = (-axle_stiffness * front_slip_mps)
+        .clamp(-config.max_drive_force_n, config.max_drive_force_n);
+    let rear_force_n = (-axle_stiffness * rear_slip_mps)
+        .clamp(-config.max_drive_force_n, config.max_drive_force_n);
+    let front = add_scaled(position, forward, axle_offset, lateral, 0.0);
+    let rear = add_scaled(position, forward, -axle_offset, lateral, 0.0);
+    forces.push(VehiclePhysicsForceCommand::AtPoint {
+        force_n: lateral.map(|component| component * front_force_n),
+        point_world_m: front,
+    });
+    forces.push(VehiclePhysicsForceCommand::AtPoint {
+        force_n: lateral.map(|component| component * rear_force_n),
+        point_world_m: rear,
+    });
+
+    let resistance = if command.brake {
+        motor.brake_torque_nm * motor.gear_ratio / motor.wheel_radius_m
+    } else {
+        motor.rolling_resistance_n
+    };
+    if current_forward_speed.abs() > 1.0e-4 {
+        forces.push(VehiclePhysicsForceCommand::AtCenter {
+            force_n: forward
+                .map(|component| -component * resistance * current_forward_speed.signum()),
+        });
+    }
+    VehiclePhysicsForcePlan {
+        steering_angle_rad,
+        forces,
+        actuator: VehicleActuatorState {
+            left_command,
+            right_command,
+            left_drive_force_n: left_force,
+            right_drive_force_n: right_force,
+            braking: command.brake,
+        },
+    }
+}
+
+pub(crate) fn plan_vehicle_forces(
+    config: &ProjectVehiclePhysicsConfig,
+    current_steering_angle_rad: f32,
+    command: VehicleDriveCommand,
+    kinematics: VehiclePhysicsKinematics,
+) -> VehiclePhysicsForcePlan {
+    crate::scene_physics_contract::plan_vehicle_forces(
+        config,
+        current_steering_angle_rad,
+        command,
+        kinematics,
     )
-    .map(|value| value.max(1.0e-6))
+}
+
+/// Test-only alternative to the one-point steering approximation. It keeps the
+/// active motor/brake commands from `plan_vehicle_forces`, then replaces only
+/// its steering force with bounded front/rear linear bicycle tyre forces.
+#[cfg(test)]
+pub(crate) fn plan_two_axle_bicycle_forces(
+    config: &ProjectVehiclePhysicsConfig,
+    current_steering_angle_rad: f32,
+    command: VehicleDriveCommand,
+    kinematics: VehiclePhysicsKinematics,
+) -> VehiclePhysicsForcePlan {
+    let VehiclePhysicsKinematics {
+        position,
+        yaw,
+        velocity_mps,
+        yaw_rate_rps,
+        dt: _,
+    } = kinematics;
+    let mut plan = plan_vehicle_forces(config, current_steering_angle_rad, command, kinematics);
+    // The active plan always contains two rear motor forces and the one-point
+    // front steering force. Preserve the motor/brake entries, replacing only
+    // that steering approximation.
+    plan.forces.remove(2);
+    let forward = [yaw.cos(), yaw.sin(), 0.0];
+    let lateral = [-yaw.sin(), yaw.cos(), 0.0];
+    let add_scaled = |origin: [f32; 3],
+                      first: [f32; 3],
+                      first_scale: f32,
+                      second: [f32; 3],
+                      second_scale: f32| {
+        core::array::from_fn(|axis| {
+            origin[axis] + first[axis] * first_scale + second[axis] * second_scale
+        })
+    };
+    let dot = |left: [f32; 3], right: [f32; 3]| {
+        left[0] * right[0] + left[1] * right[1] + left[2] * right[2]
+    };
+    let longitudinal_speed = dot(velocity_mps, forward);
+    let lateral_speed = dot(velocity_mps, lateral);
+    let axle_offset = config.wheelbase_m * 0.5;
+    // RobotDreams' confirmed PuppyBot drive frame is opposite the bicycle
+    // steering-positive convention used by this slip equation.
+    let bicycle_steering_angle_rad = -plan.steering_angle_rad;
+    let front_slip_mps = lateral_speed + axle_offset * yaw_rate_rps
+        - longitudinal_speed * bicycle_steering_angle_rad.tan();
+    let rear_slip_mps = lateral_speed - axle_offset * yaw_rate_rps;
+    let axle_stiffness = config.lateral_grip_n_per_mps * 0.5;
+    let front_force_n = (-axle_stiffness * front_slip_mps)
+        .clamp(-config.max_drive_force_n, config.max_drive_force_n);
+    let rear_force_n = (-axle_stiffness * rear_slip_mps)
+        .clamp(-config.max_drive_force_n, config.max_drive_force_n);
+    let front = add_scaled(position, forward, axle_offset, lateral, 0.0);
+    let rear = add_scaled(position, forward, -axle_offset, lateral, 0.0);
+    plan.forces.insert(
+        2,
+        VehiclePhysicsForceCommand::AtPoint {
+            force_n: lateral.map(|component| component * front_force_n),
+            point_world_m: front,
+        },
+    );
+    plan.forces.insert(
+        3,
+        VehiclePhysicsForceCommand::AtPoint {
+            force_n: lateral.map(|component| component * rear_force_n),
+            point_world_m: rear,
+        },
+    );
+    plan
 }
 
 fn speed(velocity: [f32; 3]) -> f32 {
@@ -557,11 +736,51 @@ fn center_inside_box(center: [f32; 3], box_center: [f32; 3], box_size: [f32; 3])
     })
 }
 
+#[allow(dead_code)]
+fn legacy_apply_scene_trigger_rule(
+    state: &mut SceneTriggerState,
+    config: &ProjectSceneTriggerConfig,
+    object: &SceneObjectState,
+    dt: f32,
+    clock_sec: f64,
+) {
+    let inside = object.dynamic
+        && object.attachment.is_none()
+        && center_inside_box(object.position, config.position, config.size);
+    if inside && !state.inside {
+        state.entered = true;
+        state.entered_at_sec.get_or_insert(clock_sec);
+        state.entry_count += 1;
+    }
+    state.inside = inside;
+    if inside && speed(object.velocity_mps) <= config.settle_speed_mps {
+        state.settled_time_sec += dt;
+        if state.settled_time_sec >= config.settle_time_sec {
+            state.settled = true;
+            state.triggered = true;
+            state.triggered_at_sec.get_or_insert(clock_sec);
+        }
+    } else {
+        state.settled_time_sec = 0.0;
+        state.settled = false;
+    }
+}
+
+pub(crate) fn apply_scene_trigger_rule(
+    state: &mut SceneTriggerState,
+    config: &ProjectSceneTriggerConfig,
+    object: &SceneObjectState,
+    dt: f32,
+    clock_sec: f64,
+) {
+    crate::scene_physics_contract::apply_scene_trigger_rule(state, config, object, dt, clock_sec)
+}
+
 /// Reads the narrow generated-collider interchange used at the RobotDreams /
 /// PGE boundary.  Keeping this adapter here means collision generation never
 /// runs during simulation startup: the product checks in and reviews the
 /// generated profile first.
-fn generated_vehicle_colliders(
+pub(crate) fn generated_vehicle_colliders(
     project: &ProjectConfig,
     vehicle: &ProjectVehiclePhysicsConfig,
 ) -> Result<Vec<ProjectVehicleColliderConfig>, Box<dyn Error>> {
@@ -729,7 +948,8 @@ impl ScenePhysicsRuntime {
             let uses_explicit_mass_properties = config.body_kind == ProjectSceneBodyKind::Dynamic
                 && (!config.collider.children.is_empty() || config.center_of_mass.is_some());
             if uses_explicit_mass_properties {
-                rigid_body = rigid_body.additional_mass_properties(scene_object_mass_properties(config));
+                rigid_body =
+                    rigid_body.additional_mass_properties(scene_object_mass_properties(config));
             }
             let rigid_body = rigid_body.build();
             let colliders = config
@@ -795,14 +1015,7 @@ impl ScenePhysicsRuntime {
             );
         }
 
-        let calibration = match &project.calibration_record_path {
-            Some(path) => Some(
-                load_calibration(project.base_dir.join(path)).map_err(|error| {
-                    format!("project calibrationRecord '{path}' could not be loaded: {error}")
-                })?,
-            ),
-            None => None,
-        };
+        let calibration = load_project_calibration(project)?;
         let mut vehicles = BTreeMap::new();
         let mut calibrations = Vec::new();
         for robot in &project.robots {
@@ -813,24 +1026,13 @@ impl ScenePhysicsRuntime {
             else {
                 continue;
             };
-            let calibrated = calibration
-                .as_ref()
-                .map(|record| apply_calibration_to_vehicle_profile(vehicle, record))
-                .transpose()
-                .map_err(|error| format!("project calibrationRecord is invalid: {error}"))?;
-            let vehicle = calibrated
-                .as_ref()
-                .map(|calibrated| &calibrated.vehicle)
-                .unwrap_or(vehicle);
-            if let Some(calibrated) = &calibrated {
-                calibrations.push(AppliedCalibrationState {
-                    robot_id: robot.id.clone(),
-                    hardware_revision: calibrated.hardware_revision.clone(),
-                    provenance: calibrated.provenance.clone(),
-                });
+            let (vehicle, applied_calibration) =
+                calibrated_vehicle_profile(&robot.id, vehicle, calibration.as_ref())?;
+            if let Some(applied_calibration) = applied_calibration {
+                calibrations.push(applied_calibration);
             }
             let mut colliders = vehicle.colliders.clone();
-            colliders.extend(generated_vehicle_colliders(project, vehicle)?);
+            colliders.extend(generated_vehicle_colliders(project, &vehicle)?);
             if colliders.is_empty() {
                 return Err(format!(
                     "dynamic vehicle '{}' needs at least one reviewed collider",
@@ -838,7 +1040,8 @@ impl ScenePhysicsRuntime {
                 )
                 .into());
             }
-            let inertia = vehicle_inertia(vehicle.mass_kg, &colliders);
+            let inertia =
+                Vector::from_column_slice(&vehicle_inertia_diagonal(vehicle.mass_kg, &colliders));
             let body = RigidBodyBuilder::dynamic()
                 .position(Isometry::from_parts(
                     Translation::from(vec3(robot.base_translation)),
@@ -918,6 +1121,697 @@ impl ScenePhysicsRuntime {
             .values()
             .map(|object| object.state.clone())
             .collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn authoritative_object_mass_properties(
+        &self,
+        id: &str,
+    ) -> Option<AuthoritativeObjectMassProperties> {
+        let object = self.objects.get(id)?;
+        let body = self.world.body(object.handle)?;
+        let properties = body.mass_properties();
+        let local = &properties.local_mprops;
+        let inertia = local.reconstruct_inertia_matrix();
+        let effective = properties.effective_mass();
+        Some(AuthoritativeObjectMassProperties {
+            mass_kg: properties.mass(),
+            center_of_mass_m: [local.local_com.x, local.local_com.y, local.local_com.z],
+            inertia_tensor_kg_m2: [
+                [inertia[(0, 0)], inertia[(0, 1)], inertia[(0, 2)]],
+                [inertia[(1, 0)], inertia[(1, 1)], inertia[(1, 2)]],
+                [inertia[(2, 0)], inertia[(2, 1)], inertia[(2, 2)]],
+            ],
+            effective_translation_mass_kg: [effective.x, effective.y, effective.z],
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn authoritative_gravity_and_timing(&self) -> ([f32; 3], f32, usize) {
+        (
+            [
+                self.world.gravity.x,
+                self.world.gravity.y,
+                self.world.gravity.z,
+            ],
+            self.world.integration_parameters.dt,
+            self.world.integration_parameters.max_ccd_substeps,
+        )
+    }
+
+    #[cfg(test)]
+    fn authoritative_body_runtime_descriptor(
+        &self,
+        handle: RigidBodyHandle,
+    ) -> Option<AuthoritativeBodyRuntimeDescriptor> {
+        let body = self.world.body(handle)?;
+        Some(AuthoritativeBodyRuntimeDescriptor {
+            dynamic: body.is_dynamic(),
+            kinematic_position: body.body_type() == RigidBodyType::KinematicPositionBased,
+            linear_damping: body.linear_damping(),
+            angular_damping: body.angular_damping(),
+            gravity_scale: body.gravity_scale(),
+            rotation_locked: body.is_rotation_locked(),
+            ccd_enabled: body.is_ccd_enabled(),
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn authoritative_object_runtime_descriptor(
+        &self,
+        object_id: &str,
+    ) -> Option<AuthoritativeBodyRuntimeDescriptor> {
+        self.authoritative_body_runtime_descriptor(self.objects.get(object_id)?.handle)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn authoritative_link_runtime_descriptor(
+        &self,
+        key: &str,
+    ) -> Option<AuthoritativeBodyRuntimeDescriptor> {
+        self.authoritative_body_runtime_descriptor(self.robot_link_colliders.get(key)?.body)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn authoritative_link_pose(&self, key: &str) -> Option<([f32; 3], [f32; 4])> {
+        let body = self.world.body(self.robot_link_colliders.get(key)?.body)?;
+        let rotation = body.rotation().quaternion();
+        Some((
+            [
+                body.translation().x,
+                body.translation().y,
+                body.translation().z,
+            ],
+            [rotation.i, rotation.j, rotation.k, rotation.w],
+        ))
+    }
+
+    #[cfg(test)]
+    fn authoritative_collider_runtime_descriptors(
+        &self,
+        handles: &[ColliderHandle],
+    ) -> Option<Vec<AuthoritativeColliderRuntimeDescriptor>> {
+        handles
+            .iter()
+            .enumerate()
+            .map(|(insertion_index, handle)| {
+                let collider = self.world.colliders.get(*handle)?;
+                let shape = if let Some(cuboid) = collider.shape().as_cuboid() {
+                    PgeColliderShape::Box {
+                        size: [
+                            cuboid.half_extents.x * 2.0,
+                            cuboid.half_extents.y * 2.0,
+                            cuboid.half_extents.z * 2.0,
+                        ],
+                    }
+                } else if let Some(ball) = collider.shape().as_ball() {
+                    PgeColliderShape::Sphere {
+                        radius: ball.radius,
+                    }
+                } else if let Some(cylinder) = collider.shape().as_cylinder() {
+                    PgeColliderShape::CylinderY {
+                        half_height: cylinder.half_height,
+                        radius: cylinder.radius,
+                    }
+                } else {
+                    return None;
+                };
+                let local_pose = collider.position_wrt_parent()?;
+                let rotation = local_pose.rotation.quaternion();
+                let groups = collider.collision_groups();
+                Some(AuthoritativeColliderRuntimeDescriptor {
+                    insertion_index,
+                    shape,
+                    local_translation: [
+                        local_pose.translation.x,
+                        local_pose.translation.y,
+                        local_pose.translation.z,
+                    ],
+                    local_rotation_xyzw: [rotation.i, rotation.j, rotation.k, rotation.w],
+                    friction: collider.friction(),
+                    restitution: collider.restitution(),
+                    density_kg_m3: collider.density(),
+                    collision_memberships: groups.memberships.bits(),
+                    collision_filter: groups.filter.bits(),
+                    sensor: collider.is_sensor(),
+                })
+            })
+            .collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn authoritative_object_collider_runtime_descriptors(
+        &self,
+        object_id: &str,
+    ) -> Option<Vec<AuthoritativeColliderRuntimeDescriptor>> {
+        let body = self.world.body(self.objects.get(object_id)?.handle)?;
+        self.authoritative_collider_runtime_descriptors(body.colliders())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn authoritative_link_collider_runtime_descriptors(
+        &self,
+        key: &str,
+    ) -> Option<Vec<AuthoritativeColliderRuntimeDescriptor>> {
+        let body = self.world.body(self.robot_link_colliders.get(key)?.body)?;
+        self.authoritative_collider_runtime_descriptors(body.colliders())
+    }
+
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub(crate) fn authoritative_link_object_contact_observations(
+        &self,
+        key: &str,
+        object_id: &str,
+    ) -> Vec<AuthoritativeContactObservation> {
+        let Some(link) = self.robot_link_colliders.get(key) else {
+            return Vec::new();
+        };
+        let Some(object) = self.objects.get(object_id) else {
+            return Vec::new();
+        };
+        let link_handles = self
+            .world
+            .body(link.body)
+            .map(|body| body.colliders().to_vec())
+            .unwrap_or_default();
+        let object_handles = self
+            .world
+            .body(object.handle)
+            .map(|body| body.colliders().to_vec())
+            .unwrap_or_default();
+        self.world
+            .narrow_phase
+            .contact_pairs()
+            .filter(|pair| pair.has_any_active_contact)
+            .filter_map(|pair| {
+                let first_is_link = link_handles.contains(&pair.collider1);
+                let second_is_link = link_handles.contains(&pair.collider2);
+                let first_is_object = object_handles.contains(&pair.collider1);
+                let second_is_object = object_handles.contains(&pair.collider2);
+                ((first_is_link && second_is_object) || (second_is_link && first_is_object))
+                    .then_some(())?;
+                let (magnitude, normal) = pair.max_impulse();
+                let point = pair
+                    .find_deepest_contact()
+                    .map(|(_, contact)| {
+                        self.world.colliders[pair.collider1].position() * contact.local_p1
+                    })
+                    .unwrap_or(Point::origin());
+                Some(AuthoritativeContactObservation {
+                    collider1: if first_is_link {
+                        format!(
+                            "shadow:kinematic-link:{key}:part:{}",
+                            link_handles
+                                .iter()
+                                .position(|handle| *handle == pair.collider1)?
+                        )
+                    } else {
+                        format!(
+                            "shadow:scene-object:{object_id}:part:{}",
+                            object_handles
+                                .iter()
+                                .position(|handle| *handle == pair.collider1)?
+                        )
+                    },
+                    collider2: if second_is_link {
+                        format!(
+                            "shadow:kinematic-link:{key}:part:{}",
+                            link_handles
+                                .iter()
+                                .position(|handle| *handle == pair.collider2)?
+                        )
+                    } else {
+                        format!(
+                            "shadow:scene-object:{object_id}:part:{}",
+                            object_handles
+                                .iter()
+                                .position(|handle| *handle == pair.collider2)?
+                        )
+                    },
+                    normal_world: [normal.x, normal.y, normal.z],
+                    impulse_ns: [
+                        normal.x * magnitude,
+                        normal.y * magnitude,
+                        normal.z * magnitude,
+                    ],
+                    point_world: [point.x, point.y, point.z],
+                })
+            })
+            .collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn authoritative_link_object_contact_pair_observations(
+        &self,
+        key: &str,
+        object_id: &str,
+    ) -> Vec<AuthoritativeLinkObjectContactPairObservation> {
+        let Some(link) = self.robot_link_colliders.get(key) else {
+            return Vec::new();
+        };
+        let Some(object) = self.objects.get(object_id) else {
+            return Vec::new();
+        };
+        let link_handles = self
+            .world
+            .body(link.body)
+            .map(|body| body.colliders().to_vec())
+            .unwrap_or_default();
+        let object_handles = self
+            .world
+            .body(object.handle)
+            .map(|body| body.colliders().to_vec())
+            .unwrap_or_default();
+        self.world
+            .narrow_phase
+            .contact_pairs()
+            .filter_map(|pair| {
+                let first_is_link = link_handles.contains(&pair.collider1);
+                let second_is_link = link_handles.contains(&pair.collider2);
+                let first_is_object = object_handles.contains(&pair.collider1);
+                let second_is_object = object_handles.contains(&pair.collider2);
+                ((first_is_link && second_is_object) || (second_is_link && first_is_object))
+                    .then_some(())?;
+                let collider_id = |handle: ColliderHandle, is_link| {
+                    if is_link {
+                        Some(format!(
+                            "shadow:kinematic-link:{key}:part:{}",
+                            link_handles
+                                .iter()
+                                .position(|candidate| *candidate == handle)?
+                        ))
+                    } else {
+                        Some(format!(
+                            "shadow:scene-object:{object_id}:part:{}",
+                            object_handles
+                                .iter()
+                                .position(|candidate| *candidate == handle)?
+                        ))
+                    }
+                };
+                let collider_pose = |handle: ColliderHandle| {
+                    let pose = self.world.colliders[handle].position();
+                    let rotation = pose.rotation.quaternion();
+                    Some((
+                        [pose.translation.x, pose.translation.y, pose.translation.z],
+                        [rotation.i, rotation.j, rotation.k, rotation.w],
+                    ))
+                };
+                let manifolds = pair
+                    .manifolds
+                    .iter()
+                    .map(|manifold| AuthoritativeContactManifoldObservation {
+                        normal_world: [
+                            manifold.data.normal.x,
+                            manifold.data.normal.y,
+                            manifold.data.normal.z,
+                        ],
+                        geometric_distances_m: manifold
+                            .points
+                            .iter()
+                            .map(|point| point.dist)
+                            .collect(),
+                        solved_impulses_ns: manifold
+                            .points
+                            .iter()
+                            .map(|point| point.data.impulse)
+                            .collect(),
+                        solver_contact_distances_m: manifold
+                            .data
+                            .solver_contacts
+                            .iter()
+                            .map(|contact| contact.dist)
+                            .collect(),
+                        solver_frictions: manifold
+                            .data
+                            .solver_contacts
+                            .iter()
+                            .map(|contact| contact.friction)
+                            .collect(),
+                        solver_restitutions: manifold
+                            .data
+                            .solver_contacts
+                            .iter()
+                            .map(|contact| contact.restitution)
+                            .collect(),
+                    })
+                    .collect();
+                let impulse = pair.total_impulse();
+                Some(AuthoritativeLinkObjectContactPairObservation {
+                    collider1: collider_id(pair.collider1, first_is_link)?,
+                    collider2: collider_id(pair.collider2, second_is_link)?,
+                    collider1_pose: collider_pose(pair.collider1)?,
+                    collider2_pose: collider_pose(pair.collider2)?,
+                    has_any_active_contact: pair.has_any_active_contact,
+                    total_impulse_ns: [impulse.x, impulse.y, impulse.z],
+                    manifolds,
+                })
+            })
+            .collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn authoritative_vehicle_descriptor(
+        &self,
+        robot_id: &str,
+    ) -> Option<(
+        ProjectVehiclePhysicsConfig,
+        Vec<ProjectVehicleColliderConfig>,
+    )> {
+        let vehicle = self.vehicles.get(robot_id)?;
+        Some((vehicle.config.clone(), vehicle.colliders.clone()))
+    }
+
+    /// Test-only observation of the exact calibrated profile and the next
+    /// RobotDreams-owned force plan. This never queues a force or mutates the
+    /// direct solver.
+    #[cfg(test)]
+    pub(crate) fn authoritative_vehicle_force_plan(
+        &self,
+        robot_id: &str,
+        command: VehicleDriveCommand,
+        dt: f32,
+    ) -> Option<(ProjectVehiclePhysicsConfig, VehiclePhysicsForcePlan)> {
+        let vehicle = self.vehicles.get(robot_id)?;
+        let body = self.world.body(vehicle.handle)?;
+        let (_, _, yaw) = body.rotation().euler_angles();
+        Some((
+            vehicle.config.clone(),
+            plan_vehicle_forces(
+                &vehicle.config,
+                vehicle.steering_angle_rad,
+                command,
+                VehiclePhysicsKinematics {
+                    position: [
+                        body.translation().x,
+                        body.translation().y,
+                        body.translation().z,
+                    ],
+                    yaw,
+                    velocity_mps: [body.linvel().x, body.linvel().y, body.linvel().z],
+                    yaw_rate_rps: body.angvel().z,
+                    dt,
+                },
+            ),
+        ))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn authoritative_vehicle_contact_observations(
+        &self,
+        robot_id: &str,
+    ) -> Vec<AuthoritativeContactObservation> {
+        let Some(vehicle) = self.vehicles.get(robot_id) else {
+            return Vec::new();
+        };
+        let ids = self
+            .world
+            .colliders
+            .iter()
+            .enumerate()
+            .map(|(index, (handle, collider))| {
+                let id = if collider.parent() == Some(vehicle.handle) {
+                    format!("vehicle:{robot_id}:{index}")
+                } else {
+                    format!("scene:{index}")
+                };
+                (handle, id)
+            })
+            .collect::<std::collections::HashMap<_, _>>();
+        self.world
+            .narrow_phase
+            .contact_pairs()
+            .filter(|pair| pair.has_any_active_contact)
+            .filter_map(|pair| {
+                let first = ids.get(&pair.collider1)?.clone();
+                let second = ids.get(&pair.collider2)?.clone();
+                (first.starts_with("vehicle:") || second.starts_with("vehicle:")).then(|| {
+                    let (magnitude, normal) = pair.max_impulse();
+                    let point = pair
+                        .find_deepest_contact()
+                        .map(|(_, contact)| {
+                            self.world.colliders[pair.collider1].position() * contact.local_p1
+                        })
+                        .unwrap_or(Point::origin());
+                    AuthoritativeContactObservation {
+                        collider1: first,
+                        collider2: second,
+                        normal_world: [normal.x, normal.y, normal.z],
+                        impulse_ns: [
+                            normal.x * magnitude,
+                            normal.y * magnitude,
+                            normal.z * magnitude,
+                        ],
+                        point_world: [point.x, point.y, point.z],
+                    }
+                })
+            })
+            .collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn authoritative_vehicle_trace_sample(
+        &self,
+        robot_id: &str,
+        command: VehicleDriveCommand,
+        dt: f32,
+    ) -> Option<VehicleTraceSample> {
+        let vehicle = self.vehicles.get(robot_id)?;
+        let body = self.world.body(vehicle.handle)?;
+        let (_, _, yaw) = body.rotation().euler_angles();
+        let forward = Vector::new(yaw.cos(), yaw.sin(), 0.0);
+        let lateral = Vector::new(-yaw.sin(), yaw.cos(), 0.0);
+        let plan = plan_vehicle_forces(
+            &vehicle.config,
+            vehicle.steering_angle_rad,
+            command,
+            VehiclePhysicsKinematics {
+                position: [
+                    body.translation().x,
+                    body.translation().y,
+                    body.translation().z,
+                ],
+                yaw,
+                velocity_mps: [body.linvel().x, body.linvel().y, body.linvel().z],
+                yaw_rate_rps: body.angvel().z,
+                dt,
+            },
+        );
+        let lateral_force_n = plan
+            .forces
+            .iter()
+            .map(|force| match force {
+                VehiclePhysicsForceCommand::AtPoint { force_n, .. }
+                | VehiclePhysicsForceCommand::AtCenter { force_n } => {
+                    force_n[0] * -yaw.sin() + force_n[1] * yaw.cos()
+                }
+            })
+            .sum();
+        let lateral_speed_mps = body.linvel().dot(&lateral);
+        Some(VehicleTraceSample {
+            steering_angle_rad: vehicle.steering_angle_rad,
+            longitudinal_speed_mps: body.linvel().dot(&forward),
+            lateral_speed_mps,
+            steering_feedforward_force_n: lateral_force_n
+                + lateral_speed_mps * vehicle.config.lateral_grip_n_per_mps,
+            lateral_damping_force_n: -lateral_speed_mps * vehicle.config.lateral_grip_n_per_mps,
+            lateral_force_n,
+            yaw_rad: yaw,
+            yaw_rate_rps: body.angvel().z,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn authoritative_vehicle_mass_properties(
+        &self,
+        robot_id: &str,
+    ) -> Option<AuthoritativeObjectMassProperties> {
+        let vehicle = self.vehicles.get(robot_id)?;
+        let body = self.world.body(vehicle.handle)?;
+        let properties = body.mass_properties();
+        let local = &properties.local_mprops;
+        let inertia = local.reconstruct_inertia_matrix();
+        let effective = properties.effective_mass();
+        Some(AuthoritativeObjectMassProperties {
+            mass_kg: properties.mass(),
+            center_of_mass_m: [local.local_com.x, local.local_com.y, local.local_com.z],
+            inertia_tensor_kg_m2: [
+                [inertia[(0, 0)], inertia[(0, 1)], inertia[(0, 2)]],
+                [inertia[(1, 0)], inertia[(1, 1)], inertia[(1, 2)]],
+                [inertia[(2, 0)], inertia[(2, 1)], inertia[(2, 2)]],
+            ],
+            effective_translation_mass_kg: [effective.x, effective.y, effective.z],
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn authoritative_physics_trace_frame(
+        &self,
+        id: &str,
+    ) -> Option<AuthoritativePhysicsTraceFrame> {
+        let object = self.objects.get(id)?;
+        let body = self.world.body(object.handle)?;
+        let quaternion = body.rotation().quaternion();
+        let mut collider_ids = std::collections::HashMap::new();
+        for (object_id, object) in &self.objects {
+            for (index, (handle, _)) in self
+                .world
+                .colliders
+                .iter()
+                .filter(|(_, collider)| collider.parent() == Some(object.handle))
+                .enumerate()
+            {
+                collider_ids.insert(
+                    handle,
+                    format!("shadow:scene-object:{object_id}:part:{index}"),
+                );
+            }
+        }
+        let parts = self
+            .world
+            .colliders
+            .iter()
+            .filter(|(_, collider)| collider.parent() == Some(object.handle))
+            .enumerate()
+            .map(|(index, (_, collider))| {
+                let quaternion = collider.rotation().quaternion();
+                AuthoritativePhysicsTracePart {
+                    id: format!("shadow:scene-object:{id}:part:{index}"),
+                    position: [
+                        collider.translation().x,
+                        collider.translation().y,
+                        collider.translation().z,
+                    ],
+                    rotation_xyzw: [quaternion.i, quaternion.j, quaternion.k, quaternion.w],
+                }
+            })
+            .collect();
+        let mut contacts = self
+            .world
+            .narrow_phase
+            .contact_pairs()
+            .filter(|pair| pair.has_any_active_contact)
+            .filter_map(|pair| {
+                let first = collider_ids.get(&pair.collider1)?.clone();
+                let second = collider_ids.get(&pair.collider2)?.clone();
+                Some(if first <= second {
+                    (first, second)
+                } else {
+                    (second, first)
+                })
+            })
+            .collect::<Vec<_>>();
+        contacts.sort();
+        contacts.dedup();
+        Some(AuthoritativePhysicsTraceFrame {
+            position: [
+                body.translation().x,
+                body.translation().y,
+                body.translation().z,
+            ],
+            rotation_xyzw: [quaternion.i, quaternion.j, quaternion.k, quaternion.w],
+            linear_velocity_mps: [body.linvel().x, body.linvel().y, body.linvel().z],
+            angular_velocity_rps: [body.angvel().x, body.angvel().y, body.angvel().z],
+            parts,
+            contacts,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn authoritative_vehicle_trace_frame(
+        &self,
+        robot_id: &str,
+    ) -> Option<AuthoritativePhysicsTraceFrame> {
+        let vehicle = self.vehicles.get(robot_id)?;
+        let body = self.world.body(vehicle.handle)?;
+        let quaternion = body.rotation().quaternion();
+        let mut collider_ids = std::collections::HashMap::new();
+        for (object_id, object) in &self.objects {
+            for (index, (handle, _)) in self
+                .world
+                .colliders
+                .iter()
+                .filter(|(_, collider)| collider.parent() == Some(object.handle))
+                .enumerate()
+            {
+                collider_ids.insert(
+                    handle,
+                    format!("shadow:scene-object:{object_id}:part:{index}"),
+                );
+            }
+        }
+        for (id, vehicle) in &self.vehicles {
+            for (index, (handle, _)) in self
+                .world
+                .colliders
+                .iter()
+                .filter(|(_, collider)| collider.parent() == Some(vehicle.handle))
+                .enumerate()
+            {
+                collider_ids.insert(handle, format!("shadow:vehicle:{id}:part:{index}"));
+            }
+        }
+        let parts = self
+            .world
+            .colliders
+            .iter()
+            .filter(|(_, collider)| collider.parent() == Some(vehicle.handle))
+            .enumerate()
+            .map(|(index, (_, collider))| {
+                let quaternion = collider.rotation().quaternion();
+                AuthoritativePhysicsTracePart {
+                    id: format!("shadow:vehicle:{robot_id}:part:{index}"),
+                    position: [
+                        collider.translation().x,
+                        collider.translation().y,
+                        collider.translation().z,
+                    ],
+                    rotation_xyzw: [quaternion.i, quaternion.j, quaternion.k, quaternion.w],
+                }
+            })
+            .collect();
+        let mut contacts = self
+            .world
+            .narrow_phase
+            .contact_pairs()
+            .filter(|pair| pair.has_any_active_contact)
+            .filter_map(|pair| {
+                let first = collider_ids.get(&pair.collider1)?.clone();
+                let second = collider_ids.get(&pair.collider2)?.clone();
+                Some(if first <= second {
+                    (first, second)
+                } else {
+                    (second, first)
+                })
+            })
+            .collect::<Vec<_>>();
+        contacts.sort();
+        contacts.dedup();
+        Some(AuthoritativePhysicsTraceFrame {
+            position: [
+                body.translation().x,
+                body.translation().y,
+                body.translation().z,
+            ],
+            rotation_xyzw: [quaternion.i, quaternion.j, quaternion.k, quaternion.w],
+            linear_velocity_mps: [body.linvel().x, body.linvel().y, body.linvel().z],
+            angular_velocity_rps: [body.angvel().x, body.angvel().y, body.angvel().z],
+            parts,
+            contacts,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn authoritative_apply_torque_impulse(
+        &mut self,
+        id: &str,
+        impulse_nms: [f32; 3],
+    ) -> Option<[f32; 3]> {
+        let object = self.objects.get(id)?;
+        let body = self.world.body_mut(object.handle)?;
+        body.apply_torque_impulse(vec3(impulse_nms), true);
+        Some([body.angvel().x, body.angvel().y, body.angvel().z])
     }
 
     pub(crate) fn robot_link_collider_spawn_is_clear(
@@ -1289,77 +2183,91 @@ impl ScenePhysicsRuntime {
         let Some(vehicle) = self.vehicles.get_mut(robot_id) else {
             return;
         };
-        let response = vehicle.config.steering_response_deg_per_sec.to_radians() * dt;
-        let steering_error = command.steering_target_rad - vehicle.steering_angle_rad;
-        vehicle.steering_angle_rad += steering_error.clamp(-response, response);
         let Some(body) = self.world.body_mut(vehicle.handle) else {
             return;
         };
         let (_, _, yaw) = body.rotation().euler_angles();
-        let forward = Vector::new(yaw.cos(), yaw.sin(), 0.0);
-        let lateral = Vector::new(-yaw.sin(), yaw.cos(), 0.0);
-        let current_forward_speed = body.linvel().dot(&forward);
-        let current_lateral_speed = body.linvel().dot(&lateral);
-        let left_command = command.left_command.clamp(-1.0, 1.0);
-        let right_command = command.right_command.clamp(-1.0, 1.0);
-        let motor = &vehicle.config.motor;
-        let wheel_angular_speed = current_forward_speed / motor.wheel_radius_m;
-        let motor_angular_speed = wheel_angular_speed * motor.gear_ratio;
-        let no_load_rad_s = motor.no_load_rpm * std::f32::consts::TAU / 60.0;
-        let wheel_force = |command: f32| {
-            if command.abs() <= 1.0e-4 {
-                return 0.0;
+        let plan = plan_vehicle_forces(
+            &vehicle.config,
+            vehicle.steering_angle_rad,
+            command,
+            VehiclePhysicsKinematics {
+                position: [
+                    body.translation().x,
+                    body.translation().y,
+                    body.translation().z,
+                ],
+                yaw,
+                velocity_mps: [body.linvel().x, body.linvel().y, body.linvel().z],
+                yaw_rate_rps: body.angvel().z,
+                dt,
+            },
+        );
+        for force in &plan.forces {
+            match force {
+                VehiclePhysicsForceCommand::AtPoint {
+                    force_n,
+                    point_world_m,
+                } => {
+                    body.add_force_at_point(vec3(*force_n), Point::from(vec3(*point_world_m)), true)
+                }
+                VehiclePhysicsForceCommand::AtCenter { force_n } => {
+                    body.add_force(vec3(*force_n), true)
+                }
             }
-            let torque = motor.stall_torque_nm
-                * (command - motor_angular_speed / no_load_rad_s).clamp(-1.0, 1.0);
-            (torque * motor.gear_ratio / motor.wheel_radius_m).clamp(
-                -vehicle.config.max_drive_force_n,
-                vehicle.config.max_drive_force_n,
-            )
-        };
-        let left_force = wheel_force(left_command);
-        let right_force = wheel_force(right_command);
-        let origin = *body.translation();
-        let rear_offset = -vehicle.config.wheelbase_m * 0.5;
-        let half_track = vehicle.config.track_width_m * 0.5;
-        let rear_left = Point::from(origin + forward * rear_offset + lateral * half_track);
-        let rear_right = Point::from(origin + forward * rear_offset - lateral * half_track);
-        body.add_force_at_point(forward * left_force, rear_left, true);
-        body.add_force_at_point(forward * right_force, rear_right, true);
-
-        // The front axle supplies the required centripetal force for the
-        // measured steering angle; lateral velocity is dissipated as tire slip.
-        let max_surface_speed = (no_load_rad_s / motor.gear_ratio * motor.wheel_radius_m)
-            .min(vehicle.config.max_wheel_speed_mps);
-        let mean_speed = 0.5 * (left_command + right_command) * max_surface_speed;
-        let steering_force = vehicle.config.mass_kg
-            * mean_speed.abs()
-            * mean_speed
-            * vehicle.steering_angle_rad.tan()
-            / vehicle.config.wheelbase_m;
-        let lateral_force =
-            (steering_force - current_lateral_speed * vehicle.config.lateral_grip_n_per_mps).clamp(
-                -vehicle.config.max_drive_force_n * 2.0,
-                vehicle.config.max_drive_force_n * 2.0,
-            );
-        let front = Point::from(origin + forward * vehicle.config.wheelbase_m * 0.5);
-        body.add_force_at_point(lateral * lateral_force, front, true);
-        let braking = command.brake;
-        let resistance = if braking {
-            motor.brake_torque_nm * motor.gear_ratio / motor.wheel_radius_m
-        } else {
-            motor.rolling_resistance_n
-        };
-        if current_forward_speed.abs() > 1.0e-4 {
-            body.add_force(-forward * resistance * current_forward_speed.signum(), true);
         }
-        vehicle.actuator = VehicleActuatorState {
-            left_command,
-            right_command,
-            left_drive_force_n: left_force,
-            right_drive_force_n: right_force,
-            braking,
+        vehicle.steering_angle_rad = plan.steering_angle_rad;
+        vehicle.actuator = plan.actuator;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn drive_vehicle_two_axle_for_test(
+        &mut self,
+        robot_id: &str,
+        command: VehicleDriveCommand,
+        dt: f32,
+    ) {
+        if dt <= 0.0 {
+            return;
+        }
+        let Some(vehicle) = self.vehicles.get_mut(robot_id) else {
+            return;
         };
+        let Some(body) = self.world.body_mut(vehicle.handle) else {
+            return;
+        };
+        let (_, _, yaw) = body.rotation().euler_angles();
+        let plan = plan_two_axle_bicycle_forces(
+            &vehicle.config,
+            vehicle.steering_angle_rad,
+            command,
+            VehiclePhysicsKinematics {
+                position: [
+                    body.translation().x,
+                    body.translation().y,
+                    body.translation().z,
+                ],
+                yaw,
+                velocity_mps: [body.linvel().x, body.linvel().y, body.linvel().z],
+                yaw_rate_rps: body.angvel().z,
+                dt,
+            },
+        );
+        for force in &plan.forces {
+            match force {
+                VehiclePhysicsForceCommand::AtPoint {
+                    force_n,
+                    point_world_m,
+                } => {
+                    body.add_force_at_point(vec3(*force_n), Point::from(vec3(*point_world_m)), true)
+                }
+                VehiclePhysicsForceCommand::AtCenter { force_n } => {
+                    body.add_force(vec3(*force_n), true)
+                }
+            }
+        }
+        vehicle.steering_angle_rad = plan.steering_angle_rad;
+        vehicle.actuator = plan.actuator;
     }
 
     pub(crate) fn step(&mut self, dt: f32, clock_sec: f64) {
@@ -1417,49 +2325,32 @@ impl ScenePhysicsRuntime {
             let Some(object) = self.objects.get(&trigger.config.object_id) else {
                 continue;
             };
-            let inside = object.state.dynamic
-                && object.state.attachment.is_none()
-                && center_inside_box(
-                    object.state.position,
-                    trigger.config.position,
-                    trigger.config.size,
-                );
-            if inside && !trigger.state.inside {
-                trigger.state.entered = true;
-                trigger.state.entered_at_sec.get_or_insert(clock_sec);
-                trigger.state.entry_count += 1;
-            }
-            trigger.state.inside = inside;
-            if inside && speed(object.state.velocity_mps) <= trigger.config.settle_speed_mps {
-                trigger.state.settled_time_sec += dt;
-                if trigger.state.settled_time_sec >= trigger.config.settle_time_sec {
-                    trigger.state.settled = true;
-                    trigger.state.triggered = true;
-                    trigger.state.triggered_at_sec.get_or_insert(clock_sec);
-                }
-            } else {
-                trigger.state.settled_time_sec = 0.0;
-                trigger.state.settled = false;
-            }
+            apply_scene_trigger_rule(
+                &mut trigger.state,
+                &trigger.config,
+                &object.state,
+                dt,
+                clock_sec,
+            );
         }
     }
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::path::PathBuf;
 
     use pge_collision::{
         CollisionGenerationConfig, ReviewedProfileExportConfig, TriangleMesh,
         generate_collision_candidates,
     };
-    use pge_physics::rapier3d::na::Matrix3;
-    use pge_physics::rapier3d::prelude::{Real, Vector};
+    use rapier3d::na::Matrix3;
+    use rapier3d::prelude::{Real, Vector};
 
     use crate::project::{
         HardwareConfig, ProjectConfig, ProjectRobotConfig, ProjectRobotModelConfig,
-        ProjectRobotPhysicsConfig, ProjectSceneBodyKind, ProjectSceneColliderConfig,
-        ProjectSceneColliderChildConfig, ProjectSceneColliderGeometry, ProjectSceneConfig,
+        ProjectRobotPhysicsConfig, ProjectSceneBodyKind, ProjectSceneColliderChildConfig,
+        ProjectSceneColliderConfig, ProjectSceneColliderGeometry, ProjectSceneConfig,
         ProjectSceneObjectConfig, ProjectSceneObjectGeometry, ProjectSceneObjectPhysicsConfig,
         ProjectSceneTriggerConfig, ProjectVehicleMotorConfig, ProjectVehiclePhysicsConfig,
         RobotLinkCollider,
@@ -1558,7 +2449,7 @@ mod tests {
         project
     }
 
-    fn compound_bottle_project(rotation: [f32; 3]) -> ProjectConfig {
+    pub(crate) fn compound_bottle_project(rotation: [f32; 3]) -> ProjectConfig {
         let mut project = ball_bin_project();
         project.scene.triggers.clear();
         project.scene.objects[0].position = [0.0, 0.0, 0.0];
@@ -1634,15 +2525,21 @@ mod tests {
 
     #[test]
     fn compound_bottle_rests_upright_and_exports_all_physical_parts() {
-        let mut runtime =
-            ScenePhysicsRuntime::from_project(&compound_bottle_project([std::f32::consts::FRAC_PI_2, 0.0, 0.0]))
-                .expect("compound bottle project");
+        let mut runtime = ScenePhysicsRuntime::from_project(&compound_bottle_project([
+            std::f32::consts::FRAC_PI_2,
+            0.0,
+            0.0,
+        ]))
+        .expect("compound bottle project");
         for step in 1..=600 {
             runtime.step(1.0 / 120.0, f64::from(step) / 120.0);
         }
 
         let bottle = runtime.object_state("bottle").expect("bottle state");
-        assert!(bottle.position[2] > 0.115 && bottle.position[2] < 0.125, "{bottle:?}");
+        assert!(
+            bottle.position[2] > 0.115 && bottle.position[2] < 0.125,
+            "{bottle:?}"
+        );
         assert!(
             bottle
                 .velocity_mps
@@ -1658,8 +2555,14 @@ mod tests {
             .find(|entry| entry.id == "scene-object:bottle")
             .expect("bottle debug entry");
         assert_eq!(bottle_debug.parts.len(), 5);
-        assert_eq!(bottle_debug.parts[0].local_transform.translation, [0.0, -0.086, 0.0]);
-        assert_eq!(bottle_debug.parts[4].local_transform.translation, [0.0, 0.097, 0.0]);
+        assert_eq!(
+            bottle_debug.parts[0].local_transform.translation,
+            [0.0, -0.086, 0.0]
+        );
+        assert_eq!(
+            bottle_debug.parts[4].local_transform.translation,
+            [0.0, 0.097, 0.0]
+        );
     }
 
     #[test]
@@ -1670,7 +2573,10 @@ mod tests {
             0.0,
         ]))
         .expect("compound bottle project");
-        let initial = runtime.object_state("bottle").expect("initial bottle").clone();
+        let initial = runtime
+            .object_state("bottle")
+            .expect("initial bottle")
+            .clone();
         for step in 1..=1_800 {
             runtime.step(1.0 / 120.0, f64::from(step) / 120.0);
         }
@@ -1678,8 +2584,14 @@ mod tests {
         let bottle = runtime.object_state("bottle").expect("bottle state");
         let lateral_displacement = (bottle.position[0] - initial.position[0]).abs()
             + (bottle.position[1] - initial.position[1]).abs();
-        assert!(lateral_displacement > 0.01, "tipped bottle should roll: {bottle:?}");
-        assert!(bottle.position[2] > 0.11 && bottle.position[2] < 0.13, "{bottle:?}");
+        assert!(
+            lateral_displacement > 0.01,
+            "tipped bottle should roll: {bottle:?}"
+        );
+        assert!(
+            bottle.position[2] > 0.11 && bottle.position[2] < 0.13,
+            "{bottle:?}"
+        );
         assert!(
             bottle
                 .velocity_mps
@@ -1815,7 +2727,10 @@ mod tests {
             )
             .expect("attach compound bottle");
         runtime.detach("bottle").expect("release compound bottle");
-        let release_z = runtime.object_state("bottle").expect("release state").position[2];
+        let release_z = runtime
+            .object_state("bottle")
+            .expect("release state")
+            .position[2];
         runtime.step(0.02, 0.02);
         let released = runtime.object_state("bottle").expect("released state");
         assert!(released.position[2] < release_z, "{released:?}");

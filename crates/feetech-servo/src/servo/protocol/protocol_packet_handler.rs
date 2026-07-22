@@ -144,10 +144,10 @@ impl<P: PortHandler> ProtocolPacketHandler<P> {
         txpacket[PKT_HEADER1] = 0xFF;
 
         let mut checksum: u8 = 0;
-        for idx in 2..(total_packet_length - 1) {
-            checksum = checksum.wrapping_add(txpacket[idx]);
+        for byte in txpacket.iter().take(total_packet_length - 1).skip(2) {
+            checksum = checksum.wrapping_add(*byte);
         }
-        txpacket[total_packet_length - 1] = (!checksum) & 0xFF;
+        txpacket[total_packet_length - 1] = !checksum;
 
         self.port.clear_port();
         let written = self.port.write_port(&txpacket[..total_packet_length]);
@@ -223,10 +223,10 @@ impl<P: PortHandler> ProtocolPacketHandler<P> {
                     }
 
                     let mut checksum: u8 = 0;
-                    for i in 2..(wait_length - 1) {
-                        checksum = checksum.wrapping_add(rxpacket[i]);
+                    for byte in rxpacket.iter().take(wait_length - 1).skip(2) {
+                        checksum = checksum.wrapping_add(*byte);
                     }
-                    checksum = (!checksum) & 0xFF;
+                    checksum = !checksum;
 
                     result = if rxpacket[wait_length - 1] == checksum {
                         COMM_SUCCESS
@@ -278,12 +278,11 @@ impl<P: PortHandler> ProtocolPacketHandler<P> {
             }
         };
 
-        if rx_result == COMM_SUCCESS {
-            if let Some(ref packet) = rxpacket {
-                if packet.len() > PKT_ERROR {
-                    error = packet[PKT_ERROR];
-                }
-            }
+        if rx_result == COMM_SUCCESS
+            && let Some(ref packet) = rxpacket
+            && packet.len() > PKT_ERROR
+        {
+            error = packet[PKT_ERROR];
         }
 
         (rxpacket, rx_result, error)
@@ -381,13 +380,13 @@ impl<P: PortHandler> ProtocolPacketHandler<P> {
         txpacket[PKT_PARAMETER0 + 1] = length;
 
         let (rxpacket, result, mut error) = self.tx_rx_packet(&mut txpacket);
-        if result == COMM_SUCCESS {
-            if let Some(packet) = rxpacket {
-                error = packet[PKT_ERROR];
-                let end = PKT_PARAMETER0 + length as usize;
-                if packet.len() >= end {
-                    data.extend_from_slice(&packet[PKT_PARAMETER0..end]);
-                }
+        if result == COMM_SUCCESS
+            && let Some(packet) = rxpacket
+        {
+            error = packet[PKT_ERROR];
+            let end = PKT_PARAMETER0 + length as usize;
+            if packet.len() >= end {
+                data.extend_from_slice(&packet[PKT_PARAMETER0..end]);
             }
         }
 

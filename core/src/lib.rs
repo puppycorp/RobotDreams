@@ -9,7 +9,6 @@ use std::sync::{Mutex, OnceLock};
 #[cfg(unix)]
 use std::thread;
 
-use crate::physics::PhysicsWorld;
 use crate::project::{BusConfig, DeviceConfig, ProjectConfig, ProjectSceneColliderGeometry};
 use crate::scene_graph::{
     CameraProjection, CameraSpec, EntityId, EntityMetadata, Geometry, GeometryBounds,
@@ -24,22 +23,30 @@ use pge_renderer::{RenderRequest, RenderView, RgbaFrame};
 use pge_wgpu_renderer::WgpuRenderer;
 
 pub mod calibration;
-pub mod physics;
 pub mod project;
 pub mod scene_graph;
 pub mod scene_harness;
+#[cfg(test)]
 mod scene_physics;
+mod scene_physics_contract;
+#[cfg_attr(test, allow(dead_code))]
+mod scene_physics_pge;
+#[cfg(test)]
+mod scene_physics_shadow;
 pub mod urdf;
 
-pub use scene_physics::{
+use scene_physics_contract::LivePhysicsColliderDebugEntry;
+#[cfg(not(test))]
+use scene_physics_contract::VehicleDriveCommand;
+pub use scene_physics_contract::{
     AppliedCalibrationState, KinematicColliderMotionConfig, RobotLinkContact,
     SceneObjectAttachment, SceneObjectState, SceneTriggerState, VehiclePhysicsState,
 };
 
 pub use project::{
     FrameState, JointState, LinkState, ModelEntityKind, ResolvedFrameState, RigidTransform,
-    RobotDreamsEntity, RobotDreamsModel, RobotLinkCollider, RobotLinkColliderTransform,
-    RobotState, SceneLocation,
+    RobotDreamsEntity, RobotDreamsModel, RobotLinkCollider, RobotLinkColliderTransform, RobotState,
+    SceneLocation,
 };
 pub use scene_graph::{
     EnvironmentSettings, LightKind, LightSpec, ObservationMetadata, ObservationRequest,
@@ -100,7 +107,9 @@ pub struct CoordinateDebugMarkerPositions {
 }
 
 pub struct RobotDreams {
-    physics: PhysicsWorld,
+    #[cfg(not(test))]
+    scene_physics: scene_physics_pge::PgeScenePhysicsRuntime,
+    #[cfg(test)]
     scene_physics: scene_physics::ScenePhysicsRuntime,
     model: Option<RobotDreamsModel>,
     models: Vec<UrdfModel>,
@@ -621,7 +630,9 @@ fn dc_motor_command(hardware: &HardwareRuntime, robot_id: &str, wheel: &str) -> 
 impl RobotDreams {
     pub fn new() -> Self {
         Self {
-            physics: PhysicsWorld::new(),
+            #[cfg(not(test))]
+            scene_physics: scene_physics_pge::PgeScenePhysicsRuntime::empty(),
+            #[cfg(test)]
             scene_physics: scene_physics::ScenePhysicsRuntime::empty(),
             model: None,
             models: Vec::new(),
@@ -641,6 +652,15 @@ impl RobotDreams {
         let hardware = hardware_runtime_from_model(&model);
         let virtual_buses = virtual_buses_from_hardware(&hardware);
         let rover_drives = rover_drives_from_hardware(&hardware);
+        #[cfg(not(test))]
+        let mut scene_physics = model
+            .project()
+            .map(scene_physics_pge::PgeScenePhysicsRuntime::from_project)
+            .transpose()?
+            .unwrap_or_else(scene_physics_pge::PgeScenePhysicsRuntime::empty);
+        #[cfg(not(test))]
+        scene_physics.settle_initial_scene()?;
+        #[cfg(test)]
         let scene_physics = model
             .project()
             .map(scene_physics::ScenePhysicsRuntime::from_project)
@@ -661,7 +681,6 @@ impl RobotDreams {
     pub fn set_time_step(&mut self, dt: f32) {
         if dt > 0.0 {
             self.dt = dt;
-            self.physics.set_time_step(dt);
         }
     }
 
@@ -673,13 +692,13 @@ impl RobotDreams {
 
     pub fn named(&self, name: &str) -> Option<RobotDreamsEntity> {
         let mut entity = self.model.as_ref()?.named(name)?;
-        if entity.kind == ModelEntityKind::SceneObject {
-            if let Some(state) = self.scene_physics.object_state(&entity.id) {
-                entity.location = Some(SceneLocation {
-                    position: state.position.map(f64::from),
-                    rotation: Some(state.rotation.map(f64::from)),
-                });
-            }
+        if entity.kind == ModelEntityKind::SceneObject
+            && let Some(state) = self.scene_physics.object_state(&entity.id)
+        {
+            entity.location = Some(SceneLocation {
+                position: state.position.map(f64::from),
+                rotation: Some(state.rotation.map(f64::from)),
+            });
         }
         Some(entity)
     }
@@ -869,6 +888,11 @@ impl RobotDreams {
             })
             .collect::<Vec<_>>();
         for (object_id, position, rotation) in poses {
+            #[cfg(not(test))]
+            let _ = self
+                .scene_physics
+                .set_attached_pose(&object_id, position, rotation);
+            #[cfg(test)]
             self.scene_physics
                 .set_attached_pose(&object_id, position, rotation);
         }
@@ -893,7 +917,12 @@ impl RobotDreams {
                         .is_some_and(|shapes| shapes.contains(shape_index))
             })
             .map(|(_, collider)| collider)
-            .collect();
+            .collect::<Vec<_>>();
+        #[cfg(not(test))]
+        self.scene_physics
+            .sync_robot_link_colliders(&colliders)
+            .expect("PGE reviewed-link target is valid");
+        #[cfg(test)]
         self.scene_physics.sync_robot_link_colliders(colliders);
     }
 
@@ -1116,11 +1145,15 @@ impl RobotDreams {
         self.apply_virtual_bus_snapshots();
         self.integrate_rover_drives(f64::from(dt));
         self.sync_robot_link_colliders();
+        #[cfg(not(test))]
+        self.scene_physics
+            .step(dt, self.clock_sec)
+            .expect("PGE physics frame must accept RobotDreams timestep");
+        #[cfg(test)]
         self.scene_physics.step(dt, self.clock_sec);
         self.sync_vehicle_bases();
         self.sync_scene_object_attachments();
         self.set_time_step(dt);
-        self.physics.step();
     }
 
     pub fn advance_rover_drive_seconds(&mut self, dt: f32) {
@@ -1130,6 +1163,11 @@ impl RobotDreams {
         self.clock_sec += f64::from(dt);
         self.integrate_rover_drives(f64::from(dt));
         self.sync_robot_link_colliders();
+        #[cfg(not(test))]
+        self.scene_physics
+            .step(dt, self.clock_sec)
+            .expect("PGE physics frame must accept RobotDreams timestep");
+        #[cfg(test)]
         self.scene_physics.step(dt, self.clock_sec);
         self.sync_vehicle_bases();
         self.sync_scene_object_attachments();
@@ -1547,8 +1585,10 @@ impl RobotDreams {
                 f64_vec3_to_f32(robot.base.position),
                 f64_vec3_to_f32(base_rotation),
                 robot.frames.get("armBase"),
-                current_tcp.map(|location| f64_vec3_to_f32(location.position)),
-                target_tcp.map(|location| f64_vec3_to_f32(location.position)),
+                (
+                    current_tcp.map(|location| f64_vec3_to_f32(location.position)),
+                    target_tcp.map(|location| f64_vec3_to_f32(location.position)),
+                ),
                 options,
             );
         }
@@ -1770,6 +1810,13 @@ impl RobotDreams {
         updated
     }
 
+    /// Updates a virtual differential-drive output using the established
+    /// public argument list. Keep this wrapper source-compatible for daemon
+    /// integrations and downstream RobotDreams users.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the stable public RobotDreams API predates grouped drive inputs"
+    )]
     pub fn set_virtual_drive_output(
         &mut self,
         bus_id: &str,
@@ -1781,6 +1828,27 @@ impl RobotDreams {
         steering_angle_deg: f64,
         steering_center_deg: f64,
     ) -> bool {
+        self.set_virtual_drive_output_grouped(
+            bus_id,
+            robot_id,
+            [left_motor_id, right_motor_id],
+            [left_speed, right_speed],
+            steering_angle_deg,
+            steering_center_deg,
+        )
+    }
+
+    fn set_virtual_drive_output_grouped(
+        &mut self,
+        bus_id: &str,
+        robot_id: &str,
+        motor_ids: [u32; 2],
+        speeds: [i16; 2],
+        steering_angle_deg: f64,
+        steering_center_deg: f64,
+    ) -> bool {
+        let [left_motor_id, right_motor_id] = motor_ids;
+        let [left_speed, right_speed] = speeds;
         let Some(bus) = self.hardware.buses.iter_mut().find(|bus| bus.id == bus_id) else {
             return false;
         };
@@ -1844,14 +1912,6 @@ impl RobotDreams {
         self.model.as_ref()
     }
 
-    pub fn physics(&self) -> &PhysicsWorld {
-        &self.physics
-    }
-
-    pub fn physics_mut(&mut self) -> &mut PhysicsWorld {
-        &mut self.physics
-    }
-
     fn apply_virtual_bus_snapshots(&mut self) {
         let snapshots_by_bus = self
             .virtual_buses
@@ -1898,6 +1958,23 @@ impl RobotDreams {
                 else {
                     continue;
                 };
+                #[cfg(not(test))]
+                self.scene_physics
+                    .drive_vehicle(
+                        &drive.robot_id,
+                        VehicleDriveCommand {
+                            left_command,
+                            right_command,
+                            brake: false,
+                            steering_target_rad: (drive.steering_angle_deg
+                                - drive.steering_center_deg)
+                                .to_radians()
+                                as f32,
+                        },
+                        dt as f32,
+                    )
+                    .expect("PGE vehicle force command must target a live vehicle");
+                #[cfg(test)]
                 self.scene_physics.drive_vehicle(
                     &drive.robot_id,
                     scene_physics::VehicleDriveCommand {
@@ -1980,9 +2057,7 @@ pub fn world_state_from_scene_graph(graph: &SceneGraph) -> pge::WorldState {
     scene_graph_to_world_state(graph)
 }
 
-fn pge_wireframe_from_live_physics(
-    entry: scene_physics::LivePhysicsColliderDebugEntry,
-) -> pge::ColliderWireframe {
+fn pge_wireframe_from_live_physics(entry: LivePhysicsColliderDebugEntry) -> pge::ColliderWireframe {
     let mut wireframe = pge::ColliderWireframe::new(
         entry.id,
         entry.category,
@@ -2220,10 +2295,10 @@ fn append_robot_coordinate_debug_overlay(
     base_translation: [f32; 3],
     base_rotation: [f32; 3],
     arm_base: Option<&ResolvedFrameState>,
-    current_tcp: Option<[f32; 3]>,
-    target_tcp: Option<[f32; 3]>,
+    tcp_positions: (Option<[f32; 3]>, Option<[f32; 3]>),
     options: CoordinateDebugOverlayOptions,
 ) {
+    let (current_tcp, target_tcp) = tcp_positions;
     let prefix = format!("debug:{robot_id}:frame:base");
     let mut group = SceneNode::group(prefix.clone(), format!("{robot_id} Base Frame Debug"));
     group.transform = Transform::matrix(base_translation, rpy_matrix_f32(base_rotation));
@@ -2233,9 +2308,8 @@ fn append_robot_coordinate_debug_overlay(
     let step = options.grid_step_m.max(0.001);
     let line_thickness = options.line_thickness_m.max(0.001);
     let overlay_z = line_thickness * 2.0;
-    let mut grid_index = 0_u32;
     let steps = (half_extent / step).ceil() as i32;
-    for index in -steps..=steps {
+    for (grid_index, index) in (-steps..=steps).enumerate() {
         let offset = index as f32 * step;
         let is_axis = index == 0;
         let color = if is_axis {
@@ -2259,7 +2333,6 @@ fn append_robot_coordinate_debug_overlay(
             color,
             None,
         ));
-        grid_index += 1;
     }
 
     let axis_length = options.axis_length_m.max(0.01);
@@ -3400,6 +3473,7 @@ impl Default for RobotDreams {
 mod robotdreams_tests {
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use crate::scene_graph::{
         Geometry, LightKind, SceneNode, SceneNodeKind, ToneMapping, scene_bounds,
@@ -3408,8 +3482,11 @@ mod robotdreams_tests {
     use super::{
         CollisionDebugOverlayOptions, CoordinateDebugOverlayOptions, HardwareDeviceRuntime,
         ModelEntityKind, RobotDreams, RobotDreamsPgeFrameOptions, VirtualServoJointMapping,
-        f64_vec3_to_f32, robotdreams_pge_frame, virtual_servo_joint_position,
+        dc_motor_command, f64_vec3_to_f32, robotdreams_pge_frame, rpy_matrix_f32, scene_physics,
+        scene_physics_shadow::ScenePhysicsShadow, virtual_servo_joint_position,
     };
+
+    static PUPPYBOT_TRACE_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
 
     fn project_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -3424,6 +3501,62 @@ mod robotdreams_tests {
 
     fn puppybot_project_path() -> PathBuf {
         project_root().join("../PuppyBot/robotdreams/project.json")
+    }
+
+    fn puppybot_unobstructed_drive_project_path(name: &str) -> PathBuf {
+        let source_path = puppybot_project_path();
+        let puppybot_root = source_path
+            .parent()
+            .and_then(Path::parent)
+            .expect("PuppyBot project root");
+        let mut project: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&source_path).expect("read PuppyBot project"),
+        )
+        .expect("parse PuppyBot project");
+        project["modelProfile"] = serde_json::Value::String(
+            puppybot_root
+                .join("models/puppybot/robotdreams.json")
+                .display()
+                .to_string(),
+        );
+        project["robots"][0]["model"]["path"] = serde_json::Value::String(
+            puppybot_root
+                .join("models/puppybot/final2/urdf/final2.urdf")
+                .display()
+                .to_string(),
+        );
+        project["robots"][0]["physics"]["vehicle"]["collisionProfile"] = serde_json::Value::String(
+            source_path
+                .parent()
+                .expect("PuppyBot project directory")
+                .join("puppybot-physics-prototype.json")
+                .display()
+                .to_string(),
+        );
+        project["robots"][0]["physics"]["linkCollisionProfile"] = serde_json::Value::String(
+            source_path
+                .parent()
+                .expect("PuppyBot project directory")
+                .join("collision/final2-link-collision-profile.v1.json")
+                .display()
+                .to_string(),
+        );
+        let objects = project["scene"]["objects"]
+            .as_array_mut()
+            .expect("PuppyBot scene objects");
+        objects.retain(|object| {
+            !matches!(
+                object["id"].as_str(),
+                Some(
+                    "trashbin"
+                        | "trashbin_wall_front"
+                        | "trashbin_wall_back"
+                        | "trashbin_wall_left"
+                        | "trashbin_wall_right"
+                )
+            )
+        });
+        write_temp_project(name, project)
     }
 
     fn assert_pge_debug_transforms_match_overlay(dreams: &RobotDreams) {
@@ -4191,8 +4324,10 @@ mod robotdreams_tests {
             "a reviewed cylinder should render its two rims and four side lines"
         );
 
-        let mut frame_options = RobotDreamsPgeFrameOptions::default();
-        frame_options.debug_collision_overlay = true;
+        let frame_options = RobotDreamsPgeFrameOptions {
+            debug_collision_overlay: true,
+            ..Default::default()
+        };
         let frame = robotdreams_pge_frame(&dreams, frame_options);
         assert!(frame.world.collider_debug.enabled);
         assert!(
@@ -4237,7 +4372,9 @@ mod robotdreams_tests {
             "each reviewed shape must have exactly one live Rapier diagnostic"
         );
         assert!(live_links.iter().all(|wireframe| {
-            wireframe.id.starts_with("kinematic-link:puppyarm:part_1_4:")
+            wireframe
+                .id
+                .starts_with("kinematic-link:puppyarm:part_1_4:")
                 && wireframe.color == [1.0, 0.28, 0.78, 1.0]
         }));
         assert!(
@@ -4247,8 +4384,10 @@ mod robotdreams_tests {
                 .any(|wireframe| wireframe.category == "reviewedLinkProfile"),
             "an active Rapier link collider must replace, not duplicate, its reviewed profile"
         );
-        let mut live_frame_options = RobotDreamsPgeFrameOptions::default();
-        live_frame_options.debug_collision_overlay = true;
+        let live_frame_options = RobotDreamsPgeFrameOptions {
+            debug_collision_overlay: true,
+            ..Default::default()
+        };
         let live_frame = robotdreams_pge_frame(&dreams, live_frame_options);
         let rendered_live_links = live_frame
             .world
@@ -4257,10 +4396,16 @@ mod robotdreams_tests {
             .filter(|wireframe| wireframe.category == "kinematicRobotLinkCollider")
             .count();
         assert_eq!(rendered_live_links, 3);
-        assert!(live_frame.world.collider_wireframes().iter().all(|wireframe| {
-            wireframe.category != "reviewedLinkProfile"
-                && !wireframe.id.starts_with("pge.scene-collider:")
-        }));
+        assert!(
+            live_frame
+                .world
+                .collider_wireframes()
+                .iter()
+                .all(|wireframe| {
+                    wireframe.category != "reviewedLinkProfile"
+                        && !wireframe.id.starts_with("pge.scene-collider:")
+                })
+        );
 
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -4299,6 +4444,335 @@ mod robotdreams_tests {
                 .any(|id| id.starts_with("reviewed-link:puppybot:part_1_4:")),
             "a live Rapier shape must replace its reviewed-profile transform"
         );
+    }
+
+    #[test]
+    fn test_only_shadow_snapshot_drives_consistent_robotdreams_consumers_without_stale_state() {
+        const DT: f32 = 1.0 / 120.0;
+        const TOLERANCE: f32 = 0.002;
+        let mut dreams = RobotDreams::open(puppybot_project_path()).expect("open PuppyBot project");
+        let project = dreams
+            .model
+            .as_ref()
+            .and_then(|model| model.project())
+            .expect("PuppyBot project model")
+            .clone();
+        let mut shadow = ScenePhysicsShadow::from_project(&project).expect("build PGE shadow");
+        let link_name = "part_1_4";
+        assert!(
+            dreams
+                .enable_robot_link_collision_profiles("puppybot", &[link_name])
+                .expect("enable reviewed link")
+                > 0
+        );
+        let initial_yaw = dreams
+            .robot_state("puppybot")
+            .expect("PuppyBot robot state")
+            .joints["yaw"]
+            .position_rad;
+
+        let sync_shadow_link = |dreams: &RobotDreams, shadow: &mut ScenePhysicsShadow| {
+            let links = dreams
+                .model
+                .as_ref()
+                .expect("model remains loaded")
+                .robot_link_colliders()
+                .into_iter()
+                .filter(|link| link.robot_id == "puppybot" && link.link_name == link_name)
+                .collect::<Vec<_>>();
+            shadow
+                .sync_robot_link_colliders(&links)
+                .expect("map selected reviewed link into shadow");
+        };
+        sync_shadow_link(&dreams, &mut shadow);
+        dreams.clock_sec += f64::from(DT);
+        dreams.scene_physics.step(DT, dreams.clock_sec);
+        let initial_output = shadow.step_at(DT, dreams.snapshot().clock_sec).unwrap();
+        let key = "puppybot:part_1_4:0";
+        let link_body_id = shadow.link_body_id(key).expect("shadow link body");
+        let static_object_id = "floor_5m";
+        let static_object_body_id = shadow
+            .object_body_id(static_object_id)
+            .expect("shadow static object body");
+
+        let assert_pose_close = |label: &str, actual: [f32; 3], expected: [f32; 3]| {
+            for (actual, expected) in actual.into_iter().zip(expected) {
+                assert!(
+                    (actual - expected).abs() <= TOLERANCE,
+                    "{label}: actual={actual}, expected={expected}, tolerance={TOLERANCE}"
+                );
+            }
+        };
+        let assert_rotation_close = |label: &str, actual: [f32; 4], expected_rpy: [f32; 3]| {
+            let [x, y, z, w] = actual;
+            let actual = [
+                [
+                    1.0 - 2.0 * (y * y + z * z),
+                    2.0 * (x * y - z * w),
+                    2.0 * (x * z + y * w),
+                ],
+                [
+                    2.0 * (x * y + z * w),
+                    1.0 - 2.0 * (x * x + z * z),
+                    2.0 * (y * z - x * w),
+                ],
+                [
+                    2.0 * (x * z - y * w),
+                    2.0 * (y * z + x * w),
+                    1.0 - 2.0 * (x * x + y * y),
+                ],
+            ];
+            let expected = rpy_matrix_f32(expected_rpy);
+            for (actual, expected) in actual
+                .into_iter()
+                .flatten()
+                .zip(expected.into_iter().flatten())
+            {
+                assert!(
+                    (actual - expected).abs() <= TOLERANCE,
+                    "{label}: actual={actual}, expected={expected}, tolerance={TOLERANCE}"
+                );
+            }
+        };
+        let assert_consumers = |dreams: &RobotDreams,
+                                shadow_snapshot: &pge_physics::PhysicsSnapshot,
+                                compare_static_object: bool| {
+            let public = dreams.snapshot();
+            let shadow_link = shadow_snapshot
+                .bodies
+                .iter()
+                .find(|body| body.id == link_body_id)
+                .expect("solved shadow link");
+
+            let scene = dreams.scene_graph();
+            let world = dreams.world_state();
+            if compare_static_object {
+                let scene_object = public
+                    .scene_objects
+                    .iter()
+                    .find(|object| object.id == static_object_id)
+                    .expect("public static object state");
+                let shadow_object = shadow_snapshot
+                    .bodies
+                    .iter()
+                    .find(|body| body.id == static_object_body_id)
+                    .expect("solved shadow static object");
+                assert_pose_close(
+                    "shadow static object vs public snapshot",
+                    shadow_object.pose.translation,
+                    scene_object.position,
+                );
+                let scene_object_node =
+                    find_node_by_entity(&scene.root, &format!("object:{static_object_id}"))
+                        .expect("scene static object");
+                assert_pose_close(
+                    "scene graph static object vs shadow",
+                    scene_object_node.transform.translation,
+                    shadow_object.pose.translation,
+                );
+                let world_object = world
+                    .nodes
+                    .iter()
+                    .find_map(|(_, node)| {
+                        (node.entity.0 == format!("object:{static_object_id}")).then_some(node)
+                    })
+                    .expect("PGE world static object");
+                assert_pose_close(
+                    "PGE world static object vs shadow",
+                    world_object.transform.translation,
+                    shadow_object.pose.translation,
+                );
+            }
+
+            let overlay = dreams.pge_collider_debug_overlay();
+            if compare_static_object {
+                let shadow_object = shadow_snapshot
+                    .bodies
+                    .iter()
+                    .find(|body| body.id == static_object_body_id)
+                    .unwrap();
+                let object_wireframe = overlay
+                    .wireframes
+                    .iter()
+                    .find(|wireframe| wireframe.id == format!("scene-object:{static_object_id}"))
+                    .expect("live static-object debug wireframe");
+                assert_pose_close(
+                    "debug overlay static object vs shadow",
+                    object_wireframe.transform.translation,
+                    shadow_object.pose.translation,
+                );
+            }
+            let link_wireframe = overlay
+                .wireframes
+                .iter()
+                .find(|wireframe| wireframe.id == "kinematic-link:puppybot:part_1_4:0")
+                .expect("live link debug wireframe");
+            assert_pose_close(
+                "debug overlay reviewed link vs shadow",
+                link_wireframe.transform.translation,
+                shadow_link.pose.translation,
+            );
+            assert_rotation_close(
+                "debug overlay reviewed-link rotation vs shadow",
+                shadow_link.pose.rotation_xyzw,
+                link_wireframe.transform.rotation,
+            );
+            assert_eq!(
+                dreams.pge_collider_debug_transforms()["kinematic-link:puppybot:part_1_4:0"]
+                    .translation,
+                link_wireframe.transform.translation
+            );
+
+            let frame_options = RobotDreamsPgeFrameOptions {
+                debug_collision_overlay: true,
+                ..Default::default()
+            };
+            let frame = robotdreams_pge_frame(dreams, frame_options.clone());
+            assert_eq!(frame.request.resolution, frame_options.resolution);
+            assert_eq!(frame.request.camera_id, Some(frame.camera_entity.clone()));
+            if compare_static_object {
+                let shadow_object = shadow_snapshot
+                    .bodies
+                    .iter()
+                    .find(|body| body.id == static_object_body_id)
+                    .unwrap();
+                let rendered_object = frame
+                    .world
+                    .collider_wireframes()
+                    .into_iter()
+                    .find(|wireframe| wireframe.id == format!("scene-object:{static_object_id}"))
+                    .expect("render payload static-object wireframe");
+                assert_pose_close(
+                    "render payload static object vs shadow",
+                    rendered_object.transform.translation,
+                    shadow_object.pose.translation,
+                );
+            }
+            assert!(
+                frame
+                    .world
+                    .collider_wireframes()
+                    .iter()
+                    .any(|wireframe| wireframe.id == "kinematic-link:puppybot:part_1_4:0")
+            );
+
+            let robot = public
+                .robots
+                .iter()
+                .find(|robot| robot.id == "puppybot")
+                .unwrap();
+            let markers =
+                dreams.coordinate_debug_marker_positions(CoordinateDebugOverlayOptions::default());
+            let marker = markers
+                .iter()
+                .find(|marker| marker.robot_id == "puppybot")
+                .unwrap();
+            assert_eq!(marker.floor_z, robot.base.position[2] as f32 + 0.008);
+            let tcp = robot
+                .tcp
+                .as_ref()
+                .and_then(|tcp| tcp.location.as_ref())
+                .unwrap();
+            assert_eq!(marker.current_tcp, Some(f64_vec3_to_f32(tcp.position)));
+            let camera = dreams.camera_spec(&project.scene.cameras[0].id).unwrap();
+            let scene_camera = find_node_by_entity(
+                &scene.root,
+                &format!("camera:{}", project.scene.cameras[0].id),
+            )
+            .expect("scene camera");
+            let SceneNodeKind::Camera(scene_camera_spec) = &scene_camera.kind else {
+                panic!("camera entity must remain a camera consumer");
+            };
+            assert_eq!(scene_camera_spec.transform, camera.transform);
+            assert!(world.cameras.iter().any(|(_, entry)| {
+                entry.name.as_deref() == Some(camera.name.as_str())
+                    && entry.resolution == camera.resolution
+            }));
+        };
+
+        assert!(dreams.scene_object_robot_link_contacts("ball").is_empty());
+        assert!(initial_output.events.iter().all(|event| {
+            !event.collider1.0.starts_with("shadow:kinematic-link:")
+                && !event.collider2.0.starts_with("shadow:kinematic-link:")
+        }));
+        assert_consumers(&dreams, &initial_output.snapshot, true);
+
+        let initial_link_pose = initial_output
+            .snapshot
+            .bodies
+            .iter()
+            .find(|body| body.id == link_body_id)
+            .unwrap()
+            .pose;
+        dreams
+            .set_joint_angle("yaw", initial_yaw + 0.15)
+            .expect("move arm joint");
+        sync_shadow_link(&dreams, &mut shadow);
+        dreams.clock_sec += f64::from(DT);
+        dreams.scene_physics.step(DT, dreams.clock_sec);
+        let moved = shadow.step_at(DT, dreams.snapshot().clock_sec).unwrap();
+        let moved_link = moved
+            .snapshot
+            .bodies
+            .iter()
+            .find(|body| body.id == link_body_id)
+            .unwrap();
+        assert_ne!(
+            moved_link.pose, initial_link_pose,
+            "link move must refresh solved state"
+        );
+        assert_consumers(&dreams, &moved.snapshot, false);
+
+        dreams
+            .set_joint_angle("yaw", initial_yaw)
+            .expect("return arm joint");
+        for _ in 0..180 {
+            sync_shadow_link(&dreams, &mut shadow);
+            dreams.clock_sec += f64::from(DT);
+            dreams.scene_physics.step(DT, dreams.clock_sec);
+            shadow.step_at(DT, dreams.snapshot().clock_sec).unwrap();
+        }
+        let returned = shadow.snapshot();
+        let returned_link = returned
+            .bodies
+            .iter()
+            .find(|body| body.id == link_body_id)
+            .unwrap();
+        assert_pose_close(
+            "returned reviewed link vs initial shadow pose",
+            returned_link.pose.translation,
+            initial_link_pose.translation,
+        );
+        assert_consumers(&dreams, &returned, false);
+
+        shadow
+            .remove_link_for_consumer_gate(key)
+            .expect("test-only PGE link removal");
+        let removed = shadow.step(DT).unwrap();
+        assert!(
+            removed
+                .snapshot
+                .bodies
+                .iter()
+                .all(|body| body.id != link_body_id)
+        );
+        assert!(removed.snapshot.colliders.iter().all(|collider| {
+            collider.body_id != link_body_id
+                && !collider
+                    .id
+                    .0
+                    .starts_with("shadow:kinematic-link:puppybot:part_1_4")
+        }));
+        assert!(removed.events.iter().all(|event| {
+            !event
+                .collider1
+                .0
+                .starts_with("shadow:kinematic-link:puppybot:part_1_4")
+                && !event
+                    .collider2
+                    .0
+                    .starts_with("shadow:kinematic-link:puppybot:part_1_4")
+        }));
     }
 
     #[test]
@@ -4415,7 +4889,7 @@ mod robotdreams_tests {
                 "scene": {"objects": [{
                     "id":"bottle", "shape":"cylinder", "radius":0.03, "height":0.2,
                     "position":[0.1,0.2,0.1], "rotation":[0.0,0.0,0.0],
-                    "visualTransform":{"rotation":[0.0,1.5707963,0.0]},
+                    "visualTransform":{"rotation":[0.0,std::f32::consts::FRAC_PI_2,0.0]},
                     "physics":{"body":"dynamic", "collider":{"shape":"cylinder","radius":0.03,"height":0.2}}
                 }]}
             }),
@@ -4431,7 +4905,10 @@ mod robotdreams_tests {
             .find(|node| node.entity.0 == "object:bottle")
             .unwrap();
         assert_eq!(body.transform.rotation, [0.0; 3]);
-        assert_eq!(body.children[0].transform.rotation, [0.0, 1.5707963, 0.0]);
+        assert_eq!(
+            body.children[0].transform.rotation,
+            [0.0, std::f32::consts::FRAC_PI_2, 0.0]
+        );
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
@@ -4611,14 +5088,14 @@ mod robotdreams_tests {
             base_delta[0] < -0.01,
             "drive force did not move base: {base_delta:?}"
         );
-        for axis in 0..3 {
+        for (axis, value) in after_camera.iter().enumerate() {
             assert!(
                 (after_robot.base.position[axis] - f64::from(after_vehicle.position[axis])).abs()
                     < 2.0e-4,
                 "model base must equal solved Rapier pose"
             );
             assert!(
-                (f64::from(after_camera[axis])
+                (f64::from(*value)
                     - (f64::from(after_vehicle.position[axis])
                         + if axis == 2 { 0.65 } else { 0.0 }))
                 .abs()
@@ -4629,6 +5106,377 @@ mod robotdreams_tests {
         assert!(
             distance(before_tcp, after_tcp) > 0.01,
             "TCP must be recomputed from the solved base pose"
+        );
+    }
+
+    #[test]
+    fn virtual_drive_output_legacy_argument_list_remains_supported() {
+        let mut dreams = RobotDreams::open(puppybot_project_path()).unwrap();
+
+        // This is intentionally the pre-grouping public call shape used by
+        // daemon integrations and external RobotDreams clients.
+        assert!(dreams.set_virtual_drive_output(
+            "drive_bus",
+            "puppybot",
+            1,
+            2,
+            35,
+            -20,
+            70.0,
+            90.0,
+        ));
+        assert_eq!(
+            dc_motor_command(&dreams.hardware, "puppybot", "left"),
+            Some(0.35)
+        );
+        assert_eq!(
+            dc_motor_command(&dreams.hardware, "puppybot", "right"),
+            Some(-0.2)
+        );
+    }
+
+    #[test]
+    fn characterize_puppybot_dynamic_drive_contract_cases() {
+        for (label, left, right, steering) in [
+            ("forward", 50, 50, 90.0),
+            ("forward-positive-steer", 50, 50, 40.0),
+            ("reverse-positive-steer", -50, -50, 40.0),
+            ("stop", 0, 0, 90.0),
+        ] {
+            let mut dreams = RobotDreams::open(puppybot_project_path()).unwrap();
+            assert!(dreams.set_virtual_drive_output(
+                "drive_bus",
+                "puppybot",
+                1,
+                2,
+                left,
+                right,
+                steering,
+                90.0,
+            ));
+            let left_command = dc_motor_command(&dreams.hardware, "puppybot", "left").unwrap();
+            let right_command = dc_motor_command(&dreams.hardware, "puppybot", "right").unwrap();
+            let command = scene_physics::VehicleDriveCommand {
+                left_command,
+                right_command,
+                brake: false,
+                steering_target_rad: (steering - 90.0).to_radians() as f32,
+            };
+            let (config, plan) = dreams
+                .scene_physics
+                .authoritative_vehicle_force_plan("puppybot", command, 1.0 / 120.0)
+                .unwrap();
+            for _ in 0..50 {
+                dreams.advance_seconds(1.0 / 120.0);
+            }
+            let state = dreams.vehicle_physics_state("puppybot").unwrap();
+            let contacts = dreams
+                .scene_physics
+                .authoritative_vehicle_contact_observations("puppybot");
+            eprintln!(
+                "{label}: cmd=({left_command:.3},{right_command:.3}) steer={:.4} mass={} wheelbase={} force={:?} pose={:?} vel={:?} yaw={} contacts={contacts:?}",
+                command.steering_target_rad,
+                config.mass_kg,
+                config.wheelbase_m,
+                plan.forces,
+                state.position,
+                state.velocity_mps,
+                state.rotation[2]
+            );
+        }
+    }
+
+    #[test]
+    fn trace_unobstructed_reverse_positive_steer_vehicle_samples() {
+        let mut dreams = RobotDreams::open(puppybot_project_path()).unwrap();
+        assert!(dreams.set_virtual_drive_output(
+            "drive_bus",
+            "puppybot",
+            1,
+            2,
+            -50,
+            -50,
+            40.0,
+            90.0
+        ));
+        let command = scene_physics::VehicleDriveCommand {
+            left_command: dc_motor_command(&dreams.hardware, "puppybot", "left").unwrap(),
+            right_command: dc_motor_command(&dreams.hardware, "puppybot", "right").unwrap(),
+            brake: false,
+            steering_target_rad: (40.0f64 - 90.0).to_radians() as f32,
+        };
+        let mut samples = Vec::new();
+        for _ in 0..50 {
+            dreams.advance_seconds(1.0 / 120.0);
+            samples.push(
+                dreams
+                    .scene_physics
+                    .authoritative_vehicle_trace_sample("puppybot", command, 1.0 / 120.0)
+                    .unwrap(),
+            );
+        }
+        let peak = samples
+            .iter()
+            .max_by(|a, b| a.yaw_rate_rps.abs().total_cmp(&b.yaw_rate_rps.abs()))
+            .unwrap();
+        eprintln!(
+            "reverse trace first={:?} last={:?} peak_yaw_rate={:?}",
+            samples.first().unwrap(),
+            samples.last().unwrap(),
+            peak
+        );
+    }
+
+    fn puppybot_harness_cadence_yaw_trace(
+        label: &str,
+        motor_speed: i16,
+        steering_target_deg: f64,
+    ) -> scene_physics::VehicleTraceSample {
+        const HARNESS_DT_SECONDS: f32 = 0.02;
+        const COMMAND_CYCLES: usize = 50;
+
+        let sequence = PUPPYBOT_TRACE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let project_name = format!("puppybot-harness-{label}-cadence-{sequence}");
+        let project_path = puppybot_unobstructed_drive_project_path(&project_name);
+        let mut dreams = RobotDreams::open(&project_path).unwrap();
+        dreams.advance_seconds(3.0);
+        for _ in 0..COMMAND_CYCLES {
+            assert!(dreams.set_virtual_drive_output(
+                "drive_bus",
+                "puppybot",
+                1,
+                2,
+                motor_speed,
+                motor_speed,
+                steering_target_deg,
+                90.0,
+            ));
+            dreams.advance_seconds(HARNESS_DT_SECONDS);
+        }
+        dreams.advance_seconds(HARNESS_DT_SECONDS);
+        dreams
+            .scene_physics
+            .authoritative_vehicle_trace_sample(
+                "puppybot",
+                scene_physics::VehicleDriveCommand {
+                    left_command: dc_motor_command(&dreams.hardware, "puppybot", "left").unwrap(),
+                    right_command: dc_motor_command(&dreams.hardware, "puppybot", "right").unwrap(),
+                    brake: false,
+                    steering_target_rad: (steering_target_deg - 90.0).to_radians() as f32,
+                },
+                HARNESS_DT_SECONDS,
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn harness_cadence_forward_right_turns_negative_yaw() {
+        let sample = puppybot_harness_cadence_yaw_trace("forward-right", 50, 112.0);
+        assert!(sample.yaw_rad < -0.1, "{sample:?}");
+    }
+
+    #[test]
+    fn harness_cadence_reverse_right_turns_positive_yaw() {
+        let sample = puppybot_harness_cadence_yaw_trace("reverse-right", -50, 112.0);
+        assert!(sample.yaw_rad > 0.1, "{sample:?}");
+    }
+
+    #[test]
+    fn harness_cadence_forward_left_turns_positive_yaw() {
+        let sample = puppybot_harness_cadence_yaw_trace("forward-left", 50, 68.0);
+        assert!(sample.yaw_rad > 0.1, "{sample:?}");
+    }
+
+    #[test]
+    fn harness_cadence_reverse_left_turns_negative_yaw() {
+        let sample = puppybot_harness_cadence_yaw_trace("reverse-left", -50, 68.0);
+        assert!(sample.yaw_rad < -0.1, "{sample:?}");
+    }
+
+    #[test]
+    fn trace_puppybot_four_way_harness_cadence_force_decomposition() {
+        for (label, motor_speed, steering_target_deg) in [
+            ("forward-right", 50, 112.0),
+            ("reverse-right", -50, 112.0),
+            ("forward-left", 50, 68.0),
+            ("reverse-left", -50, 68.0),
+        ] {
+            let sample =
+                puppybot_harness_cadence_yaw_trace(label, motor_speed, steering_target_deg);
+            eprintln!(
+                "{label}: target_rad={:.6} current_rad={:.6} feedforward_n={:.6} lateral_damping_n={:.6} total_lateral_n={:.6} longitudinal_mps={:.6} lateral_mps={:.6} yaw_rad={:.6} yaw_rate_rps={:.6}",
+                (steering_target_deg - 90.0f64).to_radians(),
+                sample.steering_angle_rad,
+                sample.steering_feedforward_force_n,
+                sample.lateral_damping_force_n,
+                sample.lateral_force_n,
+                sample.longitudinal_speed_mps,
+                sample.lateral_speed_mps,
+                sample.yaw_rad,
+                sample.yaw_rate_rps,
+            );
+        }
+    }
+
+    #[test]
+    fn trace_puppybot_reverse_steer_harness_cadence() {
+        const HARNESS_DT_SECONDS: f32 = 0.02;
+        const COMMAND_CYCLES: usize = 50;
+        const STEERING_TARGET_DEG: f64 = 112.0;
+
+        let project_path =
+            puppybot_unobstructed_drive_project_path("puppybot-harness-reverse-unobstructed-drive");
+        let mut dreams = RobotDreams::open(&project_path).unwrap();
+        // The PuppyBot integration harness settles the initialized robot for
+        // three seconds before it begins its 20 ms command loop.
+        dreams.advance_seconds(3.0);
+
+        let mut samples = Vec::new();
+        for _ in 0..COMMAND_CYCLES {
+            assert!(dreams.set_virtual_drive_output(
+                "drive_bus",
+                "puppybot",
+                1,
+                2,
+                -50,
+                -50,
+                STEERING_TARGET_DEG,
+                90.0,
+            ));
+            dreams.advance_seconds(HARNESS_DT_SECONDS);
+            samples.push(
+                dreams
+                    .scene_physics
+                    .authoritative_vehicle_trace_sample(
+                        "puppybot",
+                        scene_physics::VehicleDriveCommand {
+                            left_command: dc_motor_command(&dreams.hardware, "puppybot", "left")
+                                .unwrap(),
+                            right_command: dc_motor_command(&dreams.hardware, "puppybot", "right")
+                                .unwrap(),
+                            brake: false,
+                            steering_target_rad: (STEERING_TARGET_DEG - 90.0).to_radians() as f32,
+                        },
+                        HARNESS_DT_SECONDS,
+                    )
+                    .unwrap(),
+            );
+        }
+        // `run_repeated_drive_command` has a trailing physics advance with
+        // the final drive output still held.
+        dreams.advance_seconds(HARNESS_DT_SECONDS);
+
+        let command = scene_physics::VehicleDriveCommand {
+            left_command: dc_motor_command(&dreams.hardware, "puppybot", "left").unwrap(),
+            right_command: dc_motor_command(&dreams.hardware, "puppybot", "right").unwrap(),
+            brake: false,
+            steering_target_rad: (STEERING_TARGET_DEG - 90.0).to_radians() as f32,
+        };
+        samples.push(
+            dreams
+                .scene_physics
+                .authoritative_vehicle_trace_sample("puppybot", command, HARNESS_DT_SECONDS)
+                .unwrap(),
+        );
+        let first = samples.first().unwrap();
+        let last = samples.last().unwrap();
+        let peak = samples
+            .iter()
+            .max_by(|left, right| left.yaw_rate_rps.abs().total_cmp(&right.yaw_rate_rps.abs()))
+            .unwrap();
+        let state = dreams.vehicle_physics_state("puppybot").unwrap();
+        let contacts = dreams
+            .scene_physics
+            .authoritative_vehicle_contact_observations("puppybot");
+        eprintln!(
+            "PuppyBot harness-equivalent reverse trace: commands={COMMAND_CYCLES} + held final, total_seconds={:.3}, advance_dt={HARNESS_DT_SECONDS}, rapier_substeps_per_advance=3, solver_dt={:.9}, steering_target_rad={:.6}, first={first:?}, last={last:?}, peak_yaw_rate={peak:?}, pose={:?}, contacts={contacts:?}",
+            HARNESS_DT_SECONDS * (COMMAND_CYCLES + 1) as f32,
+            HARNESS_DT_SECONDS / 3.0,
+            command.steering_target_rad,
+            state.position,
+        );
+        assert!(
+            last.yaw_rad > 0.0,
+            "reverse/right command must turn toward +yaw"
+        );
+    }
+
+    #[test]
+    fn trace_puppybot_forward_steer_harness_cadence() {
+        const HARNESS_DT_SECONDS: f32 = 0.02;
+        const COMMAND_CYCLES: usize = 50;
+        const STEERING_TARGET_DEG: f64 = 112.0;
+
+        let project_path =
+            puppybot_unobstructed_drive_project_path("puppybot-harness-forward-unobstructed-drive");
+        let mut dreams = RobotDreams::open(&project_path).unwrap();
+        dreams.advance_seconds(3.0);
+
+        let mut samples = Vec::new();
+        for _ in 0..COMMAND_CYCLES {
+            assert!(dreams.set_virtual_drive_output(
+                "drive_bus",
+                "puppybot",
+                1,
+                2,
+                50,
+                50,
+                STEERING_TARGET_DEG,
+                90.0,
+            ));
+            dreams.advance_seconds(HARNESS_DT_SECONDS);
+            samples.push(
+                dreams
+                    .scene_physics
+                    .authoritative_vehicle_trace_sample(
+                        "puppybot",
+                        scene_physics::VehicleDriveCommand {
+                            left_command: dc_motor_command(&dreams.hardware, "puppybot", "left")
+                                .unwrap(),
+                            right_command: dc_motor_command(&dreams.hardware, "puppybot", "right")
+                                .unwrap(),
+                            brake: false,
+                            steering_target_rad: (STEERING_TARGET_DEG - 90.0).to_radians() as f32,
+                        },
+                        HARNESS_DT_SECONDS,
+                    )
+                    .unwrap(),
+            );
+        }
+        dreams.advance_seconds(HARNESS_DT_SECONDS);
+
+        let command = scene_physics::VehicleDriveCommand {
+            left_command: dc_motor_command(&dreams.hardware, "puppybot", "left").unwrap(),
+            right_command: dc_motor_command(&dreams.hardware, "puppybot", "right").unwrap(),
+            brake: false,
+            steering_target_rad: (STEERING_TARGET_DEG - 90.0).to_radians() as f32,
+        };
+        samples.push(
+            dreams
+                .scene_physics
+                .authoritative_vehicle_trace_sample("puppybot", command, HARNESS_DT_SECONDS)
+                .unwrap(),
+        );
+        let first = samples.first().unwrap();
+        let last = samples.last().unwrap();
+        let peak = samples
+            .iter()
+            .max_by(|left, right| left.yaw_rate_rps.abs().total_cmp(&right.yaw_rate_rps.abs()))
+            .unwrap();
+        let state = dreams.vehicle_physics_state("puppybot").unwrap();
+        let contacts = dreams
+            .scene_physics
+            .authoritative_vehicle_contact_observations("puppybot");
+        eprintln!(
+            "PuppyBot harness-equivalent forward trace: commands={COMMAND_CYCLES} + held final, total_seconds={:.3}, advance_dt={HARNESS_DT_SECONDS}, rapier_substeps_per_advance=3, solver_dt={:.9}, steering_target_rad={:.6}, first={first:?}, last={last:?}, peak_yaw_rate={peak:?}, pose={:?}, contacts={contacts:?}",
+            HARNESS_DT_SECONDS * (COMMAND_CYCLES + 1) as f32,
+            HARNESS_DT_SECONDS / 3.0,
+            command.steering_target_rad,
+            state.position,
+        );
+        assert!(
+            last.yaw_rad < 0.0,
+            "forward/right command must turn toward -yaw"
         );
     }
 
@@ -4733,8 +5581,10 @@ mod robotdreams_tests {
                     && wireframe.category == "sceneStaticCollider"),
             "static Rapier colliders must be exported too"
         );
-        let mut frame_options = RobotDreamsPgeFrameOptions::default();
-        frame_options.debug_collision_overlay = true;
+        let frame_options = RobotDreamsPgeFrameOptions {
+            debug_collision_overlay: true,
+            ..Default::default()
+        };
         let frame = robotdreams_pge_frame(&dreams, frame_options);
         let rendered_ball_colliders = frame
             .world
@@ -4747,9 +5597,13 @@ mod robotdreams_tests {
             1,
             "the dynamic object must expose its live Rapier collider exactly once"
         );
-        assert!(frame.world.collider_wireframes().iter().all(|wireframe| {
-            !wireframe.id.starts_with("pge.scene-collider:")
-        }));
+        assert!(
+            frame
+                .world
+                .collider_wireframes()
+                .iter()
+                .all(|wireframe| { !wireframe.id.starts_with("pge.scene-collider:") })
+        );
 
         let _ = std::fs::remove_dir_all(project_path.parent().unwrap());
     }
@@ -4909,10 +5763,10 @@ fn run_virtual_servo_sim_loop(
     let mut last_step = std::time::Instant::now();
 
     loop {
-        if let Some(stop_flag) = &stop {
-            if stop_flag.load(Ordering::Relaxed) {
-                break;
-            }
+        if let Some(stop_flag) = &stop
+            && stop_flag.load(Ordering::Relaxed)
+        {
+            break;
         }
 
         let mut data = port.read_port(512);
