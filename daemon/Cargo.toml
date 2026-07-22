@@ -25,7 +25,7 @@ simple_logger = "5"
 tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "time"] }
 urdf-rs = "0.7"
 wgui = { workspace = true }
-pge-core = { git = "https://github.com/puppycorp/pge.git", rev = "b4c9863" }
-pge-app = { git = "https://github.com/puppycorp/pge.git", rev = "b4c9863" }
-pge-renderer = { git = "https://github.com/puppycorp/pge.git", rev = "b4c9863" }
-pge-wgpu-renderer = { git = "https://github.com/puppycorp/pge.git", rev = "b4c9863" }
+pge-core = { git = "https://github.com/puppycorp/pge.git", rev = "b4c98639d80aa02b3b4f335f56979f50544e34d2" }
+pge-app = { git = "https://github.com/puppycorp/pge.git", rev = "b4c98639d80aa02b3b4f335f56979f50544e34d2" }
+pge-renderer = { git = "https://github.com/puppycorp/pge.git", rev = "b4c98639d80aa02b3b4f335f56979f50544e34d2" }
+pge-wgpu-renderer = { git = "https://github.com/puppycorp/pge.git", rev = "b4c98639d80aa02b3b4f335f56979f50544e34d2" }

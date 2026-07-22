@@ -7,15 +7,15 @@ edition = "2024"
 libc = "0.2"
 feetech-servo = { path = "../crates/feetech-servo" }
 gltf = "1"
-pge-core = { git = "https://github.com/puppycorp/pge.git", rev = "b4c9863" }
-pge-physics = { git = "https://github.com/puppycorp/pge.git", rev = "b4c9863" }
-pge-renderer = { git = "https://github.com/puppycorp/pge.git", rev = "b4c9863" }
-pge-wgpu-renderer = { git = "https://github.com/puppycorp/pge.git", rev = "b4c9863" }
+pge-core = { git = "https://github.com/puppycorp/pge.git", rev = "b4c98639d80aa02b3b4f335f56979f50544e34d2" }
+pge-physics = { git = "https://github.com/puppycorp/pge.git", rev = "b4c98639d80aa02b3b4f335f56979f50544e34d2" }
+pge-renderer = { git = "https://github.com/puppycorp/pge.git", rev = "b4c98639d80aa02b3b4f335f56979f50544e34d2" }
+pge-wgpu-renderer = { git = "https://github.com/puppycorp/pge.git", rev = "b4c98639d80aa02b3b4f335f56979f50544e34d2" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 roxmltree = "0.20"
 urdf-rs = "0.7"
 
 [dev-dependencies]
-pge-collision = { git = "https://github.com/puppycorp/pge.git", rev = "b4c9863" }
+pge-collision = { git = "https://github.com/puppycorp/pge.git", rev = "b4c98639d80aa02b3b4f335f56979f50544e34d2" }
 rapier3d = { version = "0.23", default-features = false, features = ["dim3", "f32"] }
